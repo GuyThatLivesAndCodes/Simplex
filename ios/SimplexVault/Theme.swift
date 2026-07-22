@@ -1,23 +1,43 @@
 import SwiftUI
 
-/// Static proxy over the live `Appearance` model. Views keep referring to
-/// `SimplexTheme.accent` etc.; the values now follow the user's chosen accent/theme.
-/// (These read `Appearance.shared` on the main actor — all SwiftUI view bodies run
-/// there, which is where these are used.)
-@MainActor
+/// Static proxy over the live theme palette. Views refer to `SimplexTheme.accent` etc.;
+/// the values follow the user's chosen accent/theme.
+///
+/// These read a plain, non-isolated snapshot (`ThemeSnapshot.current`) rather than the
+/// `@MainActor` `Appearance` singleton, so they're callable from any context (view
+/// bodies, helper properties, global funcs) without actor-isolation friction. The
+/// snapshot is refreshed by `Appearance` whenever a pref changes.
 enum SimplexTheme {
-    static var bg: Color { Appearance.shared.bg }
-    static var surface: Color { Appearance.shared.surface }
-    static var surface2: Color { Appearance.shared.surface2 }
-    static var accent: Color { Appearance.shared.accent }
-    static var text: Color { Appearance.shared.text }
-    static var subtle: Color { Appearance.shared.subtle }
-    static var line: Color { Appearance.shared.line }
+    static var bg: Color { ThemeSnapshot.current.bg }
+    static var surface: Color { ThemeSnapshot.current.surface }
+    static var surface2: Color { ThemeSnapshot.current.surface2 }
+    static var accent: Color { ThemeSnapshot.current.accent }
+    static var text: Color { ThemeSnapshot.current.text }
+    static var subtle: Color { ThemeSnapshot.current.subtle }
+    static var line: Color { ThemeSnapshot.current.line }
 
     /// The monospace font used for metadata/labels (the reference look). `size` in pt.
     static func mono(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        .custom(Appearance.shared.monoFontName(), size: size).weight(weight)
+        .custom(ThemeSnapshot.current.monoFont, size: size).weight(weight)
     }
+}
+
+/// A value snapshot of the current palette, held in a plain global so the static
+/// `SimplexTheme` accessors don't need main-actor isolation. `Appearance.applySnapshot()`
+/// rewrites `current` on every change. (Written and read on the main thread in practice;
+/// the project builds in Swift 5 language mode, where this static var needs no extra
+/// concurrency annotation.)
+struct ThemeSnapshot {
+    var bg: Color; var surface: Color; var surface2: Color
+    var accent: Color; var text: Color; var subtle: Color; var line: Color
+    var monoFont: String
+
+    static let fallback = ThemeSnapshot(
+        bg: Color(hex: 0x221f1b), surface: Color(hex: 0x2b2823), surface2: Color(hex: 0x35312b),
+        accent: Color(hex: 0xe0a64a), text: Color(hex: 0xf2ede4), subtle: Color(hex: 0xa39c8e),
+        line: Color(hex: 0x3d382f), monoFont: "Menlo")
+
+    static var current = ThemeSnapshot.fallback
 }
 
 extension Color {
@@ -65,9 +85,8 @@ func typeBadge(for item: FileItem) -> String? {
 }
 
 /// A stable tint per file type, matching the colored icons in the reference design.
-/// (MainActor because it reads the live theme; always called from view bodies.)
-@MainActor
-func tint(for item: FileItem) -> Color {
+/// Named `typeTint` to avoid colliding with SwiftUI's `.tint()` view modifier.
+func typeTint(for item: FileItem) -> Color {
     switch item.kind {
     case .folder:   return SimplexTheme.accent
     case .image:    return Color(hex: 0x7ed957)   // green

@@ -29,6 +29,16 @@ final class Appearance: ObservableObject {
         uiFont    = UserDefaults.standard.string(forKey: "pref.uiFont") ?? "plex"
         monoFont  = UserDefaults.standard.string(forKey: "pref.monoFont") ?? "plexmono"
         defaultGrid = (UserDefaults.standard.object(forKey: "pref.grid") as? Bool) ?? true
+        applySnapshot()
+    }
+
+    /// Push the current palette into the nonisolated `ThemeSnapshot` that `SimplexTheme`
+    /// reads. Called on init and after any appearance change. objectWillChange also fires
+    /// (via @Published), so observing views re-render with the new snapshot.
+    func applySnapshot() {
+        ThemeSnapshot.current = ThemeSnapshot(
+            bg: bg, surface: surface, surface2: surface2, accent: accent,
+            text: text, subtle: subtle, line: line, monoFont: monoFontName())
     }
 
     /// Load appearance from the account's server-side prefs blob (on sign-in).
@@ -41,6 +51,7 @@ final class Appearance: ObservableObject {
         if let u = prefs["uiFont"]?.value as? String { uiFont = u }
         if let m = prefs["monoFont"]?.value as? String { monoFont = m }
         persistLocal()
+        applySnapshot()
     }
 
     /// The appearance keys as a prefs patch to PATCH back to the server.
@@ -62,6 +73,7 @@ final class Appearance: ObservableObject {
         d.set(uiFont, forKey: "pref.uiFont")
         d.set(monoFont, forKey: "pref.monoFont")
         d.set(defaultGrid, forKey: "pref.grid")
+        applySnapshot()
     }
 
     // ---- derived colors / fonts ----
@@ -133,8 +145,9 @@ final class Appearance: ObservableObject {
 }
 
 /// Minimal type-erased Codable value so we can read the server's freeform prefs blob
-/// without modeling every key.
-struct AnyCodable: Codable {
+/// without modeling every key. Hashable so the containing `Account` can be Hashable
+/// (equality/hash use a normalized string form of the underlying value).
+struct AnyCodable: Codable, Hashable {
     let value: Any
     init(_ value: Any) { self.value = value }
     init(from decoder: Decoder) throws {
@@ -156,6 +169,18 @@ struct AnyCodable: Codable {
         default: try c.encodeNil()
         }
     }
+    /// A stable string key for hashing/equality across the boxed primitive types.
+    private var key: String {
+        switch value {
+        case let b as Bool: return "b:\(b)"
+        case let i as Int: return "i:\(i)"
+        case let d as Double: return "d:\(d)"
+        case let s as String: return "s:\(s)"
+        default: return "null"
+        }
+    }
+    static func == (lhs: AnyCodable, rhs: AnyCodable) -> Bool { lhs.key == rhs.key }
+    func hash(into hasher: inout Hasher) { hasher.combine(key) }
 }
 
 extension Color {

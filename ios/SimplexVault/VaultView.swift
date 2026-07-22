@@ -183,7 +183,7 @@ struct FolderView: View {
                                     .font(SimplexTheme.mono(9, weight: .semibold))
                                     .foregroundStyle(.white)
                                     .padding(.horizontal, 5).padding(.vertical, 2)
-                                    .background(tint(for: item), in: RoundedRectangle(cornerRadius: 4))
+                                    .background(typeTint(for: item), in: RoundedRectangle(cornerRadius: 4))
                                 Spacer()
                             }; Spacer() }.padding(7)
                         }
