@@ -19,38 +19,50 @@ struct MediaGallery: View {
                 ForEach(Array(items.enumerated()), id: \.element.id) { i, item in
                     Group {
                         switch item.kind {
-                        case .image: FullImage(item: item)
-                        case .video: FullVideo(item: item, isCurrent: i == index)
-                        default:     Color.black
+                        case .image:
+                            // images: tap toggles the chrome (close/caption); zoom + pan gestures live inside
+                            FullImage(item: item)
+                                .contentShape(Rectangle())
+                                .onTapGesture { withAnimation { showChrome.toggle() } }
+                        case .video:
+                            // videos: the native player owns all touches so its transport
+                            // controls (play/pause, scrubber, speed, fullscreen) work. We
+                            // do NOT add a tap gesture here — that was swallowing taps meant
+                            // for the scrubber, leaving the video with no controls.
+                            FullVideo(item: item, isCurrent: i == index)
+                        default:
+                            Color.black
                         }
                     }
                     .tag(i)
-                    .onTapGesture { withAnimation { showChrome.toggle() } }
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
             .ignoresSafeArea()
 
-            if showChrome {
+            let isVideo = items.indices.contains(index) && items[index].kind == .video
+            // Top bar: always show a close button; AirPlay for videos. For videos we keep
+            // it always visible (there's no tap-to-toggle) but tucked into the safe area so
+            // it doesn't overlap the player's own top controls.
+            if showChrome || isVideo {
                 VStack {
                     HStack {
                         Button { dismiss() } label: {
                             Image(systemName: "xmark")
                                 .font(.title3.bold()).foregroundStyle(.white)
-                                .padding(10).background(.black.opacity(0.4), in: Circle())
+                                .padding(10).background(.black.opacity(0.45), in: Circle())
                         }
                         Spacer()
-                        // AirPlay route picker — cast the current video to a TV / AirPlay device
-                        if items.indices.contains(index), items[index].kind == .video {
+                        if isVideo {
                             RoutePickerButton()
                                 .frame(width: 44, height: 44)
-                                .background(.black.opacity(0.4), in: Circle())
+                                .background(.black.opacity(0.45), in: Circle())
                         }
                     }
                     .padding(.horizontal, 16).padding(.top, 8)
                     Spacer()
-                    // caption: name + position
-                    if items.indices.contains(index) {
+                    // caption only for images (a video's scrubber lives at the bottom)
+                    if showChrome && !isVideo && items.indices.contains(index) {
                         VStack(spacing: 2) {
                             Text(items[index].name).foregroundStyle(.white).font(.callout).lineLimit(1)
                             Text("\(index + 1) of \(items.count)").foregroundStyle(.white.opacity(0.7))
@@ -60,9 +72,14 @@ struct MediaGallery: View {
                     }
                 }
                 .transition(.opacity)
+                .allowsHitTesting(true)
             }
         }
-        .statusBarHidden(!showChrome)
+        .statusBarHidden(isVideoFullscreen ? false : !showChrome)
+    }
+
+    private var isVideoFullscreen: Bool {
+        items.indices.contains(index) && items[index].kind == .video
     }
 }
 
@@ -76,8 +93,7 @@ private struct FullImage: View {
     var body: some View {
         GeometryReader { _ in
             if let url = API.shared.rawURL(item) {
-                CachedAsyncImage(url: url) { ProgressView().tint(.white) }
-                    .scaledToFit()
+                CachedAsyncImage(url: url, fill: false) { ProgressView().tint(.white) }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .scaleEffect(scale)
                     .offset(offset)

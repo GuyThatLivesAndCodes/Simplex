@@ -98,7 +98,9 @@ actor API {
         }
         // The full account object rides the login response.
         struct LoginResp: Decodable { let account: Account }
-        return .success(try decode(LoginResp.self, from: data).account)
+        let acct = try decode(LoginResp.self, from: data).account
+        SessionStore.persistFromStorage()   // keep the session for future launches
+        return .success(acct)
     }
 
     /// Step 2: submit the TOTP code tied to the ticket from step 1.
@@ -106,7 +108,9 @@ actor API {
         let data = try await run(request("/api/login/2fa", method: "POST",
                                           json: ["tk": ticket, "code": code]))
         struct LoginResp: Decodable { let account: Account }
-        return try decode(LoginResp.self, from: data).account
+        let acct = try decode(LoginResp.self, from: data).account
+        SessionStore.persistFromStorage()
+        return acct
     }
 
     /// Best-effort session check on launch (a stored cookie may still be valid).

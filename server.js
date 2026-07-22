@@ -2989,9 +2989,16 @@ app.patch('/api/accounts/me', requireAuth, (req, res) => {
     // password at their next fresh sign-in. Flag it so the UI can nudge.
     markWrapStale(req.accountId);
   }
-  // appearance prefs (accent / theme / fonts) — small JSON blob, validated + size-capped
+  // appearance prefs (accent / theme / fonts) — small JSON blob, validated + size-capped.
+  // MERGE the incoming keys into the existing blob rather than replacing it, so a client
+  // that sends only a subset (e.g. the iOS app sending appearance keys) can't wipe other
+  // keys — notably the ToS markers (tosVersion/tosAcceptedAt) or web-only prefs. The web
+  // app sends the full PREFS object, so a merge is a no-op difference for it.
   if (b.prefs && typeof b.prefs === 'object' && !Array.isArray(b.prefs)) {
-    const json = JSON.stringify(b.prefs);
+    let existing = {};
+    try { existing = req.account.prefs ? JSON.parse(req.account.prefs) : {}; } catch (e) { existing = {}; }
+    const merged = { ...existing, ...b.prefs };
+    const json = JSON.stringify(merged);
     if (json.length <= 4000) { fields.push('prefs = @prefs'); vals.prefs = json; }
   }
   if (fields.length) { vals.id = req.accountId; sys.prepare(`UPDATE accounts SET ${buildSetClause('accounts', fields)} WHERE id = @id`).run(vals); bumpAccounts(); }

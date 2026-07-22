@@ -23,14 +23,25 @@ final class Store: ObservableObject {
 
     // MARK: - launch
 
-    /// Try to resume a stored session; otherwise show the login screen.
+    /// Try to resume a stored session; otherwise show the login screen. A durable
+    /// session (Keychain cookie) lets the user return with just Face ID — no password —
+    /// unless they signed out manually or their credentials/keys changed.
     func bootstrap() async {
+        // Re-inject any stored session cookie so the me() call is authenticated.
+        SessionStore.restoreToStorage()
         do {
             let me = try await API.shared.me()
             applyAccount(me)
             phase = .signedIn
             await refresh()
+        } catch let e as APIError where e.needsReauth {
+            // The stored session was rejected (server restart re-locked per-user keys,
+            // or credentials changed) — fall back to a full sign-in.
+            SessionStore.clear()
+            phase = .signedOut
         } catch {
+            // Transient network failure — go to login rather than clear the stored
+            // session, so retrying (or reconnecting) can resume without a password.
             phase = .signedOut
         }
     }
@@ -61,8 +72,11 @@ final class Store: ObservableObject {
         catch { handle(error); return false }
     }
 
+    /// MANUAL sign-out — this is the only path that forgets the durable session, so the
+    /// user must re-enter credentials next time (matches the requested behavior).
     func signOut() async {
         await API.shared.logout()
+        SessionStore.clear()
         account = nil
         files = []
         phase = .signedOut
@@ -214,6 +228,10 @@ final class Store: ObservableObject {
     /// else surfaces as a message.
     func handle(_ error: Error) {
         if let e = error as? APIError, e.needsReauth {
+            // Session rejected mid-use (credential change, or server restart re-locking
+            // per-user keys). Forget the durable session so the next launch asks for a
+            // password rather than looping on a dead cookie.
+            SessionStore.clear()
             account = nil
             files = []
             phase = .signedOut

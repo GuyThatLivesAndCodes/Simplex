@@ -97,8 +97,12 @@ struct AppearanceView: View {
     }
     private func saveNow() async {
         do {
+            // Persist only. Do NOT reload appearance from the response — the local state
+            // is authoritative (the user just set it), and reloading here raced with the
+            // debounce and made a fresh pick snap back to the previous value. We still
+            // capture the returned account for its other fields (quota, tos, …).
             let acct = try await API.shared.savePrefs(appr.prefsPatch)
-            store.applyAccount(acct)
+            store.account = acct
         } catch {
             // non-fatal: the local look is already applied; a failed sync just isn't persisted
         }

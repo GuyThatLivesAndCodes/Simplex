@@ -15,6 +15,7 @@ struct PrivacyScreen: ViewModifier {
     @State private var covered = false      // opaque cover visible (any non-active phase)
     @State private var locked = false       // requires auth to reveal
     @State private var authenticating = false
+    @State private var didArmLaunch = false // one-time launch lock
 
     func body(content: Content) -> some View {
         content
@@ -22,6 +23,18 @@ struct PrivacyScreen: ViewModifier {
                 if covered || locked {
                     coverView
                         .transition(.opacity)
+                }
+            }
+            .onAppear {
+                // On a fresh launch, if Face ID is enabled AND there's a durable session
+                // to resume, require Face ID before revealing the vault — the user gets
+                // in with a face scan instead of typing credentials.
+                if !didArmLaunch {
+                    didArmLaunch = true
+                    if appr.faceIDLock && SessionStore.hasStored {
+                        locked = true
+                        attemptUnlock()
+                    }
                 }
             }
             .onChange(of: scenePhase) { phase in
@@ -32,7 +45,7 @@ struct PrivacyScreen: ViewModifier {
                 case .inactive, .background:
                     // cover immediately; arm the lock so returning requires auth
                     covered = true
-                    if appr.faceIDLock { locked = true }
+                    if appr.faceIDLock && SessionStore.hasStored { locked = true }
                 @unknown default:
                     covered = true
                 }

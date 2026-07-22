@@ -20,6 +20,7 @@
 		D75D8F872ED48D7B7E88F82B /* Pickers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24348C3B25AF3DF46CA5B158 /* Pickers.swift */; };
 		D0AE18E546D9084444F1E02D /* PrivacyScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 802A01944C2D07F2F70941CE /* PrivacyScreen.swift */; };
 		35C63794E3EDF81463FB0FA1 /* RecentsSearchViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFB37096AD724B691E59E651 /* RecentsSearchViews.swift */; };
+		DB982D27577C067D73E6B59C /* SessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5AF7FEBA8C2788E9E96CCB2 /* SessionStore.swift */; };
 		6C99E404DEEFD8AA89E476F2 /* SimplexVaultApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9898A9295C967D74BE6322BD /* SimplexVaultApp.swift */; };
 		D7FCDAA751F5C6E177E3CF5F /* Store.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF44D22827B139C4B239341C /* Store.swift */; };
 		A74D0AEC5B22145C18B557DE /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = E95984C2429031F651BE7C6F /* Theme.swift */; };
@@ -45,6 +46,7 @@
 		24348C3B25AF3DF46CA5B158 /* Pickers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Pickers.swift; sourceTree = "<group>"; };
 		802A01944C2D07F2F70941CE /* PrivacyScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyScreen.swift; sourceTree = "<group>"; };
 		FFB37096AD724B691E59E651 /* RecentsSearchViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentsSearchViews.swift; sourceTree = "<group>"; };
+		B5AF7FEBA8C2788E9E96CCB2 /* SessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStore.swift; sourceTree = "<group>"; };
 		9898A9295C967D74BE6322BD /* SimplexVaultApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimplexVaultApp.swift; sourceTree = "<group>"; };
 		BF44D22827B139C4B239341C /* Store.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Store.swift; sourceTree = "<group>"; };
 		E95984C2429031F651BE7C6F /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
@@ -89,6 +91,7 @@
 				24348C3B25AF3DF46CA5B158 /* Pickers.swift */,
 				802A01944C2D07F2F70941CE /* PrivacyScreen.swift */,
 				FFB37096AD724B691E59E651 /* RecentsSearchViews.swift */,
+				B5AF7FEBA8C2788E9E96CCB2 /* SessionStore.swift */,
 				9898A9295C967D74BE6322BD /* SimplexVaultApp.swift */,
 				BF44D22827B139C4B239341C /* Store.swift */,
 				E95984C2429031F651BE7C6F /* Theme.swift */,
@@ -191,6 +194,7 @@
 				D75D8F872ED48D7B7E88F82B /* Pickers.swift in Sources */,
 				D0AE18E546D9084444F1E02D /* PrivacyScreen.swift in Sources */,
 				35C63794E3EDF81463FB0FA1 /* RecentsSearchViews.swift in Sources */,
+				DB982D27577C067D73E6B59C /* SessionStore.swift in Sources */,
 				6C99E404DEEFD8AA89E476F2 /* SimplexVaultApp.swift in Sources */,
 				D7FCDAA751F5C6E177E3CF5F /* Store.swift in Sources */,
 				A74D0AEC5B22145C18B557DE /* Theme.swift in Sources */,

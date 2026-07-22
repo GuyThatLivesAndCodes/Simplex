@@ -68,10 +68,9 @@ struct ZoomableImage: View {
     @State private var offset: CGSize = .zero
 
     var body: some View {
-        CachedAsyncImage(url: url) {
+        CachedAsyncImage(url: url, fill: false) {
             ProgressView().tint(SimplexTheme.accent)
         }
-        .scaledToFit()
         .scaleEffect(scale)
         .offset(offset)
         .gesture(

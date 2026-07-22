@@ -41,18 +41,36 @@ struct Thumbnail: View {
 /// gives us a cache and lets us reuse the app session's config explicitly.
 struct CachedAsyncImage<Placeholder: View>: View {
     let url: URL
+    /// When true (grid/list thumbnails) the image fills the box and overflow is clipped.
+    /// When false (the fullscreen viewer) it fits inside, preserving aspect ratio.
+    let fill: Bool
     @ViewBuilder let placeholder: () -> Placeholder
     @State private var image: UIImage?
 
+    /// Explicit init so `fill` can precede the trailing `placeholder` closure and
+    /// default to true (fill) for call sites that omit it.
+    init(url: URL, fill: Bool = true, @ViewBuilder placeholder: @escaping () -> Placeholder) {
+        self.url = url
+        self.fill = fill
+        self.placeholder = placeholder
+    }
+
     var body: some View {
-        Group {
-            if let image {
-                Image(uiImage: image).resizable().scaledToFill()
-            } else {
-                placeholder()
+        GeometryReader { geo in
+            Group {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: fill ? .fill : .fit)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                } else {
+                    placeholder()
+                        .frame(width: geo.size.width, height: geo.size.height)
+                }
             }
+            .frame(width: geo.size.width, height: geo.size.height)
+            .clipped()
         }
-        .clipped()
         .task(id: url) { await load() }
     }
 

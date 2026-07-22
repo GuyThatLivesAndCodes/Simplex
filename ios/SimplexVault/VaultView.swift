@@ -123,7 +123,7 @@ struct FolderView: View {
 
     private var grid: some View {
         ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 14)], spacing: 14) {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 14) {
                 ForEach(items) { item in
                     tile(item)
                 }
@@ -194,7 +194,7 @@ struct FolderView: View {
                         }; Spacer() }.padding(7)
                     }
                 }
-                .frame(height: 96)
+                .frame(height: 128)
                 .frame(maxWidth: .infinity)
 
                 Text(item.name)
