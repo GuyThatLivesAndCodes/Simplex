@@ -9,19 +9,31 @@ session.
 Only the **vault** is implemented (browse, view, upload, manage) — not Trading, Music,
 AI, Neural, Visual, etc.
 
-## What it does (v1)
+## What it does
 
 - **Sign in** with your Simplex username + password, including the **TOTP two-auth**
   step if your account has it enabled.
-- **Browse** folders (grid or list), with Starred and Trash views.
-- **View** files: images (pinch-zoom), video & audio (streamed with seek/scrubbing via
-  AVPlayer), and text/code/markdown documents.
+- **Bottom tab bar** — Files, Recents, Search, Account — styled to match the Simplex look
+  (monospace metadata, colored type badges, colored folder tiles).
+- **Browse** folders (grid or list). **Recents** lists files newest-first; **Search**
+  filters the whole vault by name with recent-search chips.
+- **View** files: text/code/markdown documents, and a **fullscreen media gallery** for
+  photos & videos — swipe left/right through every image/video in the same folder,
+  pinch-to-zoom photos, and an **AirPlay** button to cast a video to a TV.
+- **Convert** vault media/images to another format (e.g. **mp4 → mov**, wav → mp3,
+  png → jpg) — runs on the server (ffmpeg) and saves the result back into your vault,
+  with live progress. Right-click a file → **Convert…**.
 - **Upload** from the **Photos** library or the **Files** app. Big files use Simplex's
-  chunked upload protocol automatically (the same one the web app uses to stay under
-  Cloudflare's request-size cap).
+  chunked upload protocol automatically. The **first upload** shows the Terms of Service,
+  which you must accept before adding content.
 - **Manage**: new folder, rename, star/unstar, move between folders, move to Trash,
   restore, and delete-forever (from Trash).
 - **Save / Share** any file out to the iOS share sheet (save to Files, AirDrop, etc.).
+- **Privacy screen** — the vault is hidden whenever the app leaves focus (so it never
+  shows in the app switcher) and requires **Face ID / passcode** to reveal on return.
+  Toggle under Account → Security.
+- **Appearance** — pick accent color, theme, background ambience, fonts, and default
+  view; changes apply live and sync to your account, staying consistent with the web app.
 - **Server picker** (login screen → "Server", or Account → "Server") to point the app
   at a different Simplex URL without rebuilding.
 
@@ -87,17 +99,23 @@ xcodebuild -project SimplexVault.xcodeproj -scheme SimplexVault \
 ios/
   SimplexVault.xcodeproj/         hand-generated Xcode project + shared scheme
   SimplexVault/
-    SimplexVaultApp.swift         @main entry + root routing (loading/login/vault)
+    SimplexVaultApp.swift         @main entry + root routing + audio session
     Models.swift                  FileItem + Account decoders (tolerant of the API's loose JSON)
-    API.swift                     networking, session cookie, login/2FA, file CRUD, download
+    API.swift                     networking, session cookie, login/2FA, CRUD, convert, prefs, ToS
     Uploader.swift                single-shot + chunked upload
-    Store.swift                   app state (auth, file tree, mutations, uploads)
-    Theme.swift                   Simplex dark palette + shared bits
+    Store.swift                   app state (auth, file tree, mutations, uploads, ToS gate)
+    Theme.swift                   live palette proxy + type badges/tints + formatters
+    Appearance.swift              appearance model mirroring the web PREFS keys
+    AppearanceView.swift          in-app appearance settings (accent/theme/ambience/fonts)
     LoginView.swift               sign-in + 2FA + server picker
-    VaultView.swift               folder browser, toolbar, context actions
-    FileViewer.swift              image / video / audio / document viewers
+    VaultView.swift               tab bar shell + folder browser + context actions
+    RecentsSearchViews.swift      Recents + Search tabs
+    FileViewer.swift              document viewer (+ single image/video/audio fallback)
+    MediaGallery.swift            fullscreen swipe gallery + AirPlay route picker
+    ConvertSheet.swift            format-conversion UI (server ffmpeg)
+    PrivacyScreen.swift           blur-on-background + Face ID gate + ToS sheet
     Thumbnail.swift               cookie-authenticated image loader + cache
-    AccountView.swift             account, storage, Starred, Trash, sign out
+    AccountView.swift             account, storage breakdown, Face ID, Starred, Trash
     MovePicker.swift              move-to-folder picker + upload tray
     Pickers.swift                 Photos + Files pickers
     Assets.xcassets/              app icon (generated), accent + launch colors
