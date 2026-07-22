@@ -1,2 +1,13 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# iOS project files must stay LF: some YAML parsers and Xcode tooling are picky about
+# line endings, and these are only ever consumed on the macOS CI runner. The icon PNG
+# is binary and must never be line-ending-converted.
+*.swift          text eol=lf
+*.yml            text eol=lf
+*.yaml           text eol=lf
+*.pbxproj        text eol=lf
+*.xcscheme       text eol=lf
+*.plist          text eol=lf
+*.png            binary

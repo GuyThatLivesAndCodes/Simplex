@@ -1,0 +1,78 @@
+name: Build unsigned IPA
+
+# Builds the SimplexVault iOS app (in the repo subfolder `ios/`) on a free macOS
+# runner and uploads an UNSIGNED .ipa as a workflow artifact. Sideloadly (on your PC)
+# re-signs it with your Apple ID at install time, so no Apple certificate/provisioning
+# profile is needed here.
+#
+# This file lives at the repo ROOT (.github/workflows/) so GitHub actually runs it.
+# A copy is kept in ios/.github/workflows/ for when the app is pushed as its own repo.
+
+on:
+  push:
+    branches: [ main, master, ios-vault-app ]
+    paths:
+      - 'ios/**'
+      - '.github/workflows/ios.yml'
+  workflow_dispatch:   # lets you trigger a build by hand from the Actions tab
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -switch /Applications/Xcode.app
+
+      # Locate the project whether the repo root is the ios/ folder or contains it.
+      - name: Find project directory
+        id: proj
+        run: |
+          if [ -d "ios/SimplexVault.xcodeproj" ]; then
+            echo "dir=ios" >> "$GITHUB_OUTPUT"
+          elif [ -d "SimplexVault.xcodeproj" ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          else
+            echo "Could not find SimplexVault.xcodeproj" && exit 1
+          fi
+
+      # Archive without code signing. CODE_SIGNING_ALLOWED=NO is also set in the
+      # project, but we pass it here too so the archive step never tries to sign.
+      - name: Archive (unsigned)
+        working-directory: ${{ steps.proj.outputs.dir }}
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project SimplexVault.xcodeproj \
+            -scheme SimplexVault \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/SimplexVault.xcarchive" \
+            clean archive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+
+      # An .xcarchive contains SimplexVault.app under Products/Applications. Wrapping
+      # that .app in a Payload/ folder and zipping it *is* an .ipa — this is exactly
+      # what a signed export would contain, minus the signature. Sideloadly signs it.
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH="$RUNNER_TEMP/SimplexVault.xcarchive/Products/Applications/SimplexVault.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Build produced no .app at $APP_PATH" && ls -R "$RUNNER_TEMP/SimplexVault.xcarchive/Products" && exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          zip -qry SimplexVault-unsigned.ipa Payload
+          echo "Built:" && ls -lh SimplexVault-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimplexVault-unsigned-ipa
+          path: ${{ runner.temp }}/SimplexVault-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
