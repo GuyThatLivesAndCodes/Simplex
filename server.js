@@ -1023,6 +1023,10 @@ function acctToApi(a) {
     // (the wraps/salts themselves are NEVER exposed)
     keys_enrolled: !!a.key_enrolled,
     key_stale: !!a.key_wrap_stale,
+    // Terms of Service: current version + whether THIS account accepted it, so
+    // every client knows to raise the agreement before the next upload.
+    tos_version: tosVersion(),
+    tos_accepted: tosAccepted(a),
     prefs,
   };
 }
@@ -2054,6 +2058,93 @@ function requireAdmin(req, res, next) {
 }
 
 /* ============================================================
+   TERMS OF SERVICE — acceptance gate on uploads
+   ============================================================
+   A versioned agreement every account must accept before adding content to the
+   vault (the FIRST upload after the current version is published). Enforced
+   identically for the web app and the native iOS app: any write that brings NEW
+   bytes into a vault runs through `requireTos`, which 451s with { code:'TOS' }
+   until the account has accepted the current version. Acceptance is recorded in
+   the account's `prefs` blob (tosVersion + tosAcceptedAt) — the same store the
+   appearance prefs use — so it survives and is visible to every client.
+
+   The text + version default to the constants below but an admin can override
+   them at runtime via the `tos.text` / `tos.version` settings (bumping the
+   version forces everyone to re-accept). */
+const TOS_VERSION_DEFAULT = 1;
+const TOS_TEXT_DEFAULT = `Simplex — Terms of Service & Acceptable Use
+
+Last updated: 2026-07-22
+
+By uploading, storing, or otherwise adding any content to Simplex (the "Service"),
+you agree to these Terms. If you do not agree, do not upload content.
+
+1. NO ILLEGAL CONTENT. You may not upload, store, share, or transmit any content
+   that is illegal under any law that applies to you or to the operator of the
+   Service, or that you do not have the lawful right to possess and store. This
+   includes, without limitation: child sexual abuse material (CSAM); content that
+   infringes copyright, trademark, or other intellectual-property rights; stolen
+   data, credentials, or trade secrets; malware; content that violates export,
+   privacy, or data-protection laws; and content that facilitates violence,
+   terrorism, or other serious crimes.
+
+2. YOU ARE RESPONSIBLE AND LIABLE. You are solely responsible for everything you
+   upload and store. If illegal or prohibited content is found in your vault, you
+   are liable for it. The operator may remove such content, suspend or delete the
+   account, preserve relevant records, and report the matter to law enforcement or
+   other authorities as required or permitted by law. The Service is provided
+   "as is," without warranties, and to the maximum extent permitted by law the
+   operator is not liable for your content or for any loss of data.
+
+3. NO AUTHORITY TO POLICE PRIVATE DATA — BUT REMOVAL RIGHTS RESERVED. Vault data
+   is encrypted and private. The operator does not routinely inspect it, but
+   reserves the right to remove content and terminate access where it becomes
+   aware of a violation of these Terms or a legal obligation to act.
+
+4. CHANGES AT ANY TIME. These Terms, the Service, its features, pricing, storage
+   limits, and availability may be changed, suspended, or discontinued at any time,
+   with or without notice. When these Terms are updated, you will be asked to accept
+   the updated version before adding further content. Continued use after a change
+   constitutes acceptance.
+
+5. SECURITY & CONDUCT. You may not attempt to breach, overload, disrupt, probe, or
+   circumvent the security or access controls of the Service or of other accounts,
+   except under a separate written authorization. You may not use the Service to
+   harm others or to store content on behalf of anyone in violation of these Terms.
+
+6. ACCOUNT. Keep your credentials secure. You are responsible for activity under
+   your account. The operator may suspend or remove accounts that violate these
+   Terms.
+
+By tapping "I Agree," you confirm you have read, understood, and agree to these
+Terms of Service and Acceptable Use Policy, and that you are responsible and liable
+for the content you add to the Service.`;
+
+function tosVersion() {
+  const v = parseInt(getSetting('tos.version'), 10);
+  return Number.isFinite(v) && v > 0 ? v : TOS_VERSION_DEFAULT;
+}
+function tosText() {
+  const t = getSetting('tos.text');
+  return (typeof t === 'string' && t.trim()) ? t : TOS_TEXT_DEFAULT;
+}
+/* has this account accepted the CURRENT ToS version? reads the prefs blob. */
+function tosAccepted(account) {
+  if (!account) return false;
+  try {
+    const p = account.prefs ? JSON.parse(account.prefs) : null;
+    return !!p && Number(p.tosVersion) >= tosVersion();
+  } catch (e) { return false; }
+}
+/* middleware: block content-adding writes until the current ToS is accepted.
+   Runs AFTER requireAuth (so req.account is set). 451 = "Unavailable For Legal
+   Reasons" — the client shows the agreement and calls POST /api/tos/accept. */
+function requireTos(req, res, next) {
+  if (tosAccepted(req.account)) return next();
+  return res.status(451).json({ error: 'You must accept the Terms of Service before uploading.', code: 'TOS', version: tosVersion() });
+}
+
+/* ============================================================
    APP
    ============================================================ */
 const app = express();
@@ -2188,6 +2279,9 @@ function isPublicApi(req) {
   if (req.method === 'POST' && req.path === '/api/signup') return true;
   // Health probe: public + unauthenticated liveness check. Reveals no vault data.
   if (req.method === 'GET' && req.path === '/api/health') return true;
+  // Terms of Service text: public so the login/signup screens and the app can show
+  // the agreement before a session exists. Read-only; touches no vault data.
+  if (req.method === 'GET' && req.path === '/api/tos') return true;
   // Restart status: public so a locked / signed-out / just-loaded client can see
   // the "server restarting" state and detect when a fresh process is back up.
   if (req.method === 'GET' && req.path === '/api/restart-status') return true;
@@ -2199,10 +2293,23 @@ function isPublicApi(req) {
   if ((req.method === 'GET' || req.method === 'HEAD') && /^\/api\/shares\/[^/]+(?:\/files\/[^/]+\/(?:raw|cover))?\/?$/.test(req.path)) return true;
   return false;
 }
+/* Content-adding writes that must be gated behind ToS acceptance. These bring NEW
+   bytes into a vault (the exact thing the agreement covers). Reads, renames, moves,
+   trashes, and downloads are NOT gated — only genuine uploads/creations. The convert
+   endpoint self-gates (only its save/replace outputs add bytes). */
+function needsTos(req) {
+  if (req.method !== 'POST') return false;
+  return req.path === '/api/files'          // single-shot upload
+      || req.path === '/api/uploads/init'   // chunked upload start
+      || req.path === '/api/files/doc';     // new text document
+}
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api/')) return next();
   if (isPublicApi(req)) return next();
-  return requireAuth(req, res, next);
+  return requireAuth(req, res, () => {
+    if (needsTos(req)) return requireTos(req, res, next);
+    next();
+  });
 });
 
 /* ============================================================
@@ -2889,6 +2996,49 @@ app.patch('/api/accounts/me', requireAuth, (req, res) => {
   }
   if (fields.length) { vals.id = req.accountId; sys.prepare(`UPDATE accounts SET ${buildSetClause('accounts', fields)} WHERE id = @id`).run(vals); bumpAccounts(); }
   res.json({ ok: true, account: acctToApi(sysStmt.getAcct.get(req.accountId)) });
+});
+
+/* ============================================================
+   TERMS OF SERVICE endpoints
+   ============================================================ */
+/* Public: fetch the current agreement (version + text). No auth so the login /
+   signup screens and the app can show it before a session exists. */
+app.get('/api/tos', (req, res) => {
+  res.json({ version: tosVersion(), text: tosText() });
+});
+
+/* Auth: the signed-in account accepts the current version. Records
+   tosVersion + tosAcceptedAt into the prefs blob, preserving existing prefs. */
+app.post('/api/tos/accept', requireAuth, (req, res) => {
+  const acct = sysStmt.getAcct.get(req.accountId);
+  let prefs = {};
+  try { prefs = acct && acct.prefs ? JSON.parse(acct.prefs) : {}; } catch (e) { prefs = {}; }
+  prefs.tosVersion = tosVersion();
+  prefs.tosAcceptedAt = Date.now();
+  const json = JSON.stringify(prefs);
+  if (json.length <= 4000) {
+    sys.prepare('UPDATE accounts SET prefs = @prefs WHERE id = @id').run({ prefs: json, id: req.accountId });
+    bumpAccounts();
+  }
+  res.json({ ok: true, accepted: true, version: tosVersion(), account: acctToApi(sysStmt.getAcct.get(req.accountId)) });
+});
+
+/* Admin: read/update the ToS text + bump the version (bumping forces everyone to
+   re-accept before their next upload). */
+app.get('/api/admin/tos', requireAdmin, (req, res) => {
+  res.json({ version: tosVersion(), text: tosText(), isDefault: !getSetting('tos.text') });
+});
+app.patch('/api/admin/tos', requireAdmin, (req, res) => {
+  const b = req.body || {};
+  if (typeof b.text === 'string' && b.text.trim().length >= 20 && b.text.length <= 20000) {
+    setSetting('tos.text', b.text);
+  }
+  if (b.bump === true) {
+    setSetting('tos.version', String(tosVersion() + 1));
+  } else if (Number.isFinite(parseInt(b.version, 10)) && parseInt(b.version, 10) > 0) {
+    setSetting('tos.version', String(parseInt(b.version, 10)));
+  }
+  res.json({ ok: true, version: tosVersion(), text: tosText() });
 });
 
 /* ============================================================
@@ -8051,6 +8201,11 @@ app.post('/api/tools/convert', async (req, res) => {
     const format = String(b.format || spec.targets[0]).toLowerCase();
     if (!spec.targets.includes(format)) return res.status(400).json({ error: 'unsupported output format' });
     const output = ['download', 'save', 'replace'].includes(b.output) ? b.output : 'download';
+    // save/replace add (or rewrite) bytes in the vault, so they're gated behind ToS
+    // acceptance just like a direct upload. A plain download is not.
+    if ((output === 'save' || output === 'replace') && !tosAccepted(req.account)) {
+      return res.status(451).json({ error: 'You must accept the Terms of Service before saving to your vault.', code: 'TOS', version: tosVersion() });
+    }
 
     const store = req.store;
     const row = store.getById(String(b.fileId || ''));

@@ -130,6 +130,11 @@ struct Account: Codable, Hashable {
     var display: String?
     var quota_bytes: Int?
     var is_admin: Bool?
+    // Terms of Service state, so the app knows whether to prompt before an upload.
+    var tos_accepted: Bool?
+    var tos_version: Int?
+    // The freeform appearance/prefs blob (accent/theme/bgFx/fonts + tos markers).
+    var prefs: [String: AnyCodable]?
 }
 
 /// Login can complete in one step, or bounce to a TOTP code step.

@@ -7674,7 +7674,80 @@ function relPathOf(file) {
   return rp && rp.includes('/') ? rp : '';
 }
 
+/* ============================================================
+   TERMS OF SERVICE — acceptance gate before the first upload
+   ============================================================
+   Returns true if the account has already accepted the current ToS version, or
+   the user accepts it now; false if they decline (caller abandons the upload).
+   The server enforces this independently (451 { code:'TOS' }); this is the UX. */
+async function ensureTosAccepted() {
+  if (ACCOUNT && ACCOUNT.tos_accepted) return true;
+  let tos;
+  try { tos = await getTos(); }
+  catch (e) { toast('Could not load the Terms of Service — try again', 'close'); return false; }
+  const agreed = await tosModal(tos.text);
+  if (!agreed) return false;
+  try {
+    const r = await acceptTos();
+    if (r && r.account) { ACCOUNT = r.account; if (typeof refreshAccountChips === 'function') refreshAccountChips(); }
+    else if (ACCOUNT) ACCOUNT.tos_accepted = true;
+    return true;
+  } catch (e) {
+    toast('Could not record your acceptance — try again', 'close');
+    return false;
+  }
+}
+
+/* The agreement dialog. Resolves true on "I Agree", false on decline/backdrop/Esc.
+   The Agree button is disabled until the user scrolls the terms to the end, so the
+   acceptance is meaningful. */
+function tosModal(text) {
+  return new Promise(resolve => {
+    const bg = document.createElement('div'); bg.className = 'modal-bg';
+    bg.innerHTML = `<div class="modal tos-modal" role="dialog" aria-modal="true" aria-label="Terms of Service">
+      <h3>Terms of Service &amp; Safety Notice</h3>
+      <p class="tos-lead">Before adding content to your vault, please read and agree to the terms below. This applies to every upload, whether from your phone or your computer.</p>
+      <div class="tos-body mono" id="tosBody" tabindex="0"></div>
+      <label class="tos-check"><input type="checkbox" id="tosAck" /> <span>I have read and agree to the Terms of Service, and I understand I am responsible and liable for the content I upload.</span></label>
+      <div class="acts">
+        <button class="btn ghost" data-cancel>Not now</button>
+        <button class="btn primary" data-ok disabled>I Agree</button>
+      </div>
+    </div>`;
+    document.body.appendChild(bg);
+    const body = bg.querySelector('#tosBody');
+    body.textContent = text || '';
+    const ack = bg.querySelector('#tosAck');
+    const okBtn = bg.querySelector('[data-ok]');
+    let scrolledEnd = false;
+    // enable Agree only once they've scrolled to the bottom AND ticked the box
+    const sync = () => { okBtn.disabled = !(scrolledEnd && ack.checked); };
+    const checkScroll = () => {
+      if (body.scrollTop + body.clientHeight >= body.scrollHeight - 8) { scrolledEnd = true; sync(); }
+    };
+    // if the terms are short enough not to scroll, count as read immediately
+    if (body.scrollHeight <= body.clientHeight + 8) scrolledEnd = true;
+    body.addEventListener('scroll', checkScroll);
+    ack.addEventListener('change', sync);
+    sync();
+    const done = (v) => { bg.remove(); resolve(v); };
+    bg.querySelector('[data-cancel]').onclick = () => done(false);
+    okBtn.onclick = () => { if (!okBtn.disabled) done(true); };
+    bg.onclick = e => { if (e.target === bg) done(false); };
+    document.addEventListener('keydown', function esc(e) {
+      if (e.key === 'Escape') { document.removeEventListener('keydown', esc); done(false); }
+    });
+  });
+}
+
 async function handleFiles(fileList) {
+  // Legal gate: the FIRST upload after the current Terms of Service version must be
+  // preceded by acceptance. Show the agreement and only proceed once accepted; if
+  // the user declines, the upload is abandoned (they can re-trigger it after).
+  if (typeof ensureTosAccepted === 'function') {
+    const ok = await ensureTosAccepted();
+    if (!ok) return;
+  }
   const baseParent = state.view === 'browse' ? state.folder : null;
   const files = [...fileList];
   let added = 0, limitHit = false, foldersMade = 0;

@@ -892,6 +892,13 @@ button svg { pointer-events: none; }
 .modal textarea { min-height: 60px; resize: vertical; }
 .modal .acts { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; }
 .lock-modal { width: min(420px, 94vw); }
+/* Terms of Service agreement dialog — a scrollable terms body + an acknowledgment. */
+.tos-modal { width: min(560px, 96vw); }
+.tos-modal .tos-lead { font-size: 12.5px; color: var(--ink-faint); margin-bottom: 12px; }
+.tos-body { max-height: min(46vh, 420px); overflow-y: auto; white-space: pre-wrap; font-size: 12px; line-height: 1.55; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 14px 16px; }
+.tos-check { display: flex; gap: 9px; align-items: flex-start; margin-top: 14px; font-size: 12.5px; color: var(--ink); cursor: pointer; }
+.tos-check input { width: auto; margin-top: 2px; flex: 0 0 auto; accent-color: var(--acc); }
+.tos-modal .acts { margin-top: 16px; }
 /* upload failure ("Uh oh!") — carries more text than a prompt, and is most often
    read on a phone, so it follows .lock-modal's fluid width instead of the fixed 380px */
 .upload-err-modal { width: min(420px, 94vw); }

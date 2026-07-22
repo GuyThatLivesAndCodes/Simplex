@@ -16,6 +16,7 @@ final class Store: ObservableObject {
     @Published private(set) var files: [FileItem] = []
     @Published var isRefreshing = false
     @Published var lastError: String?
+    @Published var showServer = false
 
     /// Active upload tasks (shown in a small tray while running).
     @Published var uploads: [UploadTask] = []
@@ -26,7 +27,7 @@ final class Store: ObservableObject {
     func bootstrap() async {
         do {
             let me = try await API.shared.me()
-            account = me
+            applyAccount(me)
             phase = .signedIn
             await refresh()
         } catch {
@@ -37,9 +38,27 @@ final class Store: ObservableObject {
     // MARK: - auth
 
     func completeSignIn(_ acct: Account) async {
-        account = acct
+        applyAccount(acct)
         phase = .signedIn
         await refresh()
+    }
+
+    /// Store the account and push its appearance prefs into the live theme.
+    func applyAccount(_ acct: Account) {
+        account = acct
+        Appearance.shared.load(from: acct.prefs)
+    }
+
+    /// Has the account accepted the current ToS version?
+    var tosAccepted: Bool {
+        guard let a = account else { return false }
+        return a.tos_accepted == true
+    }
+
+    /// Record ToS acceptance (called by the agreement sheet). Returns success.
+    func acceptTos() async -> Bool {
+        do { applyAccount(try await API.shared.acceptTos()); return true }
+        catch { handle(error); return false }
     }
 
     func signOut() async {
@@ -134,8 +153,40 @@ final class Store: ObservableObject {
 
     // MARK: - upload
 
-    /// Kick off an upload of a local file; tracks it in `uploads` with progress.
+    // A pending upload held back until the ToS is accepted, plus the flag the UI
+    // observes to present the agreement sheet.
+    struct PendingUpload { let fileURL: URL; let filename: String; let type: String?; let parent: String? }
+    @Published var showTosSheet = false
+    private var pendingUploads: [PendingUpload] = []
+
+    /// Kick off an upload — but if the ToS hasn't been accepted, hold it and raise the
+    /// agreement first (the server would 451 it anyway; this is the good UX path).
     func startUpload(fileURL: URL, filename: String, type: String?, parent: String?) {
+        if !tosAccepted {
+            pendingUploads.append(PendingUpload(fileURL: fileURL, filename: filename, type: type, parent: parent))
+            showTosSheet = true
+            return
+        }
+        beginUpload(fileURL: fileURL, filename: filename, type: type, parent: parent)
+    }
+
+    /// Called after the ToS sheet resolves. On accept, flush queued uploads; on
+    /// decline, drop them.
+    func resolveTos(accepted: Bool) async {
+        showTosSheet = false
+        if accepted {
+            let ok = await acceptTos()
+            if ok {
+                let queued = pendingUploads; pendingUploads = []
+                for u in queued { beginUpload(fileURL: u.fileURL, filename: u.filename, type: u.type, parent: u.parent) }
+                return
+            }
+        }
+        pendingUploads = []
+    }
+
+    /// Tracks an upload in `uploads` with progress. Assumes ToS already satisfied.
+    private func beginUpload(fileURL: URL, filename: String, type: String?, parent: String?) {
         let task = UploadTask(filename: filename)
         uploads.append(task)
         Task {

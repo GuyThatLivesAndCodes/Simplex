@@ -174,6 +174,59 @@ actor API {
         _ = try await run(request("/api/files/\(id)", method: "DELETE"))
     }
 
+    // MARK: - conversion (server ffmpeg via /api/tools/convert)
+
+    /// Result of a save-to-vault conversion.
+    struct ConvertResult: Decodable { let ok: Bool; let srcSize: Int?; let outSize: Int?; let file: FileItem }
+
+    /// Convert a vault file to `format` using `tool`, saving the result as a NEW vault
+    /// file. Long-running (server ffmpeg); the caller can poll `convertProgress()`.
+    func convertToVault(fileId: String, tool: String, format: String) async throws -> FileItem {
+        var req = request("/api/tools/convert", method: "POST",
+                          json: ["fileId": fileId, "tool": tool, "format": format, "output": "save"])
+        req.timeoutInterval = 1200   // conversions can take a while
+        let data = try await run(req)
+        return try decode(ConvertResult.self, from: data).file
+    }
+
+    struct ConvertProgress: Decodable { let active: Bool; let pct: Int?; let phase: String? }
+    func convertProgress() async -> ConvertProgress? {
+        guard let data = try? await run(request("/api/tools/progress")) else { return nil }
+        return try? JSONDecoder().decode(ConvertProgress.self, from: data)
+    }
+
+    /// Which convert tools the server has ready (ffmpeg present).
+    func toolsAvailable() async -> Bool {
+        struct T: Decodable { let ffmpeg: Bool }
+        guard let data = try? await run(request("/api/tools")) else { return false }
+        return (try? JSONDecoder().decode(T.self, from: data).ffmpeg) ?? false
+    }
+
+    // MARK: - appearance prefs
+
+    /// Persist appearance prefs (merged server-side into the account's prefs blob).
+    /// Returns the updated account.
+    func savePrefs(_ prefs: [String: Any?]) async throws -> Account {
+        // JSONSerialization needs NSNull for JSON null (a Swift nil value would be dropped).
+        var body: [String: Any] = [:]
+        for (k, v) in prefs { body[k] = v ?? NSNull() }
+        let data = try await run(request("/api/accounts/me", method: "PATCH",
+                                         json: ["prefs": body]))
+        struct R: Decodable { let account: Account }
+        return try decode(R.self, from: data).account
+    }
+
+    // MARK: - Terms of Service
+
+    struct Tos: Decodable { let version: Int; let text: String }
+    func fetchTos() async throws -> Tos {
+        try decode(Tos.self, from: try await run(request("/api/tos")))
+    }
+    func acceptTos() async throws -> Account {
+        struct R: Decodable { let account: Account }
+        return try decode(R.self, from: try await run(request("/api/tos/accept", method: "POST"))).account
+    }
+
     // MARK: - URLs for streaming / download
 
     /// Absolute URL for streaming a blob (video/audio/image). AVPlayer & AsyncImage

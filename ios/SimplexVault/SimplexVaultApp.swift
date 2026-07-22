@@ -1,16 +1,27 @@
 import SwiftUI
+import AVFoundation
 
 @main
 struct SimplexVaultApp: App {
     @StateObject private var store = Store()
+    @ObservedObject private var appr = Appearance.shared
+
+    init() {
+        // Playback audio session: lets video/audio play (incl. in silent mode) and
+        // route to AirPlay devices (casting to a TV).
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [.allowAirPlay])
+        try? AVAudioSession.sharedInstance().setActive(true)
+    }
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(store)
                 .task { await store.bootstrap() }
-                .preferredColorScheme(.dark)   // matches the Simplex dark theme
-                .tint(SimplexTheme.accent)
+                .preferredColorScheme(appr.colorScheme)   // follows the chosen theme
+                .tint(appr.accent)
+                // Privacy screen: blur + Face ID gate when the app leaves/returns to focus.
+                .modifier(PrivacyScreen())
         }
     }
 }

@@ -173,6 +173,9 @@ function keysReveal(password, totp) { return apiJSON('/api/keys/reveal', { metho
 function reencryptFile(id) { return apiJSON('/api/files/' + id + '/reencrypt', { method: 'POST' }); }
 function reencryptVault() { return apiJSON('/api/keys/reencrypt-vault', { method: 'POST' }); }
 function getMe() { return apiJSON('/api/me'); }
+/* ---- Terms of Service ---- */
+function getTos() { return apiJSON('/api/tos'); }
+function acceptTos() { return apiJSON('/api/tos/accept', { method: 'POST' }); }
 /* ---- restart system ---- */
 // Public liveness + restart state. Used both to detect an in-progress restart
 // (raise the gate) and to detect when a FRESH server is up (startedAt changed).

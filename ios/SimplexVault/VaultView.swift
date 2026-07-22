@@ -1,15 +1,37 @@
 import SwiftUI
 
-/// The signed-in shell: a navigation stack over folders, plus the account/trash/starred
-/// entry points. Root is the vault root (parent == nil).
+/// The signed-in shell: a bottom tab bar (Files / Recents / Search / Account), matching
+/// the reference design. Each tab is its own navigation stack. The upload tray floats
+/// above everything.
 struct VaultView: View {
     @EnvironmentObject var store: Store
+    @ObservedObject private var appr = Appearance.shared
+    @State private var tab = 0
 
     var body: some View {
-        NavigationStack {
-            FolderView(folder: nil, title: store.account?.display ?? "Vault")
+        TabView(selection: $tab) {
+            NavigationStack { FolderView(folder: nil, title: "Files") }
+                .tabItem { Label("Files", systemImage: "folder") }
+                .tag(0)
+
+            NavigationStack { RecentsView() }
+                .tabItem { Label("Recents", systemImage: "clock") }
+                .tag(1)
+
+            NavigationStack { SearchView() }
+                .tabItem { Label("Search", systemImage: "magnifyingglass") }
+                .tag(2)
+
+            NavigationStack { AccountView() }
+                .tabItem { Label("Account", systemImage: "person") }
+                .tag(3)
         }
-        .overlay(alignment: .bottom) { UploadTray() }
+        .tint(SimplexTheme.accent)
+        .overlay(alignment: .bottom) { UploadTray().padding(.bottom, 52) }
+        .sheet(isPresented: $store.showTosSheet) {
+            TosSheet { accepted in await store.resolveTos(accepted: accepted) }
+                .interactiveDismissDisabled()
+        }
     }
 }
 
@@ -28,6 +50,10 @@ struct FolderView: View {
     @State private var renameTarget: FileItem?
     @State private var renameText = ""
     @State private var moveTarget: FileItem?
+    @State private var convertTarget: FileItem?
+    // fullscreen media gallery: non-nil items = presented, starting at galleryIndex
+    @State private var galleryItems: [FileItem]?
+    @State private var galleryIndex = 0
 
     private var items: [FileItem] { store.children(of: folder) }
 
@@ -59,6 +85,15 @@ struct FolderView: View {
         .sheet(item: $moveTarget) { target in
             MovePicker(moving: target) { dest in
                 Task { await store.move([target.id], to: dest) }
+            }
+        }
+        .sheet(item: $convertTarget) { target in
+            ConvertSheet(item: target)
+        }
+        .fullScreenCover(isPresented: Binding(get: { galleryItems != nil },
+                                              set: { if !$0 { galleryItems = nil } })) {
+            if let media = galleryItems {
+                MediaGallery(items: media, index: galleryIndex)
             }
         }
         .alert("New folder", isPresented: $showNewFolder) {
@@ -128,22 +163,48 @@ struct FolderView: View {
     @ViewBuilder
     private func tile(_ item: FileItem) -> some View {
         destination(item) {
-            VStack(spacing: 8) {
-                Thumbnail(item: item)
-                    .frame(height: 88)
-                    .frame(maxWidth: .infinity)
-                    .background(SimplexTheme.surface2, in: RoundedRectangle(cornerRadius: 10))
-                    .overlay(alignment: .topTrailing) {
-                        if item.isStarred {
-                            Image(systemName: "star.fill")
-                                .font(.caption2).foregroundStyle(SimplexTheme.accent).padding(5)
+            VStack(alignment: .leading, spacing: 8) {
+                ZStack {
+                    if item.isFolder {
+                        // colored folder tile with a folder glyph, per the reference
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(SimplexTheme.accent.opacity(0.14))
+                        Image(systemName: "folder.fill")
+                            .font(.system(size: 34))
+                            .foregroundStyle(SimplexTheme.accent)
+                    } else {
+                        RoundedRectangle(cornerRadius: 12).fill(SimplexTheme.surface2)
+                        Thumbnail(item: item)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                        // type badge, top-left
+                        if let badge = typeBadge(for: item) {
+                            VStack { HStack {
+                                Text(badge)
+                                    .font(SimplexTheme.mono(9, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 5).padding(.vertical, 2)
+                                    .background(tint(for: item), in: RoundedRectangle(cornerRadius: 4))
+                                Spacer()
+                            }; Spacer() }.padding(7)
                         }
                     }
+                    if item.isStarred {
+                        VStack { HStack { Spacer()
+                            Image(systemName: "star.fill").font(.caption2).foregroundStyle(SimplexTheme.accent)
+                        }; Spacer() }.padding(7)
+                    }
+                }
+                .frame(height: 96)
+                .frame(maxWidth: .infinity)
+
                 Text(item.name)
-                    .font(.caption)
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(SimplexTheme.text)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
+                    .lineLimit(1)
+                Text(item.isFolder ? "\(childCount(item)) items" : metaLine(item))
+                    .font(SimplexTheme.mono(10))
+                    .foregroundStyle(SimplexTheme.subtle)
+                    .lineLimit(1)
             }
         }
         .contextMenu { itemMenu(item) }
@@ -153,13 +214,20 @@ struct FolderView: View {
     private func row(_ item: FileItem) -> some View {
         destination(item) {
             HStack(spacing: 12) {
-                Thumbnail(item: item)
-                    .frame(width: 42, height: 42)
-                    .background(SimplexTheme.surface2, in: RoundedRectangle(cornerRadius: 8))
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(item.isFolder ? SimplexTheme.accent.opacity(0.14) : SimplexTheme.surface2)
+                    if item.isFolder {
+                        Image(systemName: "folder.fill").foregroundStyle(SimplexTheme.accent)
+                    } else {
+                        Thumbnail(item: item).clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+                .frame(width: 42, height: 42)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.name).foregroundStyle(SimplexTheme.text).lineLimit(1)
-                    Text(item.isFolder ? "Folder" : formatBytes(item.size))
-                        .font(.caption).foregroundStyle(SimplexTheme.subtle)
+                    Text(item.isFolder ? "\(childCount(item)) items" : metaLine(item))
+                        .font(SimplexTheme.mono(10)).foregroundStyle(SimplexTheme.subtle)
                 }
                 Spacer()
                 if item.isStarred {
@@ -176,12 +244,31 @@ struct FolderView: View {
         .contextMenu { itemMenu(item) }
     }
 
-    /// A folder pushes another FolderView; a file opens the appropriate viewer.
+    private func childCount(_ folder: FileItem) -> Int {
+        store.children(of: folder.id).count
+    }
+
+    /// Media (image/video) in this folder, in display order — the gallery swipes through
+    /// these. Computed once per open.
+    private var folderMedia: [FileItem] {
+        items.filter { $0.kind == .image || $0.kind == .video }
+    }
+
+    /// A folder pushes another FolderView; an image/video opens the fullscreen swipe
+    /// gallery; anything else opens the in-place FileViewer.
     @ViewBuilder
     private func destination<Label: View>(_ item: FileItem, @ViewBuilder label: () -> Label) -> some View {
         if item.isFolder {
             NavigationLink { FolderView(folder: item.id, title: item.name) } label: { label() }
                 .buttonStyle(.plain)
+        } else if item.kind == .image || item.kind == .video {
+            Button {
+                if let start = folderMedia.firstIndex(where: { $0.id == item.id }) {
+                    galleryItems = folderMedia
+                    galleryIndex = start
+                }
+            } label: { label() }
+            .buttonStyle(.plain)
         } else {
             NavigationLink { FileViewer(item: item) } label: { label() }
                 .buttonStyle(.plain)
@@ -200,6 +287,9 @@ struct FolderView: View {
         Button { moveTarget = item } label: { Label("Move…", systemImage: "folder") }
         if !item.isFolder {
             Button { downloadAndShare(item) } label: { Label("Save / Share…", systemImage: "square.and.arrow.up") }
+            if ConvertKit.canConvert(item) {
+                Button { convertTarget = item } label: { Label("Convert…", systemImage: "arrow.triangle.2.circlepath") }
+            }
         }
         Divider()
         Button(role: .destructive) { Task { await store.trash(item) } } label: {
@@ -211,9 +301,6 @@ struct FolderView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .topBarLeading) {
-            if folder == nil { NavigationLink { AccountView() } label: { Image(systemName: "person.circle") } }
-        }
         ToolbarItemGroup(placement: .topBarTrailing) {
             Button { gridView.toggle() } label: {
                 Image(systemName: gridView ? "list.bullet" : "square.grid.2x2")

@@ -1,28 +1,42 @@
 import SwiftUI
 
-/// Account screen: identity, storage, links to Starred and Trash, server setting, sign out.
+/// Account screen (a tab): identity, storage broken down by kind, security (Face ID),
+/// appearance, Starred, Trash, sign out. Styled after the reference image.
 struct AccountView: View {
     @EnvironmentObject var store: Store
-    @State private var showServer = false
+    @ObservedObject private var appr = Appearance.shared
 
     var body: some View {
         List {
+            // identity
             Section {
                 HStack(spacing: 14) {
                     Circle().fill(SimplexTheme.accent)
-                        .frame(width: 44, height: 44)
+                        .frame(width: 46, height: 46)
                         .overlay(Text(initials).font(.headline).foregroundStyle(.black))
-                    VStack(alignment: .leading) {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(store.account?.display ?? store.account?.username ?? "—")
-                            .foregroundStyle(SimplexTheme.text)
-                        if let u = store.account?.username {
-                            Text("@\(u)").font(.caption).foregroundStyle(SimplexTheme.subtle)
-                        }
+                            .font(.headline).foregroundStyle(SimplexTheme.text)
+                        Text(API.shared.baseURLSync.host ?? "")
+                            .font(SimplexTheme.mono(11)).foregroundStyle(SimplexTheme.subtle)
                     }
                 }
             }
             .listRowBackground(SimplexTheme.surface)
 
+            storageSection
+
+            // security
+            Section("Security") {
+                Toggle(isOn: $appr.faceIDLock) {
+                    Label("Unlock with Face ID", systemImage: "faceid")
+                }
+                .tint(SimplexTheme.accent)
+                .onChange(of: appr.faceIDLock) { _ in appr.persistLocal() }
+            }
+            .listRowBackground(SimplexTheme.surface)
+
+            // library
             Section {
                 NavigationLink { FlatListView(kind: .starred) } label: {
                     Label("Starred", systemImage: "star")
@@ -33,21 +47,20 @@ struct AccountView: View {
             }
             .listRowBackground(SimplexTheme.surface)
 
-            if let q = store.account?.quota_bytes {
-                Section("Storage") {
-                    let used = store.files.filter { !$0.isFolder && !$0.isTrashed }.reduce(0) { $0 + $1.size }
-                    VStack(alignment: .leading, spacing: 6) {
-                        ProgressView(value: Double(used), total: Double(max(q, 1)))
-                            .tint(SimplexTheme.accent)
-                        Text("\(formatBytes(used)) of \(formatBytes(q))")
-                            .font(.caption).foregroundStyle(SimplexTheme.subtle)
+            // preferences
+            Section("Preferences") {
+                NavigationLink { AppearanceView() } label: {
+                    HStack {
+                        Label("Appearance", systemImage: "paintbrush")
+                        Spacer()
+                        Text(themeLabel).font(SimplexTheme.mono(11)).foregroundStyle(SimplexTheme.subtle)
                     }
                 }
-                .listRowBackground(SimplexTheme.surface)
             }
+            .listRowBackground(SimplexTheme.surface)
 
             Section {
-                Button { showServer = true } label: {
+                Button { store.showServer = true } label: {
                     Label("Server", systemImage: "network").foregroundStyle(SimplexTheme.text)
                 }
                 Button(role: .destructive) {
@@ -57,15 +70,86 @@ struct AccountView: View {
                 }
             }
             .listRowBackground(SimplexTheme.surface)
+
+            Section {
+                Text("SIMPLEX · v1.0")
+                    .font(SimplexTheme.mono(10)).foregroundStyle(SimplexTheme.subtle)
+                    .frame(maxWidth: .infinity)
+            }
+            .listRowBackground(Color.clear)
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
         .background(SimplexTheme.bg)
         .navigationTitle("Account")
-        .navigationBarTitleDisplayMode(.inline)
-        .sheet(isPresented: $showServer) { ServerURLSheet() }
+        .navigationBarTitleDisplayMode(.large)
+        .sheet(isPresented: $store.showServer) { ServerURLSheet() }
     }
 
+    // storage meter split into Docs / Images / Media, like the reference
+    private var storageSection: some View {
+        Section("Storage") {
+            let used = usedBreakdown()
+            VStack(alignment: .leading, spacing: 8) {
+                if let q = store.account?.quota_bytes {
+                    HStack {
+                        Text(formatBytes(used.total)).font(.headline).foregroundStyle(SimplexTheme.text)
+                        Spacer()
+                        Text("of \(formatBytes(q))").font(SimplexTheme.mono(11)).foregroundStyle(SimplexTheme.subtle)
+                    }
+                    // segmented bar
+                    GeometryReader { geo in
+                        let w = geo.size.width
+                        HStack(spacing: 1.5) {
+                            seg(used.docs, q, w, Color(hex: 0x5aa9e6))
+                            seg(used.images, q, w, Color(hex: 0x7ed957))
+                            seg(used.media, q, w, Color(hex: 0xb07ee6))
+                            Spacer(minLength: 0)
+                        }
+                    }
+                    .frame(height: 8)
+                    .background(SimplexTheme.surface2, in: Capsule())
+                    .clipShape(Capsule())
+                    HStack(spacing: 14) {
+                        legend("Docs", Color(hex: 0x5aa9e6))
+                        legend("Images", Color(hex: 0x7ed957))
+                        legend("Media", Color(hex: 0xb07ee6))
+                    }
+                    .font(SimplexTheme.mono(10)).foregroundStyle(SimplexTheme.subtle)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+        .listRowBackground(SimplexTheme.surface)
+    }
+
+    private func seg(_ bytes: Int, _ quota: Int, _ width: CGFloat, _ color: Color) -> some View {
+        let frac = quota > 0 ? min(1, Double(bytes) / Double(quota)) : 0
+        return color.frame(width: max(0, width * frac))
+    }
+    private func legend(_ label: String, _ color: Color) -> some View {
+        HStack(spacing: 4) {
+            Circle().fill(color).frame(width: 7, height: 7)
+            Text(label)
+        }
+    }
+
+    private struct Breakdown { var docs = 0; var images = 0; var media = 0; var total: Int { docs + images + media } }
+    private func usedBreakdown() -> Breakdown {
+        var b = Breakdown()
+        for f in store.files where !f.isFolder && !f.isTrashed {
+            switch f.kind {
+            case .image: b.images += f.size
+            case .video, .audio: b.media += f.size
+            default: b.docs += f.size
+            }
+        }
+        return b
+    }
+
+    private var themeLabel: String {
+        AppearanceCatalog.themes.first { $0.id == appr.themeId }?.label ?? "Dark"
+    }
     private var initials: String {
         let name = store.account?.display ?? store.account?.username ?? "?"
         return String(name.prefix(1)).uppercased()
@@ -84,14 +168,8 @@ struct FlatListView: View {
     var body: some View {
         Group {
             if items.isEmpty {
-                VStack(spacing: 10) {
-                    Image(systemName: kind == .starred ? "star" : "trash")
-                        .font(.system(size: 38)).foregroundStyle(SimplexTheme.subtle)
-                    Text(kind == .starred ? "Nothing starred yet" : "Trash is empty")
-                        .foregroundStyle(SimplexTheme.subtle)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(SimplexTheme.bg)
+                EmptyState(icon: kind == .starred ? "star" : "trash",
+                           title: kind == .starred ? "Nothing starred yet" : "Trash is empty")
             } else {
                 List {
                     ForEach(items) { item in
@@ -103,6 +181,7 @@ struct FlatListView: View {
                 .background(SimplexTheme.bg)
             }
         }
+        .background(SimplexTheme.bg)
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -110,12 +189,14 @@ struct FlatListView: View {
     @ViewBuilder
     private func cell(_ item: FileItem) -> some View {
         HStack(spacing: 12) {
-            Thumbnail(item: item).frame(width: 40, height: 40)
-                .background(SimplexTheme.surface2, in: RoundedRectangle(cornerRadius: 8))
+            ZStack {
+                RoundedRectangle(cornerRadius: 8).fill(SimplexTheme.surface2)
+                Thumbnail(item: item).clipShape(RoundedRectangle(cornerRadius: 8))
+            }.frame(width: 40, height: 40)
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.name).foregroundStyle(SimplexTheme.text).lineLimit(1)
-                Text(item.isFolder ? "Folder" : formatBytes(item.size))
-                    .font(.caption).foregroundStyle(SimplexTheme.subtle)
+                Text(item.isFolder ? "Folder" : metaLine(item))
+                    .font(SimplexTheme.mono(10)).foregroundStyle(SimplexTheme.subtle)
             }
             Spacer()
         }
