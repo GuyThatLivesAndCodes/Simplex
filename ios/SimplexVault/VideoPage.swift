@@ -9,6 +9,8 @@ import AVKit
 struct VideoPage: View {
     let item: FileItem
     @State private var player: AVPlayer?
+    @State private var timeObserver: Any?
+    @State private var resumedShown = false
 
     var body: some View {
         ZStack {
@@ -16,6 +18,19 @@ struct VideoPage: View {
             if let player {
                 SystemVideoPlayer(player: player)
                     .ignoresSafeArea(edges: .bottom)
+                if resumedShown {
+                    // brief "Resumed" note so the jump isn't mysterious
+                    VStack {
+                        Spacer()
+                        Text("Resumed where you left off")
+                            .font(SimplexTheme.mono(11))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12).padding(.vertical, 7)
+                            .background(.black.opacity(0.55), in: Capsule())
+                            .padding(.bottom, 90)
+                    }
+                    .transition(.opacity)
+                }
             } else {
                 ProgressView().tint(SimplexTheme.accent)
             }
@@ -23,16 +38,57 @@ struct VideoPage: View {
         .navigationTitle(item.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.black, for: .navigationBar)
-        .onAppear {
-            if player == nil, let url = API.shared.rawURL(item) {
-                player = makeStreamingPlayer(url: url)
-                player?.play()
+        .toolbar {
+            // let the user jump back to the start (and forget the bookmark)
+            if VideoProgress.hasResume(for: item.id) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        VideoProgress.clear(fileId: item.id)
+                        player?.seek(to: .zero)
+                    } label: { Image(systemName: "backward.end") }
+                }
             }
         }
-        .onDisappear {
-            player?.pause()
-            player = nil     // release the player (and its network load) when leaving
+        .onAppear { start() }
+        .onDisappear { stop() }
+    }
+
+    private func start() {
+        guard player == nil, let url = API.shared.rawURL(item) else { return }
+        let p = makeStreamingPlayer(url: url)
+
+        // resume from the saved position, if any
+        if let secs = VideoProgress.position(for: item.id) {
+            p.seek(to: CMTime(seconds: secs, preferredTimescale: 600))
+            resumedShown = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { withAnimation { resumedShown = false } }
         }
+        p.play()
+
+        // auto-save the position every 5s during playback so an accidental close keeps
+        // your place
+        let interval = CMTime(seconds: 5, preferredTimescale: 600)
+        timeObserver = p.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [item] time in
+            let secs = time.seconds
+            let dur = p.currentItem?.duration.seconds ?? 0
+            guard secs.isFinite, secs > 0 else { return }
+            VideoProgress.save(fileId: item.id, seconds: secs, duration: dur.isFinite ? dur : 0)
+        }
+        player = p
+    }
+
+    private func stop() {
+        // save the exact position on the way out, then tear down
+        if let p = player {
+            let secs = p.currentTime().seconds
+            let dur = p.currentItem?.duration.seconds ?? 0
+            if secs.isFinite, secs > 0 {
+                VideoProgress.save(fileId: item.id, seconds: secs, duration: dur.isFinite ? dur : 0)
+            }
+            if let obs = timeObserver { p.removeTimeObserver(obs); timeObserver = nil }
+            p.pause()
+        }
+        player = nil     // release the player (and its network load) when leaving
     }
 }
 

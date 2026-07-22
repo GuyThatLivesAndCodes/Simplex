@@ -16,16 +16,14 @@ struct AppearanceView: View {
             Section("Accent color") {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 40), spacing: 12)], spacing: 12) {
                     ForEach(AppearanceCatalog.accents, id: \.name) { opt in
-                        let color = opt.hex.flatMap { Color(hexString: $0) } ?? Color(hex: 0xe0a64a)
-                        Button {
-                            appr.accentHex = opt.hex
-                            scheduleSave()
-                        } label: {
-                            Circle().fill(color)
-                                .frame(width: 34, height: 34)
-                                .overlay(Circle().stroke(SimplexTheme.text, lineWidth: isSelectedAccent(opt.hex) ? 2.5 : 0))
-                                .overlay(isSelectedAccent(opt.hex) ? Image(systemName: "checkmark").font(.caption2.bold()).foregroundStyle(.black) : nil)
-                        }
+                        AccentSwatch(
+                            hex: opt.hex,
+                            selected: isSelectedAccent(opt.hex),
+                            onPick: { picked in
+                                appr.accentHex = picked
+                                scheduleSave()
+                            }
+                        )
                     }
                 }
                 .padding(.vertical, 4)
@@ -81,30 +79,47 @@ struct AppearanceView: View {
     }
 
     private func isSelectedAccent(_ hex: String?) -> Bool {
-        (appr.accentHex ?? "") == (hex ?? "")
+        // case-insensitive compare; both nil (Amber default) count as equal
+        (appr.accentHex ?? "").lowercased() == (hex ?? "").lowercased()
     }
 
-    /// Debounce writes to the server so rapid toggling doesn't spam PATCHes; the local
-    /// look updates instantly via the @Published change.
+    /// Persist the current appearance. Discrete choices (accent/theme/…) save
+    /// immediately — there's no rapid stream to debounce, and the previous debounce +
+    /// account-reassignment was the source of the accent instability. The local look is
+    /// already applied via the @Published change; this just syncs it to the server, and
+    /// we deliberately IGNORE the response so nothing can overwrite what the user picked.
     private func scheduleSave() {
         appr.persistLocal()
         saveTask?.cancel()
-        saveTask = Task {
-            try? await Task.sleep(nanoseconds: 600_000_000)
-            if Task.isCancelled { return }
-            await saveNow()
-        }
+        saveTask = Task { await saveNow() }
     }
     private func saveNow() async {
-        do {
-            // Persist only. Do NOT reload appearance from the response — the local state
-            // is authoritative (the user just set it), and reloading here raced with the
-            // debounce and made a fresh pick snap back to the previous value. We still
-            // capture the returned account for its other fields (quota, tos, …).
-            let acct = try await API.shared.savePrefs(appr.prefsPatch)
-            store.account = acct
-        } catch {
-            // non-fatal: the local look is already applied; a failed sync just isn't persisted
+        _ = try? await API.shared.savePrefs(appr.prefsPatch)
+    }
+}
+
+/// One accent swatch. Owns its own `hex` value and reports exactly that on tap, so there
+/// is no chance of a loop variable or shared state resolving to the wrong color (the
+/// root of the "always picks the last one" bug).
+private struct AccentSwatch: View {
+    let hex: String?              // nil = Amber default
+    let selected: Bool
+    let onPick: (String?) -> Void
+
+    private var color: Color { hex.flatMap { Color(hexString: $0) } ?? Color(hex: 0xe0a64a) }
+
+    var body: some View {
+        Button {
+            onPick(hex)
+        } label: {
+            Circle()
+                .fill(color)
+                .frame(width: 34, height: 34)
+                .overlay(Circle().stroke(SimplexTheme.text, lineWidth: selected ? 2.5 : 0))
+                .overlay(selected
+                         ? Image(systemName: "checkmark").font(.caption2.bold()).foregroundStyle(.black)
+                         : nil)
         }
+        .buttonStyle(.plain)
     }
 }

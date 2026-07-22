@@ -193,6 +193,17 @@ struct FolderView: View {
                             Image(systemName: "star.fill").font(.caption2).foregroundStyle(SimplexTheme.accent)
                         }; Spacer() }.padding(7)
                     }
+                    // videos with a saved spot show a "resume" chip
+                    if item.kind == .video && VideoProgress.hasResume(for: item.id) {
+                        VStack { Spacer(); HStack {
+                            Label("Resume", systemImage: "play.fill")
+                                .font(SimplexTheme.mono(9, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 6).padding(.vertical, 3)
+                                .background(.black.opacity(0.6), in: Capsule())
+                            Spacer()
+                        } }.padding(7)
+                    }
                 }
                 .frame(height: 128)
                 .frame(maxWidth: .infinity)
