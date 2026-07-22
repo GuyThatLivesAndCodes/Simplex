@@ -27,6 +27,7 @@
 		BC64857FCB2EA9C61360B277 /* Thumbnail.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3DDF0BA797937ABBA4B256A /* Thumbnail.swift */; };
 		7180B706D118C710A8210440 /* Uploader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EB0FFBEB89586E54A5838D5 /* Uploader.swift */; };
 		04E7B8BFE4EF4B897EA20A3D /* VaultView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F5F30F79C8F7E5BF47A37B6 /* VaultView.swift */; };
+		59FE0734CC6D60075A394B3A /* VideoPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFA9684F2164E638E61D3719 /* VideoPage.swift */; };
 		222F0DBFFE5EB23DCD3FD16F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5B04B2273026590A440D27C9 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -53,6 +54,7 @@
 		E3DDF0BA797937ABBA4B256A /* Thumbnail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Thumbnail.swift; sourceTree = "<group>"; };
 		6EB0FFBEB89586E54A5838D5 /* Uploader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Uploader.swift; sourceTree = "<group>"; };
 		2F5F30F79C8F7E5BF47A37B6 /* VaultView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultView.swift; sourceTree = "<group>"; };
+		BFA9684F2164E638E61D3719 /* VideoPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoPage.swift; sourceTree = "<group>"; };
 		5B04B2273026590A440D27C9 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -98,6 +100,7 @@
 				E3DDF0BA797937ABBA4B256A /* Thumbnail.swift */,
 				6EB0FFBEB89586E54A5838D5 /* Uploader.swift */,
 				2F5F30F79C8F7E5BF47A37B6 /* VaultView.swift */,
+				BFA9684F2164E638E61D3719 /* VideoPage.swift */,
 				5B04B2273026590A440D27C9 /* Assets.xcassets */,
 				1507F021100E808DBE2FAA00 /* Info.plist */,
 			);
@@ -201,6 +204,7 @@
 				BC64857FCB2EA9C61360B277 /* Thumbnail.swift in Sources */,
 				7180B706D118C710A8210440 /* Uploader.swift in Sources */,
 				04E7B8BFE4EF4B897EA20A3D /* VaultView.swift in Sources */,
+				59FE0734CC6D60075A394B3A /* VideoPage.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

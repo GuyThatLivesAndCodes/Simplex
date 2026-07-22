@@ -248,27 +248,31 @@ struct FolderView: View {
         store.children(of: folder.id).count
     }
 
-    /// Media (image/video) in this folder, in display order — the gallery swipes through
-    /// these. Computed once per open.
-    private var folderMedia: [FileItem] {
-        items.filter { $0.kind == .image || $0.kind == .video }
+    /// Images in this folder, in display order — the photo gallery swipes through these.
+    private var folderPhotos: [FileItem] {
+        items.filter { $0.kind == .image }
     }
 
-    /// A folder pushes another FolderView; an image/video opens the fullscreen swipe
-    /// gallery; anything else opens the in-place FileViewer.
+    /// Folders push another FolderView. IMAGES open the fullscreen swipe gallery. VIDEOS
+    /// open a standard AVPlayer page with the full native control bar (scrubber, skip,
+    /// speed, AirPlay) and a Fullscreen button — the reduced/swipe behavior only applies
+    /// to the fullscreen route. Everything else opens the in-place FileViewer.
     @ViewBuilder
     private func destination<Label: View>(_ item: FileItem, @ViewBuilder label: () -> Label) -> some View {
         if item.isFolder {
             NavigationLink { FolderView(folder: item.id, title: item.name) } label: { label() }
                 .buttonStyle(.plain)
-        } else if item.kind == .image || item.kind == .video {
+        } else if item.kind == .image {
             Button {
-                if let start = folderMedia.firstIndex(where: { $0.id == item.id }) {
-                    galleryItems = folderMedia
+                if let start = folderPhotos.firstIndex(where: { $0.id == item.id }) {
+                    galleryItems = folderPhotos
                     galleryIndex = start
                 }
             } label: { label() }
             .buttonStyle(.plain)
+        } else if item.kind == .video {
+            NavigationLink { VideoPage(item: item) } label: { label() }
+                .buttonStyle(.plain)
         } else {
             NavigationLink { FileViewer(item: item) } label: { label() }
                 .buttonStyle(.plain)

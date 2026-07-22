@@ -1,13 +1,12 @@
 import SwiftUI
-import AVKit
 
-/// Fullscreen, swipeable media viewer. Opened for a photo or video; swipe left/right to
-/// move through every image & video in the SAME folder. Videos support AirPlay (cast to
-/// a TV) via the system route picker. Presented as a full-screen cover so it truly fills
-/// the screen (no nav/tab chrome).
+/// Fullscreen, swipeable PHOTO viewer. Opened for an image; swipe left/right to move
+/// through every image in the same folder. Pinch-to-zoom and double-tap to reset.
+/// (Videos open in a standard AVPlayer page — see VideoPage — which has the full native
+/// control bar and its own fullscreen button.)
 struct MediaGallery: View {
     @Environment(\.dismiss) private var dismiss
-    let items: [FileItem]        // same-folder media, in display order
+    let items: [FileItem]        // same-folder images, in display order
     @State var index: Int        // starting item
     @State private var showChrome = true
 
@@ -17,34 +16,16 @@ struct MediaGallery: View {
 
             TabView(selection: $index) {
                 ForEach(Array(items.enumerated()), id: \.element.id) { i, item in
-                    Group {
-                        switch item.kind {
-                        case .image:
-                            // images: tap toggles the chrome (close/caption); zoom + pan gestures live inside
-                            FullImage(item: item)
-                                .contentShape(Rectangle())
-                                .onTapGesture { withAnimation { showChrome.toggle() } }
-                        case .video:
-                            // videos: the native player owns all touches so its transport
-                            // controls (play/pause, scrubber, speed, fullscreen) work. We
-                            // do NOT add a tap gesture here — that was swallowing taps meant
-                            // for the scrubber, leaving the video with no controls.
-                            FullVideo(item: item, isCurrent: i == index)
-                        default:
-                            Color.black
-                        }
-                    }
-                    .tag(i)
+                    FullImage(item: item)
+                        .contentShape(Rectangle())
+                        .onTapGesture { withAnimation { showChrome.toggle() } }
+                        .tag(i)
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
             .ignoresSafeArea()
 
-            let isVideo = items.indices.contains(index) && items[index].kind == .video
-            // Top bar: always show a close button; AirPlay for videos. For videos we keep
-            // it always visible (there's no tap-to-toggle) but tucked into the safe area so
-            // it doesn't overlap the player's own top controls.
-            if showChrome || isVideo {
+            if showChrome {
                 VStack {
                     HStack {
                         Button { dismiss() } label: {
@@ -53,16 +34,10 @@ struct MediaGallery: View {
                                 .padding(10).background(.black.opacity(0.45), in: Circle())
                         }
                         Spacer()
-                        if isVideo {
-                            RoutePickerButton()
-                                .frame(width: 44, height: 44)
-                                .background(.black.opacity(0.45), in: Circle())
-                        }
                     }
                     .padding(.horizontal, 16).padding(.top, 8)
                     Spacer()
-                    // caption only for images (a video's scrubber lives at the bottom)
-                    if showChrome && !isVideo && items.indices.contains(index) {
+                    if items.indices.contains(index) {
                         VStack(spacing: 2) {
                             Text(items[index].name).foregroundStyle(.white).font(.callout).lineLimit(1)
                             Text("\(index + 1) of \(items.count)").foregroundStyle(.white.opacity(0.7))
@@ -72,14 +47,9 @@ struct MediaGallery: View {
                     }
                 }
                 .transition(.opacity)
-                .allowsHitTesting(true)
             }
         }
-        .statusBarHidden(isVideoFullscreen ? false : !showChrome)
-    }
-
-    private var isVideoFullscreen: Bool {
-        items.indices.contains(index) && items[index].kind == .video
+        .statusBarHidden(!showChrome)
     }
 }
 
@@ -115,34 +85,4 @@ private struct FullImage: View {
             .onEnded { _ in lastOffset = offset }
     }
     private func reset() { scale = 1; offset = .zero; lastOffset = .zero }
-}
-
-/// Full-bleed video with playback controls; plays via cookie-authenticated AVPlayer.
-private struct FullVideo: View {
-    let item: FileItem
-    let isCurrent: Bool
-    @State private var player: AVPlayer?
-
-    var body: some View {
-        VideoPlayer(player: player)
-            .ignoresSafeArea()
-            .onAppear { if player == nil, let url = API.shared.rawURL(item) { player = makeCookiePlayer(url: url) } }
-            .onChange(of: isCurrent) { current in
-                if current { player?.play() } else { player?.pause() }
-            }
-            .onDisappear { player?.pause() }
-    }
-}
-
-/// UIKit AVRoutePickerView wrapped for SwiftUI — the standard AirPlay button that lets
-/// the user pick a TV / AirPlay receiver to stream the video to.
-struct RoutePickerButton: UIViewRepresentable {
-    func makeUIView(context: Context) -> AVRoutePickerView {
-        let v = AVRoutePickerView()
-        v.tintColor = .white
-        v.activeTintColor = UIColor(SimplexTheme.accent)
-        v.prioritizesVideoDevices = true
-        return v
-    }
-    func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
 }

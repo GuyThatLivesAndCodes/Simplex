@@ -13,7 +13,7 @@ struct FileViewer: View {
         Group {
             switch item.kind {
             case .image:    ImageViewer(item: item)
-            case .video:    MediaPlayer(item: item)
+            case .video:    VideoPage(item: item)   // full native controls + fast start
             case .audio:    AudioViewer(item: item)
             case .document: DocumentViewer(item: item)
             default:        UnsupportedViewer(item: item)
@@ -87,27 +87,8 @@ struct ZoomableImage: View {
     }
 }
 
-// MARK: - video / audio via AVPlayer
-
-/// AVPlayer over the raw stream. A cookie-carrying AVURLAsset lets the player
-/// authenticate; the server supports Range so seeking works.
-struct MediaPlayer: View {
-    let item: FileItem
-    @State private var player: AVPlayer?
-
-    var body: some View {
-        VideoPlayer(player: player)
-            .ignoresSafeArea(edges: .bottom)
-            .onAppear { start() }
-            .onDisappear { player?.pause() }
-    }
-
-    private func start() {
-        guard player == nil, let url = API.shared.rawURL(item) else { return }
-        player = makeCookiePlayer(url: url)
-        player?.play()
-    }
-}
+// MARK: - audio via AVPlayer
+// (Video uses VideoPage / SystemVideoPlayer — the full-control AVPlayerViewController.)
 
 struct AudioViewer: View {
     let item: FileItem
