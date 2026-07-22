@@ -1,0 +1,7 @@
+=== headers (expect CSP from new server) ===
+HTTP/1.1 401 Unauthorized
+
+=== login admin/1234 ===
+{"error":"auth required"}
+=== me ===
+{"error":"auth required"}

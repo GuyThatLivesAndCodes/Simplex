@@ -1,0 +1,77 @@
+==================================================================
+[simplex] generated a NEW master encryption key at:
+          C:\Users\brist\Downloads\Simplex Database\vault\keys\master.key
+  It encrypts ALL vault data and persists across reboots. If you
+  ever lose it, the data CANNOT be recovered. Back it up now:
+          node key.js show        (view / copy the key)
+          node key.js backup <dest>
+==================================================================
+created admin account (username "admin", password "1234")
+imported 73 metadata rows into admin DB
+imported 2 shares
+ENCRYPT  fcvkk598.mp4  128MB ... ok + verified, plaintext removed
+ENCRYPT  fa2cmfpk.mp4  128MB ... ok + verified, plaintext removed
+ENCRYPT  f7foy5qq.mp4  117MB ... ok + verified, plaintext removed
+ENCRYPT  f08xo9du.mp4  112MB ... ok + verified, plaintext removed
+ENCRYPT  fxatygyg.mp4  118MB ... ok + verified, plaintext removed
+ENCRYPT  f5y0kiog.mp4  111MB ... ok + verified, plaintext removed
+ENCRYPT  fh2gg2mx.mp4  126MB ... ok + verified, plaintext removed
+ENCRYPT  f23rwkpd.mp4  116MB ... ok + verified, plaintext removed
+ENCRYPT  fmnqy0ce.mp4  120MB ... ok + verified, plaintext removed
+ENCRYPT  fmzbqmnc.mp4  106MB ... ok + verified, plaintext removed
+ENCRYPT  fmn2qjzl.mp4  108MB ... ok + verified, plaintext removed
+ENCRYPT  f8lagwko.mp4  106MB ... ok + verified, plaintext removed
+ENCRYPT  fiup22gn.mp4  152MB ... ok + verified, plaintext removed
+ENCRYPT  f1g60y09.mp4  116MB ... ok + verified, plaintext removed
+ENCRYPT  fqww4irs.mp4  112MB ... ok + verified, plaintext removed
+ENCRYPT  fkk21t8p.mp4  97MB ... ok + verified, plaintext removed
+ENCRYPT  fb0khku7.mp4  117MB ... ok + verified, plaintext removed
+ENCRYPT  fyacq0xb.mp4  120MB ... ok + verified, plaintext removed
+ENCRYPT  fvykpb42.mp4  116MB ... ok + verified, plaintext removed
+ENCRYPT  fa77fbls.mp4  108MB ... ok + verified, plaintext removed
+ENCRYPT  fg5rfk5g.mp4  104MB ... ok + verified, plaintext removed
+ENCRYPT  fdc334jg.mp4  107MB ... ok + verified, plaintext removed
+ENCRYPT  f21knh85.mp4  110MB ... ok + verified, plaintext removed
+ENCRYPT  fb88vvva.mp4  108MB ... ok + verified, plaintext removed
+ENCRYPT  fu5htshl.mp4  423MB ... ok + verified, plaintext removed
+ENCRYPT  fv8yd2b7.mp4  91MB ... ok + verified, plaintext removed
+ENCRYPT  fd5jyazp.mp4  97MB ... ok + verified, plaintext removed
+ENCRYPT  fxcdypbm.mp4  82MB ... ok + verified, plaintext removed
+ENCRYPT  f8kqy32z.mp4  103MB ... ok + verified, plaintext removed
+ENCRYPT  f2rgdyxz.mp4  93MB ... ok + verified, plaintext removed
+ENCRYPT  focrnxlq.mp4  88MB ... ok + verified, plaintext removed
+ENCRYPT  fo82arlw.mp4  100MB ... ok + verified, plaintext removed
+ENCRYPT  f1zb80d1.mp4  100MB ... ok + verified, plaintext removed
+ENCRYPT  f8xfeu67.mp4  117MB ... ok + verified, plaintext removed
+ENCRYPT  f8by1ojn.mp4  90MB ... ok + verified, plaintext removed
+ENCRYPT  fgwv03k1.mp4  92MB ... ok + verified, plaintext removed
+ENCRYPT  f73ub06p.mp4  101MB ... ok + verified, plaintext removed
+ENCRYPT  fmdo4fuf.mp4  108MB ... ok + verified, plaintext removed
+ENCRYPT  f3a1rzw8.mp4  122MB ... ok + verified, plaintext removed
+ENCRYPT  fe366ozt.mp4  120MB ... ok + verified, plaintext removed
+ENCRYPT  fb09uq7u.mp4  107MB ... ok + verified, plaintext removed
+ENCRYPT  fks5cdj2.mp4  105MB ... ok + verified, plaintext removed
+ENCRYPT  f6b1m2oe.mp4  107MB ... ok + verified, plaintext removed
+ENCRYPT  fsvrxpvp.mp4  100MB ... ok + verified, plaintext removed
+ENCRYPT  frc4jii9.mp4  100MB ... ok + verified, plaintext removed
+ENCRYPT  fvg1nffe.mp4  98MB ... ok + verified, plaintext removed
+ENCRYPT  fkjit3iz.mp4  100MB ... ok + verified, plaintext removed
+ENCRYPT  fehhiu0s.mp4  98MB ... ok + verified, plaintext removed
+ENCRYPT  fs54i3gy.mp4  100MB ... ok + verified, plaintext removed
+ENCRYPT  f6ktdk3l.mp4  97MB ... ok + verified, plaintext removed
+ENCRYPT  fsvvbueu.mp4  90MB ... ok + verified, plaintext removed
+ENCRYPT  ff5z5co9.mp4  83MB ... ok + verified, plaintext removed
+ENCRYPT  f4kda61t.mp4  81MB ... ok + verified, plaintext removed
+ENCRYPT  fw2bbcsu.mp4  99MB ... ok + verified, plaintext removed
+ENCRYPT  f5lqxpzw.mp4  97MB ... ok + verified, plaintext removed
+ENCRYPT  fkbcijt2.mp4  100MB ... ok + verified, plaintext removed
+ENCRYPT  fb7i1eej.mp4  97MB ... ok + verified, plaintext removed
+ENCRYPT  f7chnf6e.mp4  96MB ... ok + verified, plaintext removed
+ENCRYPT  frqdsrg3.mp4  94MB ... ok + verified, plaintext removed
+ENCRYPT  ffmqz83n.mp4  86MB ... ok + verified, plaintext removed
+ENCRYPT  fkckaose.mp4  84MB ... ok + verified, plaintext removed
+ENCRYPT  fxc9ar1i.mp4  499MB ... ok + verified, plaintext removed
+ENCRYPT  fsfvqmyv.mp3  2MB ... ok + verified, plaintext removed
+
+DONE — encrypted 63 (7.21 GB), skipped 0, missing 0, failed 0
+plaintext remaining in vault/files: 0

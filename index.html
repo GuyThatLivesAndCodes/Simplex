@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<!-- viewport-fit=cover opts into the display safe-area insets (notch / home bar)
+     so env(safe-area-inset-*) resolves to real values; the layout in simplex.css
+     pads for them. interactive-widget keeps the layout viewport from being resized
+     out from under us when the on-screen keyboard opens. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+<meta name="theme-color" content="#221f1b" />
+<meta name="color-scheme" content="dark" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Simplex" />
+<title>Simplex</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/simplex.css" />
+<!-- Boot guard + crash reporter: loaded FIRST, no deps. Guarantees the page never
+     sits on an endless blank/loading screen — see boot-guard.js. -->
+<script src="/boot-guard.js"></script>
+<!-- Import map so three.js's example loaders (GLTF/OBJ/FBX/STL/OrbitControls),
+     which `import ... from "three"`, can resolve that bare specifier. three.js is
+     loaded lazily from unpkg ONLY when a 3D model is first opened (see the 3D model
+     viewer in viewers.js) — nothing here is fetched at boot. Keep the version in
+     sync with THREE_VERSION in viewers.js. -->
+<script type="importmap" nonce="__CSP_NONCE__">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+
+<!-- ============ LOGIN SCREEN ============ -->
+<div id="lock" data-screen-label="Login">
+  <div class="lock-mark"><span class="dot"></span>SIMPLEX</div>
+  <div class="lock-title">your private workspace · sign in to your account</div>
+  <form id="loginForm" class="login-card" autocomplete="off">
+    <label class="login-field">
+      <span class="eyebrow">Account</span>
+      <input id="loginUser" type="text" name="username" placeholder="username" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" />
+    </label>
+    <label class="login-field">
+      <span class="eyebrow">Password</span>
+      <div class="login-pw">
+        <input id="loginPass" type="password" name="password" placeholder="password" autocomplete="current-password" />
+        <button type="button" class="pw-eye" id="pwEye" tabindex="-1" title="Show password" aria-label="Show password"></button>
+      </div>
+    </label>
+    <div class="lock-hint" id="lockHint"></div>
+    <button type="submit" class="btn primary login-btn" id="loginBtn">Sign in</button>
+    <div class="login-alt">
+      <span>Don't have an account?</span>
+      <button type="button" class="login-signup-link" id="signupBtn">Request one</button>
+      <span class="login-alt-sep">·</span>
+      <button type="button" class="login-signup-link" id="forgotBtn">Forgot password?</button>
+    </div>
+  </form>
+</div>
+
+<!-- ============ SHELL ============ -->
+<div id="shell" class="hidden">
+  <aside class="sidebar">
+    <div class="side-brand">
+      <div class="glyph"></div>
+      <div class="name">SIM<span>PLEX</span></div>
+    </div>
+    <div class="side-search">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+      <!-- type=search + a non-credential name + the password-manager opt-outs stop
+           Chrome/1Password/LastPass from mistaking this for a username field and
+           autofilling it (which used to flip the app into "search" state on load and
+           bounce deep links like /database/files back to /database). -->
+      <input id="search" name="vault-search" type="search" placeholder="Search the vault…"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+             data-1p-ignore data-lpignore="true" data-form-type="other" />
+    </div>
+    <nav class="nav" id="nav"></nav>
+    <div class="storage" id="storage"></div>
+    <div class="account-box" id="accountBox"></div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <button class="btn ghost menu-btn" id="menuBtn" title="Menu" aria-label="Open menu">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+      </button>
+      <div class="crumbs" id="crumbs"></div>
+      <div class="spacer"></div>
+      <button class="btn ghost sortbtn" id="sortBtn" title="Sort files">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5h10M11 9h7M11 13h4M3 17l3 3 3-3M6 6v14"/></svg>
+        <span id="sortLabel">Name</span>
+        <span id="sortDir" class="sortdir"></span>
+      </button>
+      <div class="seg" id="viewseg">
+        <button data-v="grid" class="on" title="Grid">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        </button>
+        <button data-v="list" title="List">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+        </button>
+      </div>
+      <button class="btn ghost" id="newFolderBtn">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 10v6m-3-3h6"/><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        <span class="lbl">New folder</span>
+      </button>
+      <button class="btn primary" id="uploadBtn">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 16V4m-5 5 5-5 5 5"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        <span class="lbl">Upload</span>
+      </button>
+    </div>
+    <div class="content" id="content"></div>
+  </main>
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+</div>
+
+<!-- ============ DASHBOARD LAUNCHER ============ -->
+<div id="launcher" class="hidden" data-screen-label="Dashboard"></div>
+
+<!-- ============ GENERIC APP SCREEN (settings / coming-soon) ============ -->
+<div id="appscreen" class="hidden" data-screen-label="App"></div>
+
+<input type="file" id="uploader" multiple class="hidden" />
+<input type="file" id="folderUploader" multiple webkitdirectory class="hidden" />
+
+<div class="dropzone" id="dropzone">
+  <div class="box">
+    <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="var(--acc)" stroke-width="1.6"><path d="M12 16V4m-5 5 5-5 5 5"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+    <div class="big">Drop to upload</div>
+    <div class="sub">files are added to the current location</div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<div id="tweaks-root"></div>
+
+<template id="__bundler_thumbnail">
+  <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+    <rect width="100" height="100" fill="#221f1b"/>
+    <rect x="34" y="34" width="32" height="32" rx="9" fill="#e0a64a"/>
+    <rect x="44" y="44" width="12" height="12" rx="3" fill="#221f1b"/>
+  </svg>
+</template>
+
+<!-- Core scripts are `defer`red: the browser downloads them without blocking HTML
+     parsing, then runs them in document order once the DOM is ready. This lets the
+     login screen (static markup above) paint immediately instead of waiting on
+     ~1MB of JS. Order still matters — data.js (lazy-loader + data layer) and
+     icons.js define globals app.js uses, so they stay ahead of it. -->
+<script src="/icons.js" defer></script>
+<script src="/data.js" defer></script>
+<!-- viewers.js drives the file viewers (images/video/editor/3D/heightmap) — central
+     to the vault, kept at boot but deferred. -->
+<script src="/viewers.js" defer></script>
+<script src="/app.js" defer></script>
+<!-- Loaded ON DEMAND, not at boot (see data.js loadFeature()):
+       · gvas.js       → right-click "Edit Save…"        (showSaveEditor)
+       · uasset.js     → Game Assets inspector           (openUasset)
+       · neural-engine.js + neural.js → the Neural app   (opening the app)
+     Keeping these ~200KB out of the boot path is the main first-load win. -->
+
+<!-- React + Babel power only the optional "tweaks" panel. They come from a CDN
+     (unpkg) and have historically been the slowest part of the load. They are
+     loaded LAST and are non-fatal: tweaks-boot.js records any load failure (via a
+     listener, not an inline handler — our CSP forbids inline event handlers) so
+     the core app (login + vault) keeps working without them.
+     tweaks-boot.js loads FIRST here so its error listeners are attached before the
+     CDN scripts below can finish (or fail) loading. -->
+<script src="/tweaks-boot.js" nonce="__CSP_NONCE__"></script>
+<script id="dep-react" data-dep="react" src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script id="dep-react-dom" data-dep="react-dom" src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script id="dep-babel" data-dep="babel" src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<!-- nonce here is read by @babel/standalone and copied onto the inline <script> it
+     injects with the transpiled output, so that generated script passes the CSP. -->
+<script type="text/babel" src="/tweaks-panel.jsx" nonce="__CSP_NONCE__"></script>
+<script type="text/babel" src="/tweaks.jsx" nonce="__CSP_NONCE__"></script>
+</body>
+</html>

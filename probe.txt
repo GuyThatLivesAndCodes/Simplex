@@ -1,0 +1,8 @@
+﻿LOG_EXISTS=True
+LOG_BYTES=77
+LOG_CONTENT_START
+[simplex] serving on http://localhost:3824  (LAN: http://<optiplex-ip>:3824)
+
+LOG_CONTENT_END
+LISTENING=True
+PID=65368

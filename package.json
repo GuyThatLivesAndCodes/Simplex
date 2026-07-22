@@ -1,0 +1,23 @@
+{
+  "name": "simplex",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Simplex — private, encrypted, self-hosted workspace",
+  "main": "server.js",
+  "scripts": {
+    "start": "node run.js",
+    "start:direct": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.19.2",
+    "better-sqlite3": "^12.10.0",
+    "discord.js": "^14.26.5",
+    "express": "^5.2.1",
+    "libsodium-wrappers": "^0.8.4",
+    "multer": "^2.1.1",
+    "opusscript": "^0.0.8"
+  }
+}

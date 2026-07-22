@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir \"H:\\\\Better Downloads\\\\Simplex Database\" /s /b)",
+      "Bash(dir:*)",
+      "Bash(node --version:*)",
+      "Bash(npm --version:*)",
+      "WebSearch",
+      "Bash(npm view:*)",
+      "Bash(npm install)",
+      "Bash(npm start)",
+      "Bash(curl:*)",
+      "Bash(node:*)",
+      "Bash(ID=f5ls2zyb)",
+      "Bash(tasklist:*)",
+      "Bash(taskkill:*)",
+      "Bash(1 sleep 1)",
+      "Bash(ls -la public)",
+      "Bash(ls -la src)",
+      "Bash(ls -la .claude)",
+      "Bash(cat CLAUDE.md)",
+      "Bash(PORT=3825 node server.js)",
+      "PowerShell($c = Get-NetTCPConnection -LocalPort 3825 -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { $c.OwningProcess | Select-Object -Unique | ForEach-Object { Stop-Process -Id $_ -Force; \"stopped PID $_\" } } else { \"no listener on 3825\" })",
+      "mcp__Claude_in_Chrome__list_connected_browsers",
+      "PowerShell($tools = 'docker','wsl','python','python3','node','deno','bash','git'; foreach \\($t in $tools\\) { $c = Get-Command $t -ErrorAction SilentlyContinue; if \\($c\\) { \"{0,-8} -> {1}\" -f $t, $c.Source } else { \"{0,-8} -> \\(not found\\)\" -f $t } })",
+      "mcp__Claude_Preview__preview_start"
+    ]
+  }
+}

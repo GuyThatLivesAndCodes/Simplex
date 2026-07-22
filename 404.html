@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#221f1b" />
+<meta name="color-scheme" content="dark" />
+<title>404 — SIMPLEX</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/simplex.css" />
+<style>
+  /* reuses simplex.css variables; standalone layout so it works with no JS */
+  body { height: 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  .nf {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+    padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
+    background: radial-gradient(120% 80% at 50% -10%, oklch(0.21 0.012 74) 0%, transparent 55%), var(--bg-deep);
+  }
+  .nf::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none; opacity: 0.5;
+    background-image: repeating-linear-gradient(0deg, transparent 0 2px, oklch(0 0 0 / 0.04) 2px 3px);
+  }
+  .nf-mark { font-family: var(--mono); font-size: 13px; letter-spacing: 0.5em; text-indent: 0.5em; color: var(--acc); margin-bottom: 30px; display: flex; align-items: center; gap: 12px; z-index: 1; }
+  .nf-mark .dot { width: 7px; height: 7px; border-radius: 2px; background: var(--acc); box-shadow: 0 0 14px var(--acc); }
+  .nf-code { font-family: var(--mono); font-weight: 600; font-size: clamp(72px, 18vw, 150px); line-height: 1; letter-spacing: -0.02em; color: var(--ink); z-index: 1; }
+  .nf-code span { color: var(--acc); }
+  .nf-msg { font-family: var(--mono); font-size: 13px; letter-spacing: 0.04em; color: var(--ink-faint); margin: 18px 0 34px; max-width: 30ch; z-index: 1; }
+  .nf .btn { z-index: 1; text-decoration: none; }
+</style>
+</head>
+<body>
+  <div class="nf">
+    <div class="nf-mark"><span class="dot"></span>SIMPLEX</div>
+    <div class="nf-code">4<span>0</span>4</div>
+    <div class="nf-msg">no such node on this vault — the path leads nowhere.</div>
+    <a class="btn primary" href="/">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V20a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9.5"/></svg>
+      Return to vault
+    </a>
+  </div>
+</body>
+</html>

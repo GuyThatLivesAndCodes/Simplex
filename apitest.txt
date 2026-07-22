@@ -1,0 +1,4 @@
+401_gate: 401
+wrong_login: {"error":"auth required"}
+good_login: {"error":"auth required"}
+me: {"error":"auth required"}
