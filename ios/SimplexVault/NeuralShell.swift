@@ -127,7 +127,13 @@ struct NeuralTemplatesView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .principal) { Text("Templates").font(.system(size: 17, weight: .semibold)).foregroundStyle(SimplexTheme.text) } }
-        .navigationDestination(item: $createdId) { id in NeuralWorkspace(modelId: id) }
+        // iOS 16 compatible programmatic nav (navigationDestination(item:) is iOS 17+):
+        // an invisible NavigationLink pushed when a template is created.
+        .background(
+            NavigationLink(isActive: Binding(get: { createdId != nil }, set: { if !$0 { createdId = nil } })) {
+                if let id = createdId { NeuralWorkspace(modelId: id) }
+            } label: { EmptyView() }.hidden()
+        )
     }
 
     private func templateCard(_ t: NeuralTemplate) -> some View {
