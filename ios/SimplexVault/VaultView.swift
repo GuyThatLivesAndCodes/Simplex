@@ -1,39 +1,7 @@
 import SwiftUI
 
-/// The signed-in shell: a bottom tab bar (Files / Recents / Search / Account), matching
-/// the reference design. Each tab is its own navigation stack. The upload tray floats
-/// above everything.
-struct VaultView: View {
-    @EnvironmentObject var store: Store
-    @ObservedObject private var appr = Appearance.shared
-    @State private var tab = 0
-
-    var body: some View {
-        TabView(selection: $tab) {
-            NavigationStack { FolderView(folder: nil, title: "Files") }
-                .tabItem { Label("Files", systemImage: "folder") }
-                .tag(0)
-
-            NavigationStack { RecentsView() }
-                .tabItem { Label("Recents", systemImage: "clock") }
-                .tag(1)
-
-            NavigationStack { SearchView() }
-                .tabItem { Label("Search", systemImage: "magnifyingglass") }
-                .tag(2)
-
-            NavigationStack { AccountView() }
-                .tabItem { Label("Account", systemImage: "person") }
-                .tag(3)
-        }
-        .tint(SimplexTheme.accent)
-        .overlay(alignment: .bottom) { UploadTray().padding(.bottom, 52) }
-        .sheet(isPresented: $store.showTosSheet) {
-            TosSheet { accepted in await store.resolveTos(accepted: accepted) }
-                .interactiveDismissDisabled()
-        }
-    }
-}
+// The Database system's tab shell lives in AppShell.swift (DatabaseShell). This file
+// holds the vault screens themselves: the folder browser and its cells.
 
 /// One folder's contents. Pushed onto the stack per subfolder so the back button and
 /// breadcrumb come for free.

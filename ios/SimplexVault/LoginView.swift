@@ -9,7 +9,6 @@ struct LoginView: View {
     @State private var ticket: String?      // set when the server asks for 2FA
     @State private var busy = false
     @State private var error: String?
-    @State private var showServerSheet = false
 
     private var needs2fa: Bool { ticket != nil }
 
@@ -85,20 +84,15 @@ struct LoginView: View {
                     .overlay(RoundedRectangle(cornerRadius: 16).stroke(SimplexTheme.line))
                     .padding(.horizontal, 22)
 
-                    Button {
-                        showServerSheet = true
-                    } label: {
-                        Label("Server", systemImage: "network")
-                            .font(.footnote)
-                            .foregroundStyle(SimplexTheme.subtle)
-                    }
+                    Text("data.guythatlives.net")
+                        .font(.caption2)
+                        .foregroundStyle(SimplexTheme.subtle.opacity(0.7))
                     Spacer()
                 }
                 .frame(maxWidth: 460)
                 .frame(maxWidth: .infinity)
             }
         }
-        .sheet(isPresented: $showServerSheet) { ServerURLSheet() }
     }
 
     @ViewBuilder
@@ -138,50 +132,5 @@ struct LoginView: View {
                 self.error = error.localizedDescription
             }
         }
-    }
-}
-
-/// Lets the user point the app at a different server (defaults to data.guythatlives.net).
-struct ServerURLSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @State private var urlString = API.shared.baseURLSync.absoluteString
-    @State private var invalid = false
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    TextField("https://data.guythatlives.net", text: $urlString)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                } header: {
-                    Text("Server URL")
-                } footer: {
-                    Text("The address of your Simplex server. The default is the public Cloudflare domain.")
-                }
-                if invalid {
-                    Text("That doesn't look like a valid URL.").foregroundStyle(.red)
-                }
-            }
-            .navigationTitle("Server")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { save() }
-                }
-            }
-        }
-        .preferredColorScheme(.dark)
-    }
-
-    private func save() {
-        var s = urlString.trimmingCharacters(in: .whitespaces)
-        if !s.contains("://") { s = "https://" + s }
-        guard let url = URL(string: s), url.host != nil else { invalid = true; return }
-        Task { await API.shared.setBaseURL(url); dismiss() }
     }
 }

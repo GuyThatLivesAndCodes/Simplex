@@ -16,7 +16,6 @@ final class Store: ObservableObject {
     @Published private(set) var files: [FileItem] = []
     @Published var isRefreshing = false
     @Published var lastError: String?
-    @Published var showServer = false
 
     /// Active upload tasks (shown in a small tray while running).
     @Published var uploads: [UploadTask] = []

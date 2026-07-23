@@ -1176,6 +1176,26 @@ function openStore(accountId) {
       symbol TEXT, side TEXT, qty REAL, price REAL, pnl REAL, reason TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_trading_log_ts ON trading_log(ts);
+    -- Habit app (iOS-EXCLUSIVE system): the user's habits + their daily check-offs.
+    -- Server-backed so habits sync across the user's devices. Per-account DB, so a
+    -- user's habits are only ever visible to them. name + note are encrypted at
+    -- rest with the account keys (like notes/code); the rest are small enums/numbers.
+    --   habits — one row per habit. slot is 'morning'|'afternoon'|'evening'|'allday';
+    --     freq is 'daily' or a JSON weekday mask; icon is a small key; sort orders the
+    --     list; archived hides it from Today without deleting its history.
+    --   habit_log — one row per (habit, day) that was completed. day is 'YYYY-MM-DD'
+    --     in the user's local time (the client sends it), so streaks are day-accurate.
+    CREATE TABLE IF NOT EXISTS habits (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, note TEXT, icon TEXT,
+      slot TEXT NOT NULL DEFAULT 'allday', freq TEXT NOT NULL DEFAULT 'daily',
+      reminder TEXT, sort INTEGER NOT NULL DEFAULT 0,
+      archived INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS habit_log (
+      habit_id TEXT NOT NULL, day TEXT NOT NULL, ts INTEGER NOT NULL,
+      PRIMARY KEY (habit_id, day)
+    );
+    CREATE INDEX IF NOT EXISTS idx_habit_log_day ON habit_log(day);
   `);
 
   /* One-time reclassify: EXR/TIFF used to be unsupported, so any that were uploaded
@@ -3046,6 +3066,153 @@ app.patch('/api/admin/tos', requireAdmin, (req, res) => {
     setSetting('tos.version', String(parseInt(b.version, 10)));
   }
   res.json({ ok: true, version: tosVersion(), text: tosText() });
+});
+
+/* ============================================================
+   HABIT app (iOS-exclusive) — per-account habits + daily check-offs
+   ============================================================
+   Server-backed so a user's habits sync across their devices. All data lives in the
+   account's own DB (habits + habit_log tables), so it's private to that account. The
+   habit name/note are encrypted at rest with the account keys; slots/frequency/etc.
+   are small enums. Streaks are computed from habit_log on read. */
+const HABIT_SLOTS = new Set(['morning', 'afternoon', 'evening', 'allday']);
+
+/* shape a DB row into the API form (decrypting the text columns) */
+function habitToApi(row, keys) {
+  if (!row) return null;
+  let name = row.name, note = row.note;
+  try { name = vault.decText(row.name, keys); } catch (e) {}
+  try { note = row.note ? vault.decText(row.note, keys) : null; } catch (e) { note = null; }
+  return {
+    id: row.id, name, note, icon: row.icon || null,
+    slot: row.slot || 'allday', freq: row.freq || 'daily',
+    reminder: row.reminder || null, sort: row.sort || 0,
+    archived: !!row.archived, created: row.created,
+  };
+}
+
+/* local calendar-day helper: YYYY-MM-DD. The client sends its own `day`/`today` for
+   day-accurate streaks in the user's timezone; this is the server-side fallback. */
+function ymdUTC(d = new Date()) {
+  return d.toISOString().slice(0, 10);
+}
+/* compute current + longest streak (consecutive days ending today) for a habit from
+   its completion day-set. `today` is the client's local YYYY-MM-DD. */
+function habitStreaks(daySet, today) {
+  const dayMs = 86400000;
+  const parse = (s) => { const [y, m, d] = s.split('-').map(Number); return Date.UTC(y, m - 1, d); };
+  const base = parse(today);
+  // current: walk backwards from today while days are present (today itself optional)
+  let current = 0;
+  let cursor = daySet.has(today) ? base : base - dayMs;   // if today not done yet, start at yesterday
+  if (daySet.has(today) || daySet.has(ymdUTC(new Date(base - dayMs)))) {
+    while (daySet.has(new Date(cursor).toISOString().slice(0, 10))) { current++; cursor -= dayMs; }
+  }
+  // longest: scan all days
+  let longest = 0;
+  const sorted = [...daySet].sort();
+  let run = 0, prev = null;
+  for (const s of sorted) {
+    const t = parse(s);
+    if (prev !== null && t - prev === dayMs) run++; else run = 1;
+    if (run > longest) longest = run;
+    prev = t;
+  }
+  return { current, longest };
+}
+
+/* GET the full Habit state: habits (non-archived by default) + today's completions +
+   per-habit streak + a 30-day completion grid + overall stats. */
+app.get('/api/habits', (req, res) => {
+  const db = req.store.db, keys = req.store.keys;
+  const today = /^\d{4}-\d{2}-\d{2}$/.test(req.query.today) ? req.query.today : ymdUTC();
+  const includeArchived = req.query.archived === '1';
+  const rows = db.prepare(`SELECT * FROM habits ${includeArchived ? '' : 'WHERE archived = 0'} ORDER BY sort ASC, created ASC`).all();
+  const habits = rows.map(r => {
+    const h = habitToApi(r, keys);
+    const logs = db.prepare('SELECT day FROM habit_log WHERE habit_id = ?').all(r.id).map(x => x.day);
+    const daySet = new Set(logs);
+    h.doneToday = daySet.has(today);
+    h.streak = habitStreaks(daySet, today);
+    h.days = logs;                              // full completion history (for grids/insights)
+    return h;
+  });
+  res.json({ today, habits });
+});
+
+/* create a habit */
+app.post('/api/habits', (req, res) => {
+  const b = req.body || {}, db = req.store.db, keys = req.store.keys;
+  const name = String(b.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'name required' });
+  const slot = HABIT_SLOTS.has(b.slot) ? b.slot : 'allday';
+  const id = 'h' + crypto.randomBytes(8).toString('hex');
+  const maxSort = db.prepare('SELECT COALESCE(MAX(sort), 0) AS m FROM habits').get().m;
+  db.prepare(`INSERT INTO habits (id,name,note,icon,slot,freq,reminder,sort,archived,created)
+              VALUES (@id,@name,@note,@icon,@slot,@freq,@reminder,@sort,0,@created)`).run({
+    id, name: vault.encText(name, keys),
+    note: b.note ? vault.encText(String(b.note), keys) : null,
+    icon: b.icon ? String(b.icon).slice(0, 40) : null,
+    slot, freq: b.freq ? String(b.freq).slice(0, 40) : 'daily',
+    reminder: b.reminder ? String(b.reminder).slice(0, 20) : null,
+    sort: maxSort + 1, created: Date.now(),
+  });
+  res.json(habitToApi(db.prepare('SELECT * FROM habits WHERE id = ?').get(id), keys));
+});
+
+/* update a habit (any subset of fields) */
+app.patch('/api/habits/:id', (req, res) => {
+  const b = req.body || {}, db = req.store.db, keys = req.store.keys;
+  const row = db.prepare('SELECT * FROM habits WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  const sets = [], vals = { id: row.id };
+  if (typeof b.name === 'string' && b.name.trim()) { sets.push('name = @name'); vals.name = vault.encText(b.name.trim(), keys); }
+  if ('note' in b) { sets.push('note = @note'); vals.note = b.note ? vault.encText(String(b.note), keys) : null; }
+  if (typeof b.icon === 'string') { sets.push('icon = @icon'); vals.icon = b.icon.slice(0, 40); }
+  if (HABIT_SLOTS.has(b.slot)) { sets.push('slot = @slot'); vals.slot = b.slot; }
+  if (typeof b.freq === 'string') { sets.push('freq = @freq'); vals.freq = b.freq.slice(0, 40); }
+  if ('reminder' in b) { sets.push('reminder = @reminder'); vals.reminder = b.reminder ? String(b.reminder).slice(0, 20) : null; }
+  if (typeof b.archived === 'boolean') { sets.push('archived = @archived'); vals.archived = b.archived ? 1 : 0; }
+  if (Number.isFinite(b.sort)) { sets.push('sort = @sort'); vals.sort = Math.round(b.sort); }
+  if (sets.length) db.prepare(`UPDATE habits SET ${sets.join(', ')} WHERE id = @id`).run(vals);
+  res.json(habitToApi(db.prepare('SELECT * FROM habits WHERE id = ?').get(row.id), keys));
+});
+
+/* delete a habit (and its completion history) */
+app.delete('/api/habits/:id', (req, res) => {
+  const db = req.store.db;
+  db.prepare('DELETE FROM habit_log WHERE habit_id = ?').run(req.params.id);
+  db.prepare('DELETE FROM habits WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+/* reorder: body { order: [id, id, ...] } sets sort by position */
+app.post('/api/habits/reorder', (req, res) => {
+  const order = Array.isArray(req.body && req.body.order) ? req.body.order : [];
+  const db = req.store.db;
+  const upd = db.prepare('UPDATE habits SET sort = ? WHERE id = ?');
+  const tx = db.transaction(() => { order.forEach((id, i) => upd.run(i, String(id))); });
+  tx();
+  res.json({ ok: true });
+});
+
+/* toggle (or set) a completion for a given day. body { day:'YYYY-MM-DD', done:bool }.
+   day defaults to today (client-supplied or server UTC). Returns the updated habit. */
+app.post('/api/habits/:id/toggle', (req, res) => {
+  const b = req.body || {}, db = req.store.db, keys = req.store.keys;
+  const row = db.prepare('SELECT * FROM habits WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(b.day) ? b.day : ymdUTC();
+  const already = !!db.prepare('SELECT 1 FROM habit_log WHERE habit_id = ? AND day = ?').get(row.id, day);
+  const done = typeof b.done === 'boolean' ? b.done : !already;
+  if (done && !already) db.prepare('INSERT INTO habit_log (habit_id,day,ts) VALUES (?,?,?)').run(row.id, day, Date.now());
+  if (!done && already) db.prepare('DELETE FROM habit_log WHERE habit_id = ? AND day = ?').run(row.id, day);
+  const logs = db.prepare('SELECT day FROM habit_log WHERE habit_id = ?').all(row.id).map(x => x.day);
+  const daySet = new Set(logs);
+  const today = /^\d{4}-\d{2}-\d{2}$/.test(b.today) ? b.today : ymdUTC();
+  const h = habitToApi(row, keys);
+  h.doneToday = daySet.has(today); h.streak = habitStreaks(daySet, today); h.days = logs;
+  res.json(h);
 });
 
 /* ============================================================

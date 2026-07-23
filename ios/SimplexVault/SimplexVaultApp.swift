@@ -4,7 +4,7 @@ import AVFoundation
 @main
 struct SimplexVaultApp: App {
     @StateObject private var store = Store()
-    @ObservedObject private var appr = Appearance.shared
+    @StateObject private var router = SystemRouter()
 
     init() {
         // Playback audio session: lets video/audio play (incl. in silent mode) and
@@ -17,27 +17,29 @@ struct SimplexVaultApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(store)
+                .environmentObject(router)
                 .task { await store.bootstrap() }
-                .preferredColorScheme(appr.colorScheme)   // follows the chosen theme
-                .tint(appr.accent)
                 // Privacy screen: blur + Face ID gate when the app leaves/returns to focus.
                 .modifier(PrivacyScreen())
         }
     }
 }
 
-/// Routes between the loading splash, the login screen, and the signed-in vault.
+/// Routes between the loading splash, the login screen, and the signed-in app shell.
+/// (Color scheme / tint are set per-system inside AppShell, since Habit uses its own
+/// warm theme while Database follows the user's chosen appearance.)
 struct RootView: View {
     @EnvironmentObject var store: Store
+    @ObservedObject private var appr = Appearance.shared
 
     var body: some View {
         switch store.phase {
         case .loading:
-            LoadingView()
+            LoadingView().preferredColorScheme(appr.colorScheme).tint(appr.accent)
         case .signedOut:
-            LoginView()
+            LoginView().preferredColorScheme(appr.colorScheme).tint(appr.accent)
         case .signedIn:
-            VaultView()
+            AppShell()
         }
     }
 }

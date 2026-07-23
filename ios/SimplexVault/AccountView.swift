@@ -60,9 +60,6 @@ struct AccountView: View {
             .listRowBackground(SimplexTheme.surface)
 
             Section {
-                Button { store.showServer = true } label: {
-                    Label("Server", systemImage: "network").foregroundStyle(SimplexTheme.text)
-                }
                 Button(role: .destructive) {
                     Task { await store.signOut() }
                 } label: {
@@ -83,7 +80,6 @@ struct AccountView: View {
         .background(SimplexTheme.bg)
         .navigationTitle("Account")
         .navigationBarTitleDisplayMode(.large)
-        .sheet(isPresented: $store.showServer) { ServerURLSheet() }
     }
 
     // storage meter split into Docs / Images / Media, like the reference

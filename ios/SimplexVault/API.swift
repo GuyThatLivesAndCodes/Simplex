@@ -19,15 +19,16 @@ struct APIError: LocalizedError {
 actor API {
     static let shared = API()
 
-    /// Persisted so it survives app relaunch (the picker in Settings writes it).
-    private(set) var baseURL: URL
+    /// The one and only Simplex server. This app IS Simplex — it talks to
+    /// data.guythatlives.net and nowhere else. (Other Simplex-based servers, if any,
+    /// would ship their own app; a server picker was removed on purpose.)
+    static let serverURL = URL(string: "https://data.guythatlives.net")!
+
+    let baseURL = API.serverURL
 
     private let session: URLSession
 
     private init() {
-        let saved = UserDefaults.standard.string(forKey: "serverURL")
-        self.baseURL = URL(string: saved ?? "https://data.guythatlives.net")!
-
         let cfg = URLSessionConfiguration.default
         cfg.httpCookieStorage = HTTPCookieStorage.shared
         cfg.httpCookieAcceptPolicy = .always
@@ -36,11 +37,6 @@ actor API {
         cfg.timeoutIntervalForRequest = 30
         cfg.waitsForConnectivity = true
         self.session = URLSession(configuration: cfg)
-    }
-
-    func setBaseURL(_ url: URL) {
-        baseURL = url
-        UserDefaults.standard.set(url.absoluteString, forKey: "serverURL")
     }
 
     // MARK: - request plumbing
@@ -220,6 +216,42 @@ actor API {
         return try decode(R.self, from: data).account
     }
 
+    // MARK: - Habit (iOS-exclusive system)
+
+    func listHabits(today: String, includeArchived: Bool = false) async throws -> [Habit] {
+        var path = "/api/habits?today=\(today)"
+        if includeArchived { path += "&archived=1" }
+        struct R: Decodable { let today: String; let habits: [Habit] }
+        return try decode(R.self, from: try await run(request(path))).habits
+    }
+
+    func createHabit(name: String, slot: String, icon: String?, freq: String, reminder: String?, note: String?) async throws -> Habit {
+        var body: [String: Any] = ["name": name, "slot": slot, "freq": freq]
+        if let icon { body["icon"] = icon }
+        if let reminder { body["reminder"] = reminder }
+        if let note { body["note"] = note }
+        return try decode(Habit.self, from: try await run(request("/api/habits", method: "POST", json: body)))
+    }
+
+    func updateHabit(id: String, changes: [String: Any]) async throws -> Habit {
+        try decode(Habit.self, from: try await run(request("/api/habits/\(id)", method: "PATCH", json: changes)))
+    }
+
+    func deleteHabit(id: String) async throws {
+        _ = try await run(request("/api/habits/\(id)", method: "DELETE"))
+    }
+
+    func reorderHabits(order: [String]) async throws {
+        _ = try await run(request("/api/habits/reorder", method: "POST", json: ["order": order]))
+    }
+
+    /// Toggle (or set) a habit's completion for a day. Returns the updated habit.
+    func toggleHabit(id: String, day: String, today: String, done: Bool?) async throws -> Habit {
+        var body: [String: Any] = ["day": day, "today": today]
+        if let done { body["done"] = done }
+        return try decode(Habit.self, from: try await run(request("/api/habits/\(id)/toggle", method: "POST", json: body)))
+    }
+
     // MARK: - Terms of Service
 
     struct Tos: Decodable { let version: Int; let text: String }
@@ -256,12 +288,9 @@ actor API {
         return URL(string: u + "?dl=1", relativeTo: baseURLSync)?.absoluteURL
     }
 
-    /// A non-actor mirror of baseURL for the nonisolated URL builders. Kept in sync
-    /// on every setBaseURL. (URL building must be synchronous for SwiftUI views.)
-    nonisolated var baseURLSync: URL {
-        URL(string: UserDefaults.standard.string(forKey: "serverURL")
-            ?? "https://data.guythatlives.net")!
-    }
+    /// The fixed server URL, available synchronously for the nonisolated URL builders
+    /// (SwiftUI views build URLs without awaiting). Always the one Simplex server.
+    nonisolated var baseURLSync: URL { API.serverURL }
 
     // MARK: - download to a local file (for "Save to Files" / share sheet)
 
