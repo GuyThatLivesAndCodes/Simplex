@@ -11,3 +11,4 @@
 *.xcscheme       text eol=lf
 *.plist          text eol=lf
 *.png            binary
+*.caf            binary

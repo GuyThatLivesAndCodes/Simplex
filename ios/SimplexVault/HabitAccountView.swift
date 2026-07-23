@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 /// The Habit system's own Account page — habit-scoped only. Appearance and the main
 /// account (identity, storage, Face ID, sign out) live in the Database/Vault account, not
@@ -55,7 +56,9 @@ struct HabitAccountView: View {
 
             // habit settings
             Section("Reminders") {
-                HabitNotifSettingRow()
+                NavigationLink { HabitNotifSettingsView().environmentObject(habits) } label: {
+                    HabitNotifSummaryRow()
+                }
             }
             .listRowBackground(HabitTheme.card)
 
@@ -73,24 +76,108 @@ struct HabitAccountView: View {
     }
 }
 
-/// A read-only summary of notification status with a shortcut to Settings if disabled.
-private struct HabitNotifSettingRow: View {
-    @State private var status: String = "…"
+/// Compact summary row shown in the account list (taps into the full settings screen).
+private struct HabitNotifSummaryRow: View {
+    @ObservedObject private var prefs = HabitNotifPrefs.shared
     var body: some View {
         HStack {
-            Label("Notifications", systemImage: "bell")
-                .foregroundStyle(HabitTheme.ink)
+            Label("Notifications", systemImage: "bell.badge").foregroundStyle(HabitTheme.ink)
             Spacer()
-            Text(status).font(.system(size: 13)).foregroundStyle(HabitTheme.inkSoft)
-        }
-        .task {
-            let s = await HabitNotifications.authorizationStatus()
-            status = (s == .authorized || s == .provisional) ? "On" : "Off in Settings"
-        }
-        .onTapGesture {
-            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+            Text(prefs.enabled ? "\(prefs.sound.name)" : "Off")
+                .font(.system(size: 13)).foregroundStyle(HabitTheme.inkSoft)
         }
     }
+}
+
+/// Full notification settings: master enable, sound picker (with preview), time-sensitive
+/// delivery, and a system-permission shortcut. Changes reschedule pending reminders.
+struct HabitNotifSettingsView: View {
+    @EnvironmentObject var habits: HabitStore
+    @ObservedObject private var prefs = HabitNotifPrefs.shared
+    @State private var systemStatus: UNAuthorizationStatus = .notDetermined
+
+    var body: some View {
+        List {
+            // permission banner if the OS has notifications disabled for the app
+            if systemStatus != .authorized && systemStatus != .provisional {
+                Section {
+                    Button {
+                        if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Notifications are off in iOS Settings").font(.system(size: 14, weight: .medium)).foregroundStyle(HabitTheme.ink)
+                                Text("Tap to enable them for Simplex — otherwise reminders can't be delivered.")
+                                    .font(.system(size: 12)).foregroundStyle(HabitTheme.inkSoft)
+                            }
+                        }
+                    }
+                }
+                .listRowBackground(HabitTheme.card)
+            }
+
+            // master enable
+            Section {
+                Toggle(isOn: Binding(get: { prefs.enabled }, set: { prefs.enabled = $0; reschedule() })) {
+                    Label("Reminder notifications", systemImage: "bell").foregroundStyle(HabitTheme.ink)
+                }.tint(HabitTheme.terracotta)
+            } footer: {
+                Text("Get a push when a habit's time-of-day period starts (and a gentle nudge before it ends) if it's still not done.")
+            }
+            .listRowBackground(HabitTheme.card)
+
+            // sound picker
+            Section {
+                ForEach(NotifSound.all) { s in
+                    Button {
+                        prefs.soundId = s.id
+                        NotifSound.preview(s)   // hear it immediately
+                        reschedule()
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: s.symbol).frame(width: 22).foregroundStyle(HabitTheme.terracotta)
+                            Text(s.name).foregroundStyle(HabitTheme.ink)
+                            Spacer()
+                            if s.id != "silent" {
+                                Button { NotifSound.preview(s) } label: { Image(systemName: "play.circle").foregroundStyle(HabitTheme.inkSoft) }
+                                    .buttonStyle(.plain)
+                            }
+                            if prefs.soundId == s.id { Image(systemName: "checkmark").foregroundStyle(HabitTheme.terracotta) }
+                        }
+                    }
+                    .disabled(!prefs.enabled)
+                    .opacity(prefs.enabled ? 1 : 0.5)
+                }
+            } header: {
+                Text("Sound")
+            } footer: {
+                Text("Pick a distinctive sound so Simplex reminders stand out. Tap any to preview.")
+            }
+            .listRowBackground(HabitTheme.card)
+
+            // time sensitive
+            Section {
+                Toggle(isOn: Binding(get: { prefs.timeSensitive }, set: { prefs.timeSensitive = $0; reschedule() })) {
+                    Label("Time Sensitive", systemImage: "clock.badge.exclamationmark").foregroundStyle(HabitTheme.ink)
+                }.tint(HabitTheme.terracotta).disabled(!prefs.enabled)
+            } footer: {
+                Text("Delivers reminders as Time Sensitive so they break through Focus modes and appear near the top — above quieter apps. Requires notification permission; if your build wasn't granted the Time Sensitive capability, they're delivered normally instead.")
+            }
+            .listRowBackground(HabitTheme.card)
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .background(HabitTheme.cream)
+        .navigationTitle("Notifications")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            await HabitNotifications.requestAuthorization()
+            systemStatus = await HabitNotifications.authorizationStatus()
+        }
+    }
+
+    private func reschedule() { HabitNotifications.reschedule(habits.habits) }
 }
 
 /// Backups list — pick a day and restore (overwriting the phone), or back up now.

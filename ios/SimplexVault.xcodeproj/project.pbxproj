@@ -21,6 +21,12 @@
 		52E52F7814CE3460F74F3C8B /* HabitLocal.swift in Sources */ = {isa = PBXBuildFile; fileRef = E88348B3CFB5A3B24EC8787C /* HabitLocal.swift */; };
 		4CDABF20DB92CA464ABF19BD /* HabitModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00EBE2225F19F5C701F88952 /* HabitModels.swift */; };
 		9BA38637158F000AD1B41B9A /* HabitNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EC2FA968FCD46AC8C9B99FD /* HabitNotifications.swift */; };
+		EF864C8EBE3CBC45CAC6896C /* HabitNotifPrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E8B116CE7436D5BFD73727C /* HabitNotifPrefs.swift */; };
+		2F429B66A7757E0A670DB4BD /* chime.caf in Resources */ = {isa = PBXBuildFile; fileRef = 846EA6D7A0B94203F8B609AD /* chime.caf */; };
+		F2D4EC9C31D1627056025C01 /* ping.caf in Resources */ = {isa = PBXBuildFile; fileRef = 402605EB9344D6A04A24328F /* ping.caf */; };
+		C0547603A5AC75CE406C98F8 /* marimba.caf in Resources */ = {isa = PBXBuildFile; fileRef = B24BB046C7F5E63C25F612E7 /* marimba.caf */; };
+		9C121A821E35AB9D5338BDDC /* bloom.caf in Resources */ = {isa = PBXBuildFile; fileRef = 6687EE5C1A76DF324417CE0E /* bloom.caf */; };
+		CFD902BC6CEA110801846AD5 /* alert.caf in Resources */ = {isa = PBXBuildFile; fileRef = 770F24296B8EEF9ECC782903 /* alert.caf */; };
 		BBE66C9481F65EC2323163BF /* HabitScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB0ED4D8ADBEE91EF0E277B5 /* HabitScreens.swift */; };
 		6E3F65BC23F14BEC4435E12C /* HabitShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = F13B75661F010C924BB6FA4E /* HabitShell.swift */; };
 		C7CECD6DD1AECE8393C74662 /* NeuralEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F58EBBF59E91E98E730466B /* NeuralEngine.swift */; };
@@ -67,6 +73,12 @@
 		E88348B3CFB5A3B24EC8787C /* HabitLocal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitLocal.swift; sourceTree = "<group>"; };
 		00EBE2225F19F5C701F88952 /* HabitModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitModels.swift; sourceTree = "<group>"; };
 		1EC2FA968FCD46AC8C9B99FD /* HabitNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitNotifications.swift; sourceTree = "<group>"; };
+		4E8B116CE7436D5BFD73727C /* HabitNotifPrefs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitNotifPrefs.swift; sourceTree = "<group>"; };
+		846EA6D7A0B94203F8B609AD /* chime.caf */ = {isa = PBXFileReference; lastKnownFileType = file; name = chime.caf; path = Sounds/chime.caf; sourceTree = "<group>"; };
+		402605EB9344D6A04A24328F /* ping.caf */ = {isa = PBXFileReference; lastKnownFileType = file; name = ping.caf; path = Sounds/ping.caf; sourceTree = "<group>"; };
+		B24BB046C7F5E63C25F612E7 /* marimba.caf */ = {isa = PBXFileReference; lastKnownFileType = file; name = marimba.caf; path = Sounds/marimba.caf; sourceTree = "<group>"; };
+		6687EE5C1A76DF324417CE0E /* bloom.caf */ = {isa = PBXFileReference; lastKnownFileType = file; name = bloom.caf; path = Sounds/bloom.caf; sourceTree = "<group>"; };
+		770F24296B8EEF9ECC782903 /* alert.caf */ = {isa = PBXFileReference; lastKnownFileType = file; name = alert.caf; path = Sounds/alert.caf; sourceTree = "<group>"; };
 		EB0ED4D8ADBEE91EF0E277B5 /* HabitScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitScreens.swift; sourceTree = "<group>"; };
 		F13B75661F010C924BB6FA4E /* HabitShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitShell.swift; sourceTree = "<group>"; };
 		9F58EBBF59E91E98E730466B /* NeuralEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeuralEngine.swift; sourceTree = "<group>"; };
@@ -132,6 +144,12 @@
 				E88348B3CFB5A3B24EC8787C /* HabitLocal.swift */,
 				00EBE2225F19F5C701F88952 /* HabitModels.swift */,
 				1EC2FA968FCD46AC8C9B99FD /* HabitNotifications.swift */,
+				4E8B116CE7436D5BFD73727C /* HabitNotifPrefs.swift */,
+				846EA6D7A0B94203F8B609AD /* chime.caf */,
+				402605EB9344D6A04A24328F /* ping.caf */,
+				B24BB046C7F5E63C25F612E7 /* marimba.caf */,
+				6687EE5C1A76DF324417CE0E /* bloom.caf */,
+				770F24296B8EEF9ECC782903 /* alert.caf */,
 				EB0ED4D8ADBEE91EF0E277B5 /* HabitScreens.swift */,
 				F13B75661F010C924BB6FA4E /* HabitShell.swift */,
 				9F58EBBF59E91E98E730466B /* NeuralEngine.swift */,
@@ -231,6 +249,11 @@
 			buildActionMask = 2147483647;
 			files = (
 				222F0DBFFE5EB23DCD3FD16F /* Assets.xcassets in Resources */,
+				2F429B66A7757E0A670DB4BD /* chime.caf in Resources */,
+				F2D4EC9C31D1627056025C01 /* ping.caf in Resources */,
+				C0547603A5AC75CE406C98F8 /* marimba.caf in Resources */,
+				9C121A821E35AB9D5338BDDC /* bloom.caf in Resources */,
+				CFD902BC6CEA110801846AD5 /* alert.caf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -255,6 +278,7 @@
 				52E52F7814CE3460F74F3C8B /* HabitLocal.swift in Sources */,
 				4CDABF20DB92CA464ABF19BD /* HabitModels.swift in Sources */,
 				9BA38637158F000AD1B41B9A /* HabitNotifications.swift in Sources */,
+				EF864C8EBE3CBC45CAC6896C /* HabitNotifPrefs.swift in Sources */,
 				BBE66C9481F65EC2323163BF /* HabitScreens.swift in Sources */,
 				6E3F65BC23F14BEC4435E12C /* HabitShell.swift in Sources */,
 				C7CECD6DD1AECE8393C74662 /* NeuralEngine.swift in Sources */,

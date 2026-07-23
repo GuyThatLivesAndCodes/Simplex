@@ -33,19 +33,29 @@ enum HabitNotifications {
         await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
     }
 
+    /// A plain snapshot of the user's notification prefs, safe to read off the main actor
+    /// inside the scheduling Task.
+    struct Prefs { var enabled: Bool; var sound: UNNotificationSound?; var timeSensitive: Bool }
+
     /// Reschedule reminders for the whole active habit list. Clears everything we own and
     /// re-adds for habits with notify on that aren't archived. Safe to call often.
+    /// @MainActor because it reads the user's HabitNotifPrefs (main-actor); all callers
+    /// (HabitStore, HabitShell) are already on the main actor.
+    @MainActor
     static func reschedule(_ habits: [Habit]) {
+        // Read the user's chosen sound / time-sensitive / enabled prefs on the main actor,
+        // then hand a plain snapshot to the background scheduling task.
+        let p = HabitNotifPrefs.shared
+        let prefs = Prefs(enabled: p.enabled, sound: p.sound.unSound, timeSensitive: p.timeSensitive)
         let center = UNUserNotificationCenter.current()
         Task {
-            // only schedule if the user granted permission
-            let status = await authorizationStatus()
-            guard status == .authorized || status == .provisional else {
-                center.removeAllPendingNotificationRequests(); return
-            }
             center.removeAllPendingNotificationRequests()
+            // global off, or permission not granted → schedule nothing.
+            guard prefs.enabled else { return }
+            let status = await authorizationStatus()
+            guard status == .authorized || status == .provisional else { return }
             for h in habits where !h.archived && h.notifyOn {
-                schedule(h, in: center)
+                schedule(h, prefs: prefs, in: center)
             }
         }
     }
@@ -62,20 +72,20 @@ enum HabitNotifications {
         ["habit.\(habitId).start", "habit.\(habitId).end"]
     }
 
-    private static func schedule(_ h: Habit, in center: UNUserNotificationCenter) {
+    private static func schedule(_ h: Habit, prefs: Prefs, in center: UNUserNotificationCenter) {
         let win = window(h.slotEnum)
 
         // START reminder — use the habit's own reminder time if set, else the period start.
         var startComps = win.start
         if let r = h.reminder, let parsed = parse(r) { startComps = parsed }
         add(id: "habit.\(h.id).start", title: h.name,
-            body: startBody(h), at: startComps, center: center)
+            body: startBody(h), at: startComps, prefs: prefs, center: center)
 
         // END-OF-PERIOD nudge — a gentle "still time" reminder before the window closes.
         // (All-day gets just the single start reminder; a late all-day nudge is noise.)
         if h.slotEnum != .allday {
             add(id: "habit.\(h.id).end", title: h.name,
-                body: "Still time to do this today.", at: win.end, center: center)
+                body: "Still time to do this today.", at: win.end, prefs: prefs, center: center)
         }
     }
 
@@ -91,11 +101,16 @@ enum HabitNotifications {
         case .evening: return "evening"; case .allday: return "day" }
     }
 
-    private static func add(id: String, title: String, body: String, at comps: DateComponents, center: UNUserNotificationCenter) {
+    private static func add(id: String, title: String, body: String, at comps: DateComponents, prefs: Prefs, center: UNUserNotificationCenter) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        content.sound = .default
+        content.sound = prefs.sound   // the user's chosen sound (nil = silent banner)
+        // Time Sensitive breaks through Focus modes and shows prominently instead of being
+        // buried under louder apps. If the app isn't granted the Time Sensitive entitlement
+        // (e.g. sideloaded without it) iOS silently treats this as `.active` — no harm.
+        content.interruptionLevel = prefs.timeSensitive ? .timeSensitive : .active
+        content.relevanceScore = 1.0   // rank Simplex's reminder high in notification summaries
         var c = comps; c.second = 0
         let trigger = UNCalendarNotificationTrigger(dateMatching: c, repeats: true)   // daily
         center.add(UNNotificationRequest(identifier: id, content: content, trigger: trigger))
