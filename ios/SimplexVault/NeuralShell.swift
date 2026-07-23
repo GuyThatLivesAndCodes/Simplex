@@ -110,7 +110,7 @@ struct NeuralModelsView: View {
 
 struct NeuralTemplatesView: View {
     @EnvironmentObject var neural: NeuralStore
-    @State private var created: NeuralDoc?
+    @State private var createdId: String?
 
     var body: some View {
         ZStack {
@@ -127,12 +127,12 @@ struct NeuralTemplatesView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .principal) { Text("Templates").font(.system(size: 17, weight: .semibold)).foregroundStyle(SimplexTheme.text) } }
-        .navigationDestination(item: $created) { doc in NeuralWorkspace(modelId: doc.id) }
+        .navigationDestination(item: $createdId) { id in NeuralWorkspace(modelId: id) }
     }
 
     private func templateCard(_ t: NeuralTemplate) -> some View {
         Button {
-            created = neural.createFromTemplate(t)
+            createdId = neural.createFromTemplate(t).id
         } label: {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 10) {

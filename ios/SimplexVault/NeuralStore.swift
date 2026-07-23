@@ -8,6 +8,11 @@ import SwiftUI
 /// Habit system's local-first design.
 @MainActor
 final class NeuralStore: ObservableObject {
+    /// The live instance (set on init). AppShell owns exactly one NeuralStore, so this
+    /// weak singleton lets the off-main training task report progress back to the main
+    /// actor without capturing `self` into concurrently-executing code (a Swift 6 error).
+    static weak var shared: NeuralStore?
+
     @Published var models: [NeuralDoc] = []
     @Published var loaded = false
     @Published var error: String?
@@ -21,6 +26,8 @@ final class NeuralStore: ObservableObject {
     /// server id per local model id (for updates); models created locally get a server id
     /// on first successful push.
     private var serverId: [String: String] = [:]
+
+    init() { NeuralStore.shared = self }
 
     // MARK: - load / persist
 
@@ -135,30 +142,36 @@ final class NeuralStore: ObservableObject {
     func stopTraining() { stopFlag = true }
 
     func train(_ id: String) {
-        guard !training, var doc = model(id) else { return }
+        guard !training, let doc = model(id) else { return }
         let corpus = doc.buildCorpus()
         guard corpus.count >= 8 else { trainStatus = "add training data first"; return }
         training = true; stopFlag = false; trainingId = id
         trainStatus = "preparing…"
 
-        // capture immutable inputs for the background task
+        // Capture ONLY immutable, sendable values for the background work. All access to
+        // `self` happens back on the main actor via awaited hops — the detached task
+        // touches nothing actor-isolated, which keeps it clean under Swift 6 concurrency.
         let arch = doc.arch
         let optCfg = doc.trainState.opt
+        let startModel = doc.model
+        let startSteps = doc.trainState.steps
+        let startLosses = doc.trainState.lossHistory
 
-        Task.detached(priority: .userInitiated) { [weak self] in
+        Task.detached(priority: .userInitiated) {
             // build tokenizer + model if needed (heavy; off main)
             var model: NeuralEngine.Model
-            if let existing = doc.model {
+            if let existing = startModel {
                 model = existing
             } else {
                 let tok = Tokenizer.train(String(corpus.prefix(500_000)), mode: arch.tokMode, maxVocab: arch.maxVocab)
                 model = NeuralEngine.llmInit(tok: tok, ctx: arch.ctx, embed: arch.embed, act: arch.act,
                                              dropout: arch.dropout, layers: arch.layers, seed: optCfg.seed)
-                await MainActor.run { self?.trainStatus = "tokenizer: \(tok.vocab.count) tokens" }
+                let vocab = tok.vocab.count
+                await MainActor.run { NeuralStore.shared?.trainStatus = "tokenizer: \(vocab) tokens" }
             }
             let ids = model.tok.encode(corpus)
             guard ids.count >= model.cfg.ctx + 2 else {
-                await MainActor.run { self?.finishTraining(id, model: nil, steps: 0, losses: []) ; self?.trainStatus = "not enough text for this context" }
+                await MainActor.run { NeuralStore.shared?.finishTraining(id, model: nil, steps: 0, losses: []); NeuralStore.shared?.trainStatus = "not enough text for this context" }
                 return
             }
 
@@ -168,11 +181,11 @@ final class NeuralStore: ObservableObject {
             let itersPerEpoch = max(3, min(50, ids.count / max(1, arch.ctx * optCfg.batch)))
             let totalIters = itersPerEpoch * max(1, optCfg.epochs)
 
-            var steps = doc.trainState.steps
-            var losses = doc.trainState.lossHistory
+            var steps = startSteps
+            var losses = startLosses
 
             for iter in 0..<totalIters {
-                if await self?.isStopped() ?? true { break }
+                if await NeuralStore.shared?.isStopped() ?? true { break }
                 let loss = NeuralEngine.trainChunk(&model, ids: ids, opt: opt, batch: optCfg.batch,
                                                    steps: stepsPerIter, seed: optCfg.seed, iter: steps)
                 steps += stepsPerIter
@@ -180,32 +193,30 @@ final class NeuralStore: ObservableObject {
                 if losses.count > 400 { losses = Array(losses.suffix(400)) }
                 let epoch = min(optCfg.epochs, iter / itersPerEpoch + 1)
                 let snapModel = model, snapSteps = steps, snapLosses = losses
+                let statusLine = String(format: "%d steps · loss %.3f · epoch %d/%d", snapSteps, loss, epoch, optCfg.epochs)
+                let doCheckpoint = (iter % 4 == 0 || iter == totalIters - 1)
                 await MainActor.run {
-                    self?.trainStatus = String(format: "%d steps · loss %.3f · epoch %d/%d", snapSteps, loss, epoch, optCfg.epochs)
-                    // periodically checkpoint so progress isn't lost if the app is killed
-                    if iter % 4 == 0 || iter == totalIters - 1 {
-                        self?.checkpoint(id, model: snapModel, steps: snapSteps, losses: snapLosses)
-                    }
+                    guard let store = NeuralStore.shared else { return }
+                    store.trainStatus = statusLine
+                    if doCheckpoint { store.checkpoint(id, model: snapModel, steps: snapSteps, losses: snapLosses) }
                 }
             }
             let finalModel = model, finalSteps = steps, finalLosses = losses
-            await MainActor.run {
-                self?.finishTraining(id, model: finalModel, steps: finalSteps, losses: finalLosses)
-            }
+            await MainActor.run { NeuralStore.shared?.finishTraining(id, model: finalModel, steps: finalSteps, losses: finalLosses) }
         }
     }
 
-    private func isStopped() -> Bool { stopFlag }
+    func isStopped() -> Bool { stopFlag }
 
     /// Mid-training checkpoint into the doc + local store (no server push each tick).
-    private func checkpoint(_ id: String, model: NeuralEngine.Model, steps: Int, losses: [Double]) {
+    func checkpoint(_ id: String, model: NeuralEngine.Model, steps: Int, losses: [Double]) {
         guard var doc = self.model(id) else { return }
         doc.model = model; doc.trainState.steps = steps; doc.trainState.lossHistory = losses
         NeuralLocalStore.save(doc)
         if let i = models.firstIndex(where: { $0.id == id }) { models[i] = doc }
     }
 
-    private func finishTraining(_ id: String, model: NeuralEngine.Model?, steps: Int, losses: [Double]) {
+    func finishTraining(_ id: String, model: NeuralEngine.Model?, steps: Int, losses: [Double]) {
         training = false; stopFlag = false; trainingId = nil
         guard var doc = self.model(id) else { return }
         if let model { doc.model = model; doc.trainState.steps = steps; doc.trainState.lossHistory = losses }
@@ -216,7 +227,7 @@ final class NeuralStore: ObservableObject {
     // MARK: - inference
 
     /// Generate a reply. Runs off-main and returns via the completion on the main actor.
-    func generate(_ id: String, prompt: String, length: Int, temperature: Double, completion: @escaping (String) -> Void) {
+    func generate(_ id: String, prompt: String, length: Int, temperature: Double, completion: @escaping @MainActor (String) -> Void) {
         guard let doc = model(id), let model = doc.model, doc.trainState.steps > 0 else { completion("(train the model first)"); return }
         Task.detached(priority: .userInitiated) {
             let text = NeuralEngine.sample(model, prompt: prompt, length: length, temperature: temperature,
