@@ -329,18 +329,24 @@ enum NeuralEngine {
         var dOut = dStream
         for L in stride(from: m.blocks.count - 1, through: 0, by: -1) {
             let blk = m.blocks[L]; let c = caches[L]
+            // Work on a LOCAL copy of this block's grads and write it back once. This
+            // avoids Swift's exclusivity error from passing two `inout` references to
+            // different fields of the same `grads.blocks[L]` array element at once.
+            var gb = grads.blocks[L]
             var dRes1 = [[Double]](repeating: [Double](repeating: 0, count: E), count: T)
             // MLP backward
             for t in 0..<T {
                 let dO = dOut[t]
                 for i in 0..<E { dRes1[t][i] += dO[i] }
                 let a = c.hAct[t]; var da = [Double](repeating: 0, count: blk.h)
-                for i in 0..<E { let dl = dO[i]; grads.blocks[L].b2[i] += dl; let base = i * blk.h; for k in 0..<blk.h { grads.blocks[L].W2[base + k] += dl * a[k]; da[k] += dl * blk.W2[base + k] } }
+                for i in 0..<E { let dl = dO[i]; gb.b2[i] += dl; let base = i * blk.h; for k in 0..<blk.h { gb.W2[base + k] += dl * a[k]; da[k] += dl * blk.W2[base + k] } }
                 var dpre = [Double](repeating: 0, count: blk.h); let pre = c.hPre[t]
                 for k in 0..<blk.h { dpre[k] = da[k] * actDF(m.cfg.act, pre[k], a[k]) }
                 var dn2 = [Double](repeating: 0, count: E); let n2 = c.normed2[t]
-                for k in 0..<blk.h { let dl = dpre[k]; grads.blocks[L].b1[k] += dl; let base = k * E; for j in 0..<E { grads.blocks[L].W1[base + j] += dl * n2[j]; dn2[j] += dl * blk.W1[base + j] } }
-                let dx = layerNormBack(dn2, c.ln2xh[t], c.ln2inv[t], blk.ln2g, E, &grads.blocks[L].ln2g, &grads.blocks[L].ln2b)
+                for k in 0..<blk.h { let dl = dpre[k]; gb.b1[k] += dl; let base = k * E; for j in 0..<E { gb.W1[base + j] += dl * n2[j]; dn2[j] += dl * blk.W1[base + j] } }
+                var g1 = gb.ln2g, g2 = gb.ln2b
+                let dx = layerNormBack(dn2, c.ln2xh[t], c.ln2inv[t], blk.ln2g, E, &g1, &g2)
+                gb.ln2g = g1; gb.ln2b = g2
                 for j in 0..<E { dRes1[t][j] += dx[j] }
             }
             // attention backward
@@ -350,7 +356,7 @@ enum NeuralEngine {
             for t in 0..<T {
                 for i in 0..<E { dStreamIn[t][i] += dRes1[t][i] }
                 let ao = c.attnOut[t]; let dO = dRes1[t]
-                for i in 0..<E { let dl = dO[i]; let base = i * E; for k in 0..<E { grads.blocks[L].Wo[base + k] += dl * ao[k]; dAttnOut[t][k] += dl * blk.Wo[base + k] } }
+                for i in 0..<E { let dl = dO[i]; let base = i * E; for k in 0..<E { gb.Wo[base + k] += dl * ao[k]; dAttnOut[t][k] += dl * blk.Wo[base + k] } }
             }
             var dQ = [[Double]](repeating: [Double](repeating: 0, count: E), count: T)
             var dK = [[Double]](repeating: [Double](repeating: 0, count: E), count: T)
@@ -372,14 +378,17 @@ enum NeuralEngine {
             }
             for t in 0..<T {
                 let n1 = c.normed1[t]
-                accumProj(&grads.blocks[L].Wq, blk.Wq, dQ[t], n1, &dNormed[t], E)
-                accumProj(&grads.blocks[L].Wk, blk.Wk, dK[t], n1, &dNormed[t], E)
-                accumProj(&grads.blocks[L].Wv, blk.Wv, dV[t], n1, &dNormed[t], E)
+                var wq = gb.Wq; accumProj(&wq, blk.Wq, dQ[t], n1, &dNormed[t], E); gb.Wq = wq
+                var wk = gb.Wk; accumProj(&wk, blk.Wk, dK[t], n1, &dNormed[t], E); gb.Wk = wk
+                var wv = gb.Wv; accumProj(&wv, blk.Wv, dV[t], n1, &dNormed[t], E); gb.Wv = wv
             }
             for t in 0..<T {
-                let dx = layerNormBack(dNormed[t], c.ln1xh[t], c.ln1inv[t], blk.ln1g, E, &grads.blocks[L].ln1g, &grads.blocks[L].ln1b)
+                var g1 = gb.ln1g, g2 = gb.ln1b
+                let dx = layerNormBack(dNormed[t], c.ln1xh[t], c.ln1inv[t], blk.ln1g, E, &g1, &g2)
+                gb.ln1g = g1; gb.ln1b = g2
                 for j in 0..<E { dStreamIn[t][j] += dx[j] }
             }
+            grads.blocks[L] = gb
             dOut = dStreamIn
         }
 
