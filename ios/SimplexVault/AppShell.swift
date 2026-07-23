@@ -7,20 +7,25 @@ struct AppShell: View {
     @EnvironmentObject var store: Store
     @EnvironmentObject var router: SystemRouter
     @ObservedObject private var appr = Appearance.shared
+    // Owned HERE (not inside HabitShell) so switching systems and coming back doesn't
+    // destroy + recreate the store — which made habits briefly vanish and could pop
+    // onboarding on return. It stays loaded for the life of the session.
+    @StateObject private var habitStore = HabitStore()
 
     var body: some View {
         Group {
             switch router.active {
             case .database:
                 DatabaseShell()
-                    .preferredColorScheme(appr.colorScheme)
-                    .tint(appr.accent)
             case .habit:
                 HabitShell()
-                    .preferredColorScheme(.light)     // Habit is a warm light experience
-                    .tint(HabitTheme.terracotta)
             }
         }
+        // Both systems follow the app's chosen appearance (dark/light + accent), so the
+        // whole app reads as one product with no outlier screens.
+        .preferredColorScheme(appr.colorScheme)
+        .tint(appr.accent)
+        .environmentObject(habitStore)
         .sheet(isPresented: $router.showSwitcher) { SystemSwitcher() }
     }
 }

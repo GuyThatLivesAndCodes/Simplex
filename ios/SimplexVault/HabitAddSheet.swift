@@ -34,7 +34,7 @@ struct HabitAddSheet: View {
                                 Button { icon = key } label: {
                                     Image(systemName: habitIcon(key))
                                         .font(.system(size: 17))
-                                        .foregroundStyle(icon == key ? HabitTheme.cream : HabitTheme.ink)
+                                        .foregroundStyle(icon == key ? .white : HabitTheme.ink)
                                         .frame(width: 44, height: 44)
                                         .background(icon == key ? HabitTheme.terracotta : HabitTheme.card, in: RoundedRectangle(cornerRadius: 12))
                                         .overlay(RoundedRectangle(cornerRadius: 12).stroke(HabitTheme.line))
@@ -56,9 +56,9 @@ struct HabitAddSheet: View {
                             ForEach(HabitSlot.allCases) { s in
                                 Button { slot = s } label: {
                                     Text(s.title).font(.system(size: 13, weight: .medium))
-                                        .foregroundStyle(slot == s ? HabitTheme.cream : HabitTheme.ink)
+                                        .foregroundStyle(slot == s ? .white : HabitTheme.ink)
                                         .padding(.horizontal, 12).padding(.vertical, 8)
-                                        .background(slot == s ? HabitTheme.charcoal : HabitTheme.card, in: Capsule())
+                                        .background(slot == s ? HabitTheme.terracotta : HabitTheme.card, in: Capsule())
                                         .overlay(Capsule().stroke(HabitTheme.line))
                                 }
                                 .buttonStyle(.plain)
@@ -91,7 +91,7 @@ struct HabitAddSheet: View {
 
                     Button(action: create) {
                         Text("Create habit").font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(HabitTheme.cream)
+                            .foregroundStyle(.white)
                             .frame(maxWidth: .infinity).padding(.vertical, 15)
                             .background(name.isEmpty ? HabitTheme.terraSoft : HabitTheme.terracotta, in: Capsule())
                     }

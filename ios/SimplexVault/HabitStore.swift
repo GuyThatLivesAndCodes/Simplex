@@ -8,6 +8,10 @@ final class HabitStore: ObservableObject {
     @Published var habits: [Habit] = []
     @Published var loaded = false
     @Published var error: String?
+    /// The day we last showed the "all done" celebration, so it fires at most once per
+    /// day even as views rebuild. Lives on the store (which persists across system
+    /// switches) rather than transient view @State.
+    var celebratedForDay = ""
 
     /// Habits that show on Today (non-archived), grouped by slot in display order.
     func habits(in slot: HabitSlot) -> [Habit] {

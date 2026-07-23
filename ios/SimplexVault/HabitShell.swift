@@ -6,7 +6,7 @@ import SwiftUI
 /// Review reachable from it.
 struct HabitShell: View {
     @EnvironmentObject var store: Store
-    @StateObject private var habits = HabitStore()
+    @EnvironmentObject var habits: HabitStore   // owned by AppShell, survives system switches
     @State private var tab = 0
     @State private var showOnboarding = false
 
@@ -19,19 +19,16 @@ struct HabitShell: View {
             NavigationStack { AccountView() }
                 .tabItem { Label("Account", systemImage: "person") }.tag(2)
         }
-        .tint(HabitTheme.terracotta)
-        .environmentObject(habits)
         .task {
-            await habits.load()
-            // first run with no habits → welcome/onboarding
-            if habits.loaded && habits.habits.isEmpty { showOnboarding = true }
+            // Load once per session. Only offer onboarding after a SUCCESSFUL load that
+            // truly returned zero habits — never on a transient/failed load (that's what
+            // made habits look "deleted" and popped onboarding on return).
+            if !habits.loaded { await habits.load() }
+            if habits.loaded && habits.error == nil && habits.habits.isEmpty { showOnboarding = true }
         }
         .fullScreenCover(isPresented: $showOnboarding) {
             HabitOnboardingView().environmentObject(habits)
         }
-        // give the tab bar the warm look
-        .toolbarBackground(HabitTheme.cream, for: .tabBar)
-        .toolbarBackground(.visible, for: .tabBar)
     }
 }
 
@@ -43,28 +40,37 @@ struct HabitTodayView: View {
     @EnvironmentObject var habits: HabitStore
     @State private var showAdd = false
     @State private var showInsights = false
+    @State private var showCelebration = false
 
     var body: some View {
         ZStack {
             HabitTheme.cream.ignoresSafeArea()
-            if habits.allDone && habits.totalCount > 0 {
-                HabitCelebrationView()
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 22) {
-                        header
-                        progressBanner
-                        ForEach(habits.visibleSlots) { slot in
-                            slotSection(slot)
-                        }
-                        if habits.totalCount == 0 {
-                            emptyPrompt
-                        }
-                        Color.clear.frame(height: 40)
+            // The Today list is ALWAYS present (so it's never a dead end — you can always
+            // see and un-check habits). The celebration is a dismissible overlay.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    header
+                    progressBanner
+                    ForEach(habits.visibleSlots) { slot in
+                        slotSection(slot)
                     }
-                    .padding(20)
+                    if habits.totalCount == 0 {
+                        emptyPrompt
+                    }
+                    Color.clear.frame(height: 40)
                 }
+                .padding(20)
             }
+        }
+        // celebrate once per day when the last habit of the day gets checked off
+        .onChange(of: habits.allDone) { done in
+            if done && habits.totalCount > 0 && habits.celebratedForDay != HabitDay.today {
+                habits.celebratedForDay = HabitDay.today
+                showCelebration = true
+            }
+        }
+        .fullScreenCover(isPresented: $showCelebration) {
+            HabitCelebrationView { showCelebration = false }
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -139,9 +145,9 @@ struct HabitTodayView: View {
             Text("No habits yet").font(HabitTheme.serif(20, weight: .semibold)).foregroundStyle(HabitTheme.ink)
             Button { showAdd = true } label: {
                 Text("Add your first").font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(HabitTheme.cream)
+                    .foregroundStyle(.white)
                     .padding(.horizontal, 20).padding(.vertical, 12)
-                    .background(HabitTheme.charcoal, in: Capsule())
+                    .background(HabitTheme.terracotta, in: Capsule())
             }
         }
         .frame(maxWidth: .infinity).padding(.top, 30)

@@ -333,12 +333,14 @@ struct HabitOnboardingView: View {
 
     var body: some View {
         ZStack {
-            LinearGradient(colors: [HabitTheme.cream, Color(hex: 0xe9c9b8)], startPoint: .top, endPoint: .bottom).ignoresSafeArea()
+            // subtle accent-tinted wash over the app background (works in dark or light)
+            LinearGradient(colors: [HabitTheme.cream, HabitTheme.terracotta.opacity(0.18)],
+                           startPoint: .top, endPoint: .bottom).ignoresSafeArea()
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     HStack(spacing: 8) {
-                        Text("h").font(HabitTheme.serif(18, italic: true)).foregroundStyle(HabitTheme.cream)
-                            .frame(width: 30, height: 30).background(HabitTheme.charcoal, in: RoundedRectangle(cornerRadius: 8))
+                        Text("h").font(HabitTheme.serif(18, italic: true)).foregroundStyle(.white)
+                            .frame(width: 30, height: 30).background(HabitTheme.terracotta, in: RoundedRectangle(cornerRadius: 8))
                         Text("HABIT").font(HabitTheme.label(13)).tracking(2).foregroundStyle(HabitTheme.ink)
                     }
                     Spacer()
@@ -350,9 +352,9 @@ struct HabitOnboardingView: View {
                     .font(.system(size: 15)).foregroundStyle(HabitTheme.inkSoft).padding(.top, 12)
                 Spacer()
                 Button { dismiss() } label: {
-                    Text("Begin").font(.system(size: 17, weight: .semibold)).foregroundStyle(HabitTheme.cream)
+                    Text("Begin").font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
                         .frame(maxWidth: .infinity).padding(.vertical, 17)
-                        .background(HabitTheme.charcoal, in: Capsule())
+                        .background(HabitTheme.terracotta, in: Capsule())
                 }
                 Button { dismiss() } label: {
                     Text("I already have habits →").font(.system(size: 14)).foregroundStyle(HabitTheme.inkSoft)
@@ -365,20 +367,43 @@ struct HabitOnboardingView: View {
 }
 
 /// The "Today, complete" celebration when every habit is done (reference screen 04).
+/// Shown as a dismissible overlay with a clear way back to Today — never a dead end.
+/// Uses the app accent as its full-bleed background so it fits the current appearance.
 struct HabitCelebrationView: View {
     @EnvironmentObject var habits: HabitStore
+    var onDone: () -> Void = {}
+    @State private var appear = false
+
     var body: some View {
         ZStack {
-            HabitTheme.terracotta.ignoresSafeArea()
+            HabitTheme.terracotta.ignoresSafeArea()   // = app accent
             VStack(alignment: .leading, spacing: 14) {
-                Text("TODAY, ALL DONE").font(HabitTheme.label(11)).tracking(1.5).foregroundStyle(HabitTheme.cream.opacity(0.8))
-                Text("Nice —\nthat's the\nwhole list.")
-                    .font(HabitTheme.serif(44, weight: .bold)).foregroundStyle(HabitTheme.cream)
-                Text("\(habits.totalCount) small things, done. Rest well. Tomorrow starts fresh at midnight.")
-                    .font(.system(size: 15)).foregroundStyle(HabitTheme.cream.opacity(0.9)).padding(.top, 4)
+                HStack {
+                    Spacer()
+                    Button { onDone() } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
+                            .padding(10).background(.black.opacity(0.18), in: Circle())
+                    }
+                }
                 Spacer()
+                Text("TODAY, ALL DONE").font(HabitTheme.label(11)).tracking(1.5).foregroundStyle(.white.opacity(0.85))
+                Text("Nice —\nthat's the\nwhole list.")
+                    .font(HabitTheme.serif(44, weight: .bold)).foregroundStyle(.white)
+                Text("\(habits.doneCount) small \(habits.doneCount == 1 ? "thing" : "things"), done. Rest well. Tomorrow starts fresh at midnight.")
+                    .font(.system(size: 15)).foregroundStyle(.white.opacity(0.9)).padding(.top, 4)
+                Spacer()
+                Button { onDone() } label: {
+                    Text("Back to today").font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(HabitTheme.terracotta)
+                        .frame(maxWidth: .infinity).padding(.vertical, 15)
+                        .background(.white, in: Capsule())
+                }
             }
             .padding(28).frame(maxWidth: .infinity, alignment: .leading)
+            .opacity(appear ? 1 : 0)
+            .scaleEffect(appear ? 1 : 0.96)
         }
+        .onAppear { withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) { appear = true } }
     }
 }

@@ -1,20 +1,23 @@
 import SwiftUI
 
-/// Habit's own self-contained look — a warm cream + terracotta palette with serif
-/// display headings, per the reference. Independent of the vault's dark theme and the
-/// user's accent choice (Habit is a distinct, deliberately-calm space).
+/// Habit keeps its serif "character" (the display headings) but its COLORS follow the
+/// app's chosen appearance — so if the app is dark, Habit is dark too, with no outlier
+/// screens (e.g. the shared Account tab). The one habit-specific accent is the app
+/// accent, used for check-offs, streaks, and the celebration. Everything else maps to
+/// SimplexTheme (which reads a nonisolated snapshot), so no actor isolation is needed
+/// and the whole app reads as one product.
 enum HabitTheme {
-    static let cream      = Color(hex: 0xf4ece0)   // page background
-    static let card       = Color(hex: 0xfbf6ee)   // cards / sheets
-    static let terracotta = Color(hex: 0xc0603f)   // primary accent
-    static let terraSoft  = Color(hex: 0xd98a68)   // lighter accent
-    static let ink        = Color(hex: 0x2b2420)   // primary text
-    static let inkSoft    = Color(hex: 0x8a7d70)   // secondary text
-    static let line       = Color(hex: 0xe3d8c8)   // hairlines
-    static let charcoal   = Color(hex: 0x241f1b)   // dark cards (progress banner)
-    static let done       = Color(hex: 0xc0603f)   // completed accent
+    static var cream: Color      { SimplexTheme.bg }        // page background
+    static var card: Color       { SimplexTheme.surface }  // cards / sheets
+    static var terracotta: Color { SimplexTheme.accent }   // primary accent (app accent)
+    static var terraSoft: Color  { SimplexTheme.accent.opacity(0.6) }
+    static var ink: Color        { SimplexTheme.text }      // primary text
+    static var inkSoft: Color    { SimplexTheme.subtle }    // secondary text
+    static var line: Color       { SimplexTheme.line }      // hairlines
+    static var charcoal: Color   { SimplexTheme.surface2 }  // raised/dark cards
+    static var done: Color       { SimplexTheme.accent }    // completed accent
 
-    /// A serif display font (New York on iOS) for the big headings in the reference.
+    /// A serif display font (New York on iOS) for the big headings — Habit's signature.
     static func serif(_ size: CGFloat, weight: Font.Weight = .regular, italic: Bool = false) -> Font {
         let base = Font.system(size: size, weight: weight, design: .serif)
         return italic ? base.italic() : base
