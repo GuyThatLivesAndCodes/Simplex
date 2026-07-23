@@ -187,25 +187,21 @@ struct HabitAddSheet: View {
         let unitVal = goal == .check ? nil : (unit.isEmpty ? goal.defaultUnit : unit)
         let tgt = goal == .check ? 1.0 : Double(target)
 
-        Task {
-            if let h = editing {
-                // JSONSerialization can't encode a boxed Swift nil — use NSNull() so a
-                // cleared reminder/unit is sent as an explicit JSON null.
-                let changes: [String: Any] = [
-                    "name": n, "icon": icon, "slot": slot.rawValue,
-                    "freq": everyDay ? "daily" : "weekdays",
-                    "goalType": goal.rawValue, "goalTarget": tgt,
-                    "reminder": rem ?? NSNull(),
-                    "unit": unitVal ?? NSNull(),
-                ]
-                await habits.update(h, changes: changes)
-            } else {
-                await habits.create(name: n, slot: slot, icon: icon, reminder: rem,
-                                    freq: everyDay ? "daily" : "weekdays",
-                                    goal: goal, target: tgt, unit: unitVal)
+        if let h = editing {
+            // Edit is LOCAL and instant. Editing the goal only changes future evaluation —
+            // the logged daily values are untouched, so past history is preserved.
+            habits.edit(h.id) { d in
+                d.name = n; d.icon = icon; d.slot = slot.rawValue
+                d.freq = everyDay ? "daily" : "weekdays"
+                d.goalType = goal.rawValue; d.goalTarget = tgt
+                d.reminder = rem; d.unit = unitVal
             }
-            dismiss()
+        } else {
+            habits.create(name: n, slot: slot, icon: icon, reminder: rem,
+                          freq: everyDay ? "daily" : "weekdays",
+                          goal: goal, target: tgt, unit: unitVal)
         }
+        dismiss()
     }
 
     private func timeFrom(_ s: String) -> Date? {

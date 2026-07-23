@@ -1204,6 +1204,13 @@ function openStore(accountId) {
       PRIMARY KEY (habit_id, day)
     );
     CREATE INDEX IF NOT EXISTS idx_habit_log_day ON habit_log(day);
+    -- Habit BACKUPS: the app is local-first (the phone owns the data). Here we keep one
+    -- opaque snapshot per day of the whole HabitDoc JSON, encrypted at rest. The user
+    -- can restore any day, overwriting their phone. day is the client's local date.
+    CREATE TABLE IF NOT EXISTS habit_backups (
+      day TEXT PRIMARY KEY, data TEXT NOT NULL, updated INTEGER NOT NULL,
+      habit_count INTEGER NOT NULL DEFAULT 0
+    );
   `);
   // Additive migrations for accounts created before goals/progress existed. SQLite
   // ADD COLUMN is a no-op-safe one-liner; wrap each so a re-run (column already there)
@@ -3286,6 +3293,48 @@ app.post('/api/habits/:id/toggle', (req, res) => {
   h.streak = habitStreaks(daySet, today);
   h.days = doneDays;
   res.json(h);
+});
+
+/* ---- Habit BACKUPS (local-first sync) ----
+   The app owns the data; these endpoints just store/return opaque per-day snapshots of
+   the whole HabitDoc JSON, encrypted at rest with the account keys. */
+
+/* upsert today's (or a given day's) snapshot */
+app.put('/api/habits/backup', (req, res) => {
+  const b = req.body || {}, db = req.store.db, keys = req.store.keys;
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(b.day) ? b.day : ymdUTC();
+  const json = typeof b.data === 'string' ? b.data : JSON.stringify(b.data || {});
+  if (json.length > 2_000_000) return res.status(413).json({ error: 'backup too large' });
+  let count = 0;
+  try { const parsed = JSON.parse(json); count = Array.isArray(parsed.habits) ? parsed.habits.length : 0; } catch (e) {}
+  db.prepare(`INSERT INTO habit_backups (day,data,updated,habit_count) VALUES (@day,@data,@updated,@count)
+              ON CONFLICT(day) DO UPDATE SET data=@data, updated=@updated, habit_count=@count`)
+    .run({ day, data: vault.encText(json, keys), updated: Date.now(), count });
+  res.json({ ok: true, day, updated: Date.now() });
+});
+
+/* list backup days (metadata only — day, when, how many habits) newest first */
+app.get('/api/habits/backups', (req, res) => {
+  const rows = req.store.db.prepare('SELECT day, updated, habit_count FROM habit_backups ORDER BY day DESC').all();
+  res.json({ backups: rows.map(r => ({ day: r.day, updated: r.updated, habitCount: r.habit_count })) });
+});
+
+/* fetch one day's snapshot (decrypted). 'latest' returns the most recent. */
+app.get('/api/habits/backup/:day', (req, res) => {
+  const db = req.store.db, keys = req.store.keys;
+  const row = req.params.day === 'latest'
+    ? db.prepare('SELECT * FROM habit_backups ORDER BY updated DESC LIMIT 1').get()
+    : db.prepare('SELECT * FROM habit_backups WHERE day = ?').get(req.params.day);
+  if (!row) return res.status(404).json({ error: 'no backup' });
+  let data = '{}';
+  try { data = vault.decText(row.data, keys); } catch (e) {}
+  res.json({ day: row.day, updated: row.updated, data });
+});
+
+/* delete a day's backup */
+app.delete('/api/habits/backup/:day', (req, res) => {
+  req.store.db.prepare('DELETE FROM habit_backups WHERE day = ?').run(req.params.day);
+  res.json({ ok: true });
 });
 
 /* ============================================================

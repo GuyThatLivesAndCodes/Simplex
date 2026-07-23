@@ -16,7 +16,7 @@ struct HabitShell: View {
                 .tabItem { Label("Habits", systemImage: "checkmark.circle") }.tag(0)
             NavigationStack { HabitTemplatesView().withSystemSwitcher() }
                 .tabItem { Label("Templates", systemImage: "square.grid.2x2") }.tag(1)
-            NavigationStack { AccountView() }
+            NavigationStack { HabitAccountView() }
                 .tabItem { Label("Account", systemImage: "person") }.tag(2)
         }
         .task {
@@ -133,8 +133,8 @@ struct HabitTodayView: View {
                 ForEach(items) { habit in
                     NavigationLink { HabitDetailView(habitId: habit.id) } label: {
                         HabitRow(habit: habit,
-                                 onToggle: { Task { await habits.toggle(habit) } },
-                                 onComplete: { Task { await habits.complete(habit) } })
+                                 onToggle: { habits.toggle(habit) },
+                                 onComplete: { habits.complete(habit) })
                     }
                     .buttonStyle(.plain)
                     if habit.id != items.last?.id { Divider().background(HabitTheme.line).padding(.leading, 44) }

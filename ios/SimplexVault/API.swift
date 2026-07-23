@@ -217,47 +217,37 @@ actor API {
         return try decode(R.self, from: data).account
     }
 
-    // MARK: - Habit (iOS-exclusive system)
+    // MARK: - Habit backups (the Habit system is local-first; the server only backs up)
 
-    func listHabits(today: String, includeArchived: Bool = false) async throws -> [Habit] {
-        var path = "/api/habits?today=\(today)"
-        if includeArchived { path += "&archived=1" }
-        struct R: Decodable { let today: String; let habits: [Habit] }
-        return try decode(R.self, from: try await run(request(path))).habits
+    struct HabitBackupMeta: Decodable, Identifiable { let day: String; let updated: Double; let habitCount: Int
+        var id: String { day } }
+
+    /// List available backup days (metadata only), newest first.
+    func listHabitBackups() async throws -> [HabitBackupMeta] {
+        struct R: Decodable { let backups: [HabitBackupMeta] }
+        return try decode(R.self, from: try await run(request("/api/habits/backups"))).backups
     }
 
-    func createHabit(name: String, slot: String, icon: String?, freq: String, reminder: String?, note: String?,
-                     goalType: String, goalTarget: Double, unit: String?, notify: Bool) async throws -> Habit {
-        var body: [String: Any] = ["name": name, "slot": slot, "freq": freq,
-                                   "goalType": goalType, "goalTarget": goalTarget, "notify": notify]
-        if let icon { body["icon"] = icon }
-        if let reminder { body["reminder"] = reminder }
-        if let note { body["note"] = note }
-        if let unit { body["unit"] = unit }
-        return try decode(Habit.self, from: try await run(request("/api/habits", method: "POST", json: body)))
+    /// Push a snapshot for a day (upsert). `json` is the serialized HabitDoc.
+    func putHabitBackup(day: String, json: String) async throws {
+        _ = try await run(request("/api/habits/backup", method: "PUT", json: ["day": day, "data": json]))
     }
 
-    func updateHabit(id: String, changes: [String: Any]) async throws -> Habit {
-        try decode(Habit.self, from: try await run(request("/api/habits/\(id)", method: "PATCH", json: changes)))
+    /// Fetch a day's snapshot (or "latest") and decode it into a HabitDoc.
+    func getHabitBackup(day: String) async throws -> HabitDoc {
+        struct R: Decodable { let day: String; let updated: Double; let data: String }
+        let r = try decode(R.self, from: try await run(request("/api/habits/backup/\(day)")))
+        guard let doc = HabitLocalStore.decodeSnapshot(r.data) else {
+            throw APIError(status: -1, message: "Corrupt backup", needsReauth: false)
+        }
+        return doc
     }
 
-    func deleteHabit(id: String) async throws {
-        _ = try await run(request("/api/habits/\(id)", method: "DELETE"))
-    }
-
-    func reorderHabits(order: [String]) async throws {
-        _ = try await run(request("/api/habits/reorder", method: "POST", json: ["order": order]))
-    }
-
-    /// Log a habit's progress for a day. Pass `done` to force complete/clear, `value` to
-    /// set an absolute progress, or `delta` to increment. Returns the updated habit.
-    func logHabit(id: String, day: String, today: String,
-                  done: Bool? = nil, value: Double? = nil, delta: Double? = nil) async throws -> Habit {
-        var body: [String: Any] = ["day": day, "today": today]
-        if let done { body["done"] = done }
-        if let value { body["value"] = value }
-        if let delta { body["delta"] = delta }
-        return try decode(Habit.self, from: try await run(request("/api/habits/\(id)/toggle", method: "POST", json: body)))
+    /// The most recent backup (used to auto-restore on a fresh install). Returns nil if
+    /// there are no backups yet.
+    func latestHabitBackup() async throws -> HabitDoc? {
+        do { return try await getHabitBackup(day: "latest") }
+        catch let e as APIError where e.status == 404 { return nil }
     }
 
     // MARK: - Terms of Service

@@ -8,7 +8,6 @@ struct HabitDetailView: View {
     @Environment(\.dismiss) private var dismiss
     let habitId: String
 
-    @State private var started = false        // counter/timer engaged
     @State private var showEdit = false
     @State private var showNotifyWarning = false
 
@@ -27,10 +26,10 @@ struct HabitDetailView: View {
                         notifyRow(habit)
                         HStack(spacing: 12) {
                             actionButton(habit.archived ? "Unarchive" : "Archive", "archivebox") {
-                                Task { await habits.archive(habit, !habit.archived); dismiss() }
+                                habits.archive(habit, !habit.archived); dismiss()
                             }
                             actionButton("Delete", "trash", destructive: true) {
-                                Task { await habits.delete(habit); dismiss() }
+                                habits.delete(habit); dismiss()
                             }
                         }
                         Color.clear.frame(height: 20)
@@ -56,42 +55,31 @@ struct HabitDetailView: View {
         }
     }
 
-    /// The engagement card: complete this habit. Simple habits show a slide-to-confirm.
-    /// Counter/timer habits show the same slide PLUS a "Start" that reveals the counter or
-    /// timer — so you can log real progress toward the goal.
+    /// The engagement card. The counter/timer is ALWAYS live (no Start button) — you can
+    /// log progress immediately. Below it, a single slide bar finishes the whole habit in
+    /// one swipe; for a simple habit that slide is the only control.
     @ViewBuilder
     private func engageCard(_ h: Habit) -> some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 16) {
             if h.isDoneToday {
                 HStack(spacing: 8) {
                     Image(systemName: "checkmark.seal.fill").foregroundStyle(HabitTheme.terracotta)
                     Text("Done for today").font(.system(size: 15, weight: .semibold)).foregroundStyle(HabitTheme.ink)
                     Spacer()
-                    Button("Undo") { Task { await habits.toggle(h) } }
+                    Button("Undo") { habits.toggle(h) }
                         .font(.system(size: 13)).foregroundStyle(HabitTheme.inkSoft)
                 }
-            } else if h.goal != .check && started {
-                // active counter / timer
-                if h.goal == .count {
-                    CounterControl(habit: h) { delta in Task { await habits.add(h, delta: delta) } }
-                } else {
-                    TimerControl(habit: h) { mins in Task { await habits.setProgress(h, value: mins) } }
-                }
             } else {
-                if h.goal != .check {
-                    // goal habits: a Start button to open the counter/timer …
-                    Button { withAnimation { started = true } } label: {
-                        Label("Start — \(h.progressLabel)", systemImage: h.goal.icon)
-                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
-                            .frame(maxWidth: .infinity).padding(.vertical, 13)
-                            .background(HabitTheme.terracotta, in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    Text("or").font(.system(size: 12)).foregroundStyle(HabitTheme.inkSoft)
+                // goal habits: the counter/timer is shown and active by default
+                if h.goal == .count {
+                    CounterControl(habit: h) { delta in habits.add(h, delta: delta) }
+                } else if h.goal == .timer {
+                    TimerControl(habit: h) { mins in habits.setProgress(h, value: mins) }
                 }
-                // … and always a slide-to-complete to mark it done outright
+                // a single slide to finish the whole thing in one swipe (the only control
+                // for a simple habit; a shortcut for goal habits)
                 SlideToConfirm(title: h.goal == .check ? "Slide to complete" : "Slide to finish now") {
-                    Task { await habits.complete(h) }
+                    habits.complete(h)
                 }
             }
         }
@@ -107,7 +95,7 @@ struct HabitDetailView: View {
             Toggle(isOn: Binding(
                 get: { h.notifyOn },
                 set: { on in
-                    if on { Task { await habits.setNotify(h, true) } }
+                    if on { habits.setNotify(h, true) }
                     else { showNotifyWarning = true }
                 }
             )) {
@@ -123,7 +111,7 @@ struct HabitDetailView: View {
         .background(HabitTheme.card, in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(HabitTheme.line))
         .alert("Turn off reminders?", isPresented: $showNotifyWarning) {
-            Button("Turn off", role: .destructive) { Task { await habits.setNotify(h, false); HabitNotifications.cancel(h.id) } }
+            Button("Turn off", role: .destructive) { habits.setNotify(h, false) }
             Button("Keep reminders", role: .cancel) {}
         } message: {
             Text("You won't be reminded to do “\(h.name)” at all. It's up to you to remember it.")
@@ -248,7 +236,7 @@ struct HabitTemplatesView: View {
                     }
                     LazyVGrid(columns: cols, spacing: 12) {
                         ForEach(HabitTemplate.all) { t in
-                            Button { Task { await habits.create(from: t) } } label: { TemplateCard(template: t) }
+                            Button { habits.create(from: t) } label: { TemplateCard(template: t) }
                                 .buttonStyle(.plain)
                         }
                     }

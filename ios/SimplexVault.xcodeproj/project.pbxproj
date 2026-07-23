@@ -15,8 +15,10 @@
 		7BB4C34A8D62A843444109E3 /* Confetti.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A3393972905BFC80907FC6B /* Confetti.swift */; };
 		1E4F99BCE1FB3969AA53FF59 /* ConvertSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AE50A497D444EEF28700093 /* ConvertSheet.swift */; };
 		9EF97B843951B37FB5537428 /* FileViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FB417B0D9221E6464FBE382 /* FileViewer.swift */; };
+		BD1647BAAC36369D172F34CF /* HabitAccountView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E09006377BD3F45B1F13C10 /* HabitAccountView.swift */; };
 		6F8F5F46354C4AB74116DDDB /* HabitAddSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = D77FC2BC1F82DFED5F52FF6C /* HabitAddSheet.swift */; };
 		42226152997FBE92DA05E2D1 /* HabitControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = D55C8D9B7A0C240C03D31524 /* HabitControls.swift */; };
+		52E52F7814CE3460F74F3C8B /* HabitLocal.swift in Sources */ = {isa = PBXBuildFile; fileRef = E88348B3CFB5A3B24EC8787C /* HabitLocal.swift */; };
 		4CDABF20DB92CA464ABF19BD /* HabitModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00EBE2225F19F5C701F88952 /* HabitModels.swift */; };
 		9BA38637158F000AD1B41B9A /* HabitNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EC2FA968FCD46AC8C9B99FD /* HabitNotifications.swift */; };
 		BBE66C9481F65EC2323163BF /* HabitScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB0ED4D8ADBEE91EF0E277B5 /* HabitScreens.swift */; };
@@ -54,8 +56,10 @@
 		0A3393972905BFC80907FC6B /* Confetti.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Confetti.swift; sourceTree = "<group>"; };
 		1AE50A497D444EEF28700093 /* ConvertSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConvertSheet.swift; sourceTree = "<group>"; };
 		5FB417B0D9221E6464FBE382 /* FileViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileViewer.swift; sourceTree = "<group>"; };
+		0E09006377BD3F45B1F13C10 /* HabitAccountView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitAccountView.swift; sourceTree = "<group>"; };
 		D77FC2BC1F82DFED5F52FF6C /* HabitAddSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitAddSheet.swift; sourceTree = "<group>"; };
 		D55C8D9B7A0C240C03D31524 /* HabitControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitControls.swift; sourceTree = "<group>"; };
+		E88348B3CFB5A3B24EC8787C /* HabitLocal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitLocal.swift; sourceTree = "<group>"; };
 		00EBE2225F19F5C701F88952 /* HabitModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitModels.swift; sourceTree = "<group>"; };
 		1EC2FA968FCD46AC8C9B99FD /* HabitNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitNotifications.swift; sourceTree = "<group>"; };
 		EB0ED4D8ADBEE91EF0E277B5 /* HabitScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitScreens.swift; sourceTree = "<group>"; };
@@ -112,8 +116,10 @@
 				0A3393972905BFC80907FC6B /* Confetti.swift */,
 				1AE50A497D444EEF28700093 /* ConvertSheet.swift */,
 				5FB417B0D9221E6464FBE382 /* FileViewer.swift */,
+				0E09006377BD3F45B1F13C10 /* HabitAccountView.swift */,
 				D77FC2BC1F82DFED5F52FF6C /* HabitAddSheet.swift */,
 				D55C8D9B7A0C240C03D31524 /* HabitControls.swift */,
+				E88348B3CFB5A3B24EC8787C /* HabitLocal.swift */,
 				00EBE2225F19F5C701F88952 /* HabitModels.swift */,
 				1EC2FA968FCD46AC8C9B99FD /* HabitNotifications.swift */,
 				EB0ED4D8ADBEE91EF0E277B5 /* HabitScreens.swift */,
@@ -228,8 +234,10 @@
 				7BB4C34A8D62A843444109E3 /* Confetti.swift in Sources */,
 				1E4F99BCE1FB3969AA53FF59 /* ConvertSheet.swift in Sources */,
 				9EF97B843951B37FB5537428 /* FileViewer.swift in Sources */,
+				BD1647BAAC36369D172F34CF /* HabitAccountView.swift in Sources */,
 				6F8F5F46354C4AB74116DDDB /* HabitAddSheet.swift in Sources */,
 				42226152997FBE92DA05E2D1 /* HabitControls.swift in Sources */,
+				52E52F7814CE3460F74F3C8B /* HabitLocal.swift in Sources */,
 				4CDABF20DB92CA464ABF19BD /* HabitModels.swift in Sources */,
 				9BA38637158F000AD1B41B9A /* HabitNotifications.swift in Sources */,
 				BBE66C9481F65EC2323163BF /* HabitScreens.swift in Sources */,
