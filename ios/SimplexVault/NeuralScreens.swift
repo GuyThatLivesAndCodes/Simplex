@@ -5,47 +5,58 @@ import SwiftUI
 struct NeuralDataTab: View {
     let modelId: String
     @EnvironmentObject var neural: NeuralStore
-    @State private var editing: (NeuralStore.DataSection, NeuralDoc.DataSet?)?
-    @State private var stackingInto: NeuralStore.DataSection?
+    // sheet routing via a single enum (avoids fragile double-optionals)
+    private enum Sheet: Identifiable {
+        case pretrain(NeuralDoc.DataSet?)   // nil = new
+        case convo(String?)                 // conversation id, nil = new
+        case stack
+        case importJSONL
+        var id: String {
+            switch self {
+            case .pretrain(let s): return "pt-\(s?.id ?? "new")"
+            case .convo(let c): return "cv-\(c ?? "new")"
+            case .stack: return "stack"
+            case .importJSONL: return "import"
+            }
+        }
+    }
+    @State private var sheet: Sheet?
 
     var body: some View {
         ScrollView {
             VStack(spacing: 14) {
                 if let doc = neural.model(modelId) {
-                    section("Pre-training data", "The bulk text the model learns general patterns from.", .pretrain, doc.data.pretrain)
-                    section("Fine-tuning data", "Targeted examples that shape how it responds.", .finetune, doc.data.finetune)
+                    pretrainSection(doc)
+                    finetuneSection(doc)
                 }
                 Color.clear.frame(height: 20)
             }
             .padding(16)
         }
-        .sheet(item: Binding(get: { editing.map { EditTarget(section: $0.0, set: $0.1) } },
-                             set: { if $0 == nil { editing = nil } })) { target in
-            NeuralDataSheet(modelId: modelId, section: target.section, existing: target.set).environmentObject(neural)
-        }
-        .sheet(item: Binding(get: { stackingInto.map { StackTarget(section: $0) } },
-                             set: { if $0 == nil { stackingInto = nil } })) { target in
-            NeuralStackSheet(modelId: modelId, section: target.section).environmentObject(neural)
+        .sheet(item: $sheet) { which in
+            switch which {
+            case .pretrain(let s): NeuralPretrainSheet(modelId: modelId, existing: s).environmentObject(neural)
+            case .convo(let c): NeuralConversationSheet(modelId: modelId, convoId: c).environmentObject(neural)
+            case .stack: NeuralStackSheet(modelId: modelId).environmentObject(neural)
+            case .importJSONL: NeuralImportSheet(modelId: modelId).environmentObject(neural)
+            }
         }
     }
 
-    private struct EditTarget: Identifiable { let section: NeuralStore.DataSection; let set: NeuralDoc.DataSet?; var id: String { (set?.id ?? "new") + "\(section)" } }
-    private struct StackTarget: Identifiable { let section: NeuralStore.DataSection; var id: String { "\(section)" } }
-
-    @ViewBuilder
-    private func section(_ title: String, _ sub: String, _ sec: NeuralStore.DataSection, _ sets: [NeuralDoc.DataSet]) -> some View {
+    // ---- Pre-training (free text) ----
+    private func pretrainSection(_ doc: NeuralDoc) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text(title).font(.system(size: 14, weight: .semibold)).foregroundStyle(SimplexTheme.text)
+                Text("Pre-training data").font(.system(size: 14, weight: .semibold)).foregroundStyle(SimplexTheme.text)
                 Spacer()
-                Text("\(sets.count) set\(sets.count == 1 ? "" : "s") · \(sets.reduce(0){$0+$1.text.count}) chars")
+                Text("\(doc.data.pretrain.count) set\(doc.data.pretrain.count == 1 ? "" : "s") · \(doc.data.pretrain.reduce(0){$0+$1.text.count}) chars")
                     .font(SimplexTheme.mono(10)).foregroundStyle(SimplexTheme.subtle)
             }
-            Text(sub).font(.system(size: 12)).foregroundStyle(SimplexTheme.subtle)
-            if sets.isEmpty {
+            Text("The bulk free text the model learns general language patterns from.").font(.system(size: 12)).foregroundStyle(SimplexTheme.subtle)
+            if doc.data.pretrain.isEmpty {
                 Text("No sets yet.").font(SimplexTheme.mono(11)).foregroundStyle(SimplexTheme.subtle).padding(.vertical, 6)
             } else {
-                ForEach(sets) { s in
+                ForEach(doc.data.pretrain) { s in
                     HStack(spacing: 10) {
                         Image(systemName: "doc.text").foregroundStyle(SimplexTheme.subtle)
                         VStack(alignment: .leading, spacing: 2) {
@@ -53,31 +64,67 @@ struct NeuralDataTab: View {
                             Text("\(s.text.count) chars").font(SimplexTheme.mono(10)).foregroundStyle(SimplexTheme.subtle)
                         }
                         Spacer()
-                        Button { editing = (sec, s) } label: { Image(systemName: "pencil").foregroundStyle(SimplexTheme.subtle) }
-                        Button { neural.removeDataSet(modelId, section: sec, setId: s.id) } label: { Image(systemName: "trash").foregroundStyle(SimplexTheme.subtle) }
+                        Button { sheet = .pretrain(s) } label: { Image(systemName: "pencil").foregroundStyle(SimplexTheme.subtle) }
+                        Button { neural.removePretrain(modelId, setId: s.id) } label: { Image(systemName: "trash").foregroundStyle(SimplexTheme.subtle) }
                     }
-                    .padding(10)
-                    .background(SimplexTheme.bg, in: RoundedRectangle(cornerRadius: 10))
+                    .padding(10).background(SimplexTheme.bg, in: RoundedRectangle(cornerRadius: 10))
+                }
+            }
+            Button { sheet = .pretrain(nil) } label: { Label("Add text", systemImage: "plus").font(.system(size: 13, weight: .medium)) }
+                .buttonStyle(.bordered)
+        }
+        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+        .background(SimplexTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(SimplexTheme.line))
+    }
+
+    // ---- Fine-tuning (conversations) ----
+    private func finetuneSection(_ doc: NeuralDoc) -> some View {
+        let totalTurns = doc.data.finetune.reduce(0) { $0 + $1.turns.count }
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Fine-tuning conversations").font(.system(size: 14, weight: .semibold)).foregroundStyle(SimplexTheme.text)
+                Spacer()
+                Text("\(doc.data.finetune.count) convo\(doc.data.finetune.count == 1 ? "" : "s") · \(totalTurns) turns")
+                    .font(SimplexTheme.mono(10)).foregroundStyle(SimplexTheme.subtle)
+            }
+            Text("User↔AI examples that teach the model to reply in a chat format. Each turn trains as {\"role\":\"user\"/\"assistant\",\"content\":…} — the same schema used in Inference.")
+                .font(.system(size: 12)).foregroundStyle(SimplexTheme.subtle).fixedSize(horizontal: false, vertical: true)
+            if doc.data.finetune.isEmpty {
+                Text("No conversations yet.").font(SimplexTheme.mono(11)).foregroundStyle(SimplexTheme.subtle).padding(.vertical, 6)
+            } else {
+                ForEach(doc.data.finetune) { c in
+                    Button { sheet = .convo(c.id) } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "bubble.left.and.bubble.right").foregroundStyle(SimplexTheme.accent)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(c.name).font(.system(size: 14)).foregroundStyle(SimplexTheme.text)
+                                Text("\(c.turns.count) turn\(c.turns.count == 1 ? "" : "s") · “\(c.turns.first?.content.prefix(40) ?? "empty")”")
+                                    .font(SimplexTheme.mono(10)).foregroundStyle(SimplexTheme.subtle).lineLimit(1)
+                            }
+                            Spacer()
+                            Button { neural.removeConversation(modelId, convoId: c.id) } label: { Image(systemName: "trash").foregroundStyle(SimplexTheme.subtle) }
+                                .buttonStyle(.plain)
+                        }
+                        .padding(10).background(SimplexTheme.bg, in: RoundedRectangle(cornerRadius: 10))
+                    }.buttonStyle(.plain)
                 }
             }
             HStack(spacing: 8) {
-                Button { editing = (sec, nil) } label: { Label("Add text", systemImage: "plus").font(.system(size: 13, weight: .medium)) }
-                    .buttonStyle(.bordered)
-                Button { stackingInto = sec } label: { Label("Stack from…", systemImage: "square.on.square").font(.system(size: 13)) }
-                    .buttonStyle(.bordered)
+                Button { sheet = .convo(nil) } label: { Label("New", systemImage: "plus").font(.system(size: 13, weight: .medium)) }.buttonStyle(.bordered)
+                Button { sheet = .importJSONL } label: { Label("Import", systemImage: "square.and.arrow.down").font(.system(size: 13)) }.buttonStyle(.bordered)
+                Button { sheet = .stack } label: { Label("Stack", systemImage: "square.on.square").font(.system(size: 13)) }.buttonStyle(.bordered)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
         .background(SimplexTheme.surface, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(SimplexTheme.line))
     }
 }
 
-/// Add/edit one text set.
-struct NeuralDataSheet: View {
+/// Add/edit one PRE-TRAINING text set.
+struct NeuralPretrainSheet: View {
     let modelId: String
-    let section: NeuralStore.DataSection
     let existing: NeuralDoc.DataSet?
     @EnvironmentObject var neural: NeuralStore
     @Environment(\.dismiss) private var dismiss
@@ -88,9 +135,7 @@ struct NeuralDataSheet: View {
         NavigationStack {
             Form {
                 Section("Name") { TextField("Name", text: $name) }
-                Section("Text") {
-                    TextEditor(text: $text).frame(minHeight: 220).font(.system(size: 14))
-                }
+                Section("Text") { TextEditor(text: $text).frame(minHeight: 220).font(.system(size: 14)) }
             }
             .navigationTitle(existing == nil ? "Add text" : "Edit text")
             .navigationBarTitleDisplayMode(.inline)
@@ -98,36 +143,129 @@ struct NeuralDataSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        let nm = name.isEmpty ? "Untitled" : name
-                        if let e = existing { neural.editDataSet(modelId, section: section, setId: e.id, name: nm, text: text) }
-                        else { neural.addDataSet(modelId, section: section, name: nm, text: text) }
+                        let nm = name.isEmpty ? "Corpus" : name
+                        if let e = existing { neural.editPretrain(modelId, setId: e.id, name: nm, text: text) }
+                        else { neural.addPretrain(modelId, name: nm, text: text) }
                         dismiss()
                     }.disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
-            .onAppear { name = existing?.name ?? (section == .pretrain ? "Corpus" : "Examples"); text = existing?.text ?? "" }
+            .onAppear { name = existing?.name ?? "Corpus"; text = existing?.text ?? "" }
         }
     }
 }
 
-/// Stack: copy data sets from templates or other owned models into this one.
+/// Turn-by-turn conversation editor (User/AI rows).
+struct NeuralConversationSheet: View {
+    let modelId: String
+    let convoId: String?
+    @EnvironmentObject var neural: NeuralStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var turns: [NeuralDoc.Turn] = []
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Name") { TextField("Name", text: $name) }
+                Section("Conversation") {
+                    Text("Alternate User and AI turns. This trains the model to reply in the same chat format.")
+                        .font(.system(size: 12)).foregroundStyle(SimplexTheme.subtle)
+                    ForEach($turns) { $turn in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Picker("", selection: $turn.role) { Text("User").tag("user"); Text("AI").tag("assistant") }
+                                    .pickerStyle(.segmented).frame(width: 140)
+                                Spacer()
+                                Button { turns.removeAll { $0.id == turn.id } } label: { Image(systemName: "trash").foregroundStyle(SimplexTheme.subtle) }
+                                    .buttonStyle(.plain)
+                            }
+                            TextEditor(text: $turn.content).frame(minHeight: 54).font(.system(size: 14))
+                        }
+                    }
+                    HStack {
+                        Button { turns.append(NeuralDoc.Turn(role: "user", content: "")) } label: { Label("User turn", systemImage: "plus") }
+                        Spacer()
+                        Button { turns.append(NeuralDoc.Turn(role: "assistant", content: "")) } label: { Label("AI turn", systemImage: "plus") }
+                    }.font(.system(size: 13))
+                }
+            }
+            .navigationTitle(convoId == nil ? "New conversation" : "Edit conversation")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        let kept = turns.filter { !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                        guard !kept.isEmpty else { dismiss(); return }
+                        let id = convoId ?? NeuralDoc.newId()
+                        neural.saveConversation(modelId, convo: NeuralDoc.Conversation(id: id, name: name.isEmpty ? "Conversation" : name, turns: kept))
+                        dismiss()
+                    }
+                }
+            }
+            .onAppear {
+                if let cid = convoId, let c = neural.conversation(modelId, convoId: cid) { name = c.name; turns = c.turns }
+                else { name = "Conversation"; turns = [NeuralDoc.Turn(role: "user", content: ""), NeuralDoc.Turn(role: "assistant", content: "")] }
+            }
+        }
+    }
+}
+
+/// Import conversations from JSONL text.
+struct NeuralImportSheet: View {
+    let modelId: String
+    @EnvironmentObject var neural: NeuralStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @State private var error: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("JSONL") {
+                    Text("One turn per line: {\"role\":\"user\",\"content\":\"…\"} or the shorthand {\"User\":\"…\"} / {\"AI\":\"…\"}. A blank line starts a new conversation.")
+                        .font(.system(size: 12)).foregroundStyle(SimplexTheme.subtle)
+                    TextEditor(text: $text).frame(minHeight: 200).font(SimplexTheme.mono(13))
+                }
+                if let e = error { Text(e).foregroundStyle(.red).font(.system(size: 12)) }
+            }
+            .navigationTitle("Import conversations")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Import") {
+                        let r = neural.importJSONL(modelId, text: text)
+                        if let e = r.error { error = e } else { dismiss() }
+                    }.disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+}
+
+/// Stack: copy pre-training text or conversations from templates / other owned models.
 struct NeuralStackSheet: View {
     let modelId: String
-    let section: NeuralStore.DataSection
     @EnvironmentObject var neural: NeuralStore
     @Environment(\.dismiss) private var dismiss
 
-    struct Source: Identifiable { let id = UUID(); let title: String; let sub: String; let sets: [(name: String, text: String, from: String)] }
+    struct PT: Identifiable { let id = UUID(); let name: String; let text: String }
+    struct CV: Identifiable { let id = UUID(); let name: String; let turns: [NeuralDoc.Turn] }
+    struct Source: Identifiable { let id = UUID(); let title: String; let sub: String; let pre: [PT]; let convos: [CV] }
 
     private var sources: [Source] {
         var out: [Source] = []
         for t in NeuralTemplate.all {
-            let sets = t.pretrain.map { (name: $0.0, text: $0.1, from: "pretrain") } + t.finetune.map { (name: $0.0, text: $0.1, from: "finetune") }
-            if !sets.isEmpty { out.append(Source(title: t.name, sub: "Template", sets: sets)) }
+            let pre = t.pretrain.map { PT(name: $0.0, text: $0.1) }
+            let cv = t.finetune.map { CV(name: $0.0, turns: $0.1.map { NeuralDoc.Turn(role: $0.0, content: $0.1) }) }
+            if !pre.isEmpty || !cv.isEmpty { out.append(Source(title: t.name, sub: "Template", pre: pre, convos: cv)) }
         }
         for m in neural.models where m.id != modelId {
-            let sets = m.data.pretrain.map { (name: $0.name, text: $0.text, from: "pretrain") } + m.data.finetune.map { (name: $0.name, text: $0.text, from: "finetune") }
-            if !sets.isEmpty { out.append(Source(title: m.name, sub: "Your model", sets: sets)) }
+            let pre = m.data.pretrain.map { PT(name: $0.name, text: $0.text) }
+            let cv = m.data.finetune.map { CV(name: $0.name, turns: $0.turns) }
+            if !pre.isEmpty || !cv.isEmpty { out.append(Source(title: m.name, sub: "Your model", pre: pre, convos: cv)) }
         }
         return out
     }
@@ -135,23 +273,17 @@ struct NeuralStackSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                if sources.isEmpty {
-                    Text("No other data sets to stack.").foregroundStyle(SimplexTheme.subtle)
-                }
+                if sources.isEmpty { Text("Nothing to stack yet.").foregroundStyle(SimplexTheme.subtle) }
                 ForEach(sources) { src in
                     Section("\(src.title) · \(src.sub)") {
-                        ForEach(Array(src.sets.enumerated()), id: \.offset) { _, s in
-                            Button {
-                                neural.stack(modelId, into: section, name: s.name, text: s.text)
-                            } label: {
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(s.name).foregroundStyle(SimplexTheme.text)
-                                        Text("\(s.text.count) chars · \(s.from)").font(SimplexTheme.mono(10)).foregroundStyle(SimplexTheme.subtle)
-                                    }
-                                    Spacer()
-                                    Image(systemName: "plus.circle").foregroundStyle(SimplexTheme.accent)
-                                }
+                        ForEach(src.pre) { p in
+                            Button { neural.stackPretrain(modelId, name: p.name, text: p.text) } label: {
+                                stackRow(p.name, "\(p.text.count) chars · pre-training")
+                            }
+                        }
+                        ForEach(src.convos) { c in
+                            Button { neural.stackConversation(modelId, name: c.name, turns: c.turns) } label: {
+                                stackRow(c.name, "\(c.turns.count) turns · conversation")
                             }
                         }
                     }
@@ -160,6 +292,16 @@ struct NeuralStackSheet: View {
             .navigationTitle("Stack data")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+    private func stackRow(_ title: String, _ meta: String) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).foregroundStyle(SimplexTheme.text)
+                Text(meta).font(SimplexTheme.mono(10)).foregroundStyle(SimplexTheme.subtle)
+            }
+            Spacer()
+            Image(systemName: "plus.circle").foregroundStyle(SimplexTheme.accent)
         }
     }
 }
@@ -312,18 +454,26 @@ struct LossChart: View {
 struct NeuralInferenceTab: View {
     let modelId: String
     @EnvironmentObject var neural: NeuralStore
-    @State private var messages: [ChatMsg] = []
+    // messages are chat turns {role:'user'|'assistant', content}. Kept in view state and
+    // reset whenever the model changes or the user taps Reset.
+    @State private var messages: [NeuralDoc.Turn] = []
     @State private var input = ""
     @State private var temperature = 0.8
     @State private var length = 120.0
     @State private var thinking = false
 
-    struct ChatMsg: Identifiable { let id = UUID(); let role: String; var text: String }
-
     private var trained: Bool { (neural.model(modelId)?.trainState.steps ?? 0) > 0 && neural.model(modelId)?.model != nil }
 
     var body: some View {
         VStack(spacing: 0) {
+            HStack {
+                Text(trained ? "Talking to your model in a chat format" : "Not trained yet")
+                    .font(SimplexTheme.mono(10)).foregroundStyle(SimplexTheme.subtle)
+                Spacer()
+                Button { messages = [] } label: { Label("Reset chat", systemImage: "arrow.counterclockwise").font(.system(size: 12)) }
+                    .disabled(messages.isEmpty)
+            }.padding(.horizontal, 12).padding(.top, 8)
+
             if !trained {
                 Text("Train the model first (Training tab) — then it can chat here.")
                     .font(.system(size: 12)).foregroundStyle(SimplexTheme.subtle)
@@ -332,8 +482,12 @@ struct NeuralInferenceTab: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    ForEach(messages) { m in bubble(m) }
-                    if thinking { bubble(ChatMsg(role: "bot", text: "▍")) }
+                    if messages.isEmpty && trained {
+                        Text("Each turn is sent as {\"role\":\"user\",\"content\":…} and the model replies as the assistant.")
+                            .font(SimplexTheme.mono(11)).foregroundStyle(SimplexTheme.subtle).padding(.top, 8)
+                    }
+                    ForEach(messages) { m in bubble(role: m.role, text: m.content) }
+                    if thinking { bubble(role: "assistant", text: "▍") }
                 }
                 .padding(12)
             }
@@ -352,15 +506,16 @@ struct NeuralInferenceTab: View {
         }
     }
 
-    private func bubble(_ m: ChatMsg) -> some View {
-        HStack {
-            if m.role == "user" { Spacer() }
-            Text(m.text)
-                .font(.system(size: 14)).foregroundStyle(m.role == "user" ? .white : SimplexTheme.text)
+    private func bubble(role: String, text: String) -> some View {
+        let isUser = role == "user"
+        return HStack {
+            if isUser { Spacer() }
+            Text(text)
+                .font(.system(size: 14)).foregroundStyle(isUser ? .white : SimplexTheme.text)
                 .padding(.horizontal, 12).padding(.vertical, 9)
-                .background(m.role == "user" ? SimplexTheme.accent : SimplexTheme.surface, in: RoundedRectangle(cornerRadius: 13))
-                .frame(maxWidth: 280, alignment: m.role == "user" ? .trailing : .leading)
-            if m.role != "user" { Spacer() }
+                .background(isUser ? SimplexTheme.accent : SimplexTheme.surface, in: RoundedRectangle(cornerRadius: 13))
+                .frame(maxWidth: 280, alignment: isUser ? .trailing : .leading)
+            if !isUser { Spacer() }
         }
     }
 
@@ -368,12 +523,13 @@ struct NeuralInferenceTab: View {
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         input = ""
-        messages.append(ChatMsg(role: "user", text: text))
+        messages.append(NeuralDoc.Turn(role: "user", content: text))
         thinking = true
-        let prompt = messages.suffix(6).map { $0.text }.joined(separator: "\n") + "\n"
-        neural.generate(modelId, prompt: prompt, length: Int(length), temperature: temperature) { reply in
+        // The store serializes `messages` in the chat template, prompts an open assistant
+        // turn, stops at "} and cleans the reply — the same schema it was fine-tuned on.
+        neural.chat(modelId, history: messages, length: Int(length), temperature: temperature) { reply in
             thinking = false
-            messages.append(ChatMsg(role: "bot", text: reply))
+            messages.append(NeuralDoc.Turn(role: "assistant", content: reply))
         }
     }
 }

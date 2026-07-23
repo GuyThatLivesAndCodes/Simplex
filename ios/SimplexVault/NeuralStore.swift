@@ -109,31 +109,52 @@ final class NeuralStore: ObservableObject {
         persist(doc)
     }
 
-    // MARK: - data editing
+    // MARK: - data editing — PRETRAIN is free text, FINETUNE is conversations
 
-    func addDataSet(_ id: String, section: DataSection, name: String, text: String) {
+    func addPretrain(_ id: String, name: String, text: String) {
         guard var doc = model(id) else { return }
-        let set = NeuralDoc.DataSet(id: NeuralDoc.newId(), name: name, text: text)
-        switch section { case .pretrain: doc.data.pretrain.append(set); case .finetune: doc.data.finetune.append(set) }
+        doc.data.pretrain.append(NeuralDoc.DataSet(id: NeuralDoc.newId(), name: name, text: text)); persist(doc)
+    }
+    func editPretrain(_ id: String, setId: String, name: String, text: String) {
+        guard var doc = model(id) else { return }
+        if let i = doc.data.pretrain.firstIndex(where: { $0.id == setId }) { doc.data.pretrain[i].name = name; doc.data.pretrain[i].text = text; persist(doc) }
+    }
+    func removePretrain(_ id: String, setId: String) {
+        guard var doc = model(id) else { return }
+        doc.data.pretrain.removeAll { $0.id == setId }; persist(doc)
+    }
+    /// Add/replace a fine-tune CONVERSATION (turns are already {role,content}).
+    func saveConversation(_ id: String, convo: NeuralDoc.Conversation) {
+        guard var doc = model(id) else { return }
+        if let i = doc.data.finetune.firstIndex(where: { $0.id == convo.id }) { doc.data.finetune[i] = convo }
+        else { doc.data.finetune.append(convo) }
         persist(doc)
     }
-    func editDataSet(_ id: String, section: DataSection, setId: String, name: String, text: String) {
+    func removeConversation(_ id: String, convoId: String) {
         guard var doc = model(id) else { return }
-        func edit(_ arr: inout [NeuralDoc.DataSet]) { if let i = arr.firstIndex(where: { $0.id == setId }) { arr[i].name = name; arr[i].text = text } }
-        switch section { case .pretrain: edit(&doc.data.pretrain); case .finetune: edit(&doc.data.finetune) }
+        doc.data.finetune.removeAll { $0.id == convoId }; persist(doc)
+    }
+    func conversation(_ id: String, convoId: String) -> NeuralDoc.Conversation? {
+        model(id)?.data.finetune.first { $0.id == convoId }
+    }
+    /// Import conversations from JSONL text; returns imported count or an error message.
+    func importJSONL(_ id: String, text: String) -> (added: Int, error: String?) {
+        let parsed = ChatTemplate.parseJSONL(text)
+        if let e = parsed.errors.first { return (0, e + (parsed.errors.count > 1 ? " (+\(parsed.errors.count - 1) more)" : "")) }
+        guard !parsed.conversations.isEmpty else { return (0, "No conversations found") }
+        guard var doc = model(id) else { return (0, "model missing") }
+        for turns in parsed.conversations {
+            doc.data.finetune.append(NeuralDoc.Conversation(id: NeuralDoc.newId(), name: "Imported \(doc.data.finetune.count + 1)", turns: turns))
+        }
         persist(doc)
+        return (parsed.conversations.count, nil)
     }
-    func removeDataSet(_ id: String, section: DataSection, setId: String) {
-        guard var doc = model(id) else { return }
-        switch section { case .pretrain: doc.data.pretrain.removeAll { $0.id == setId }; case .finetune: doc.data.finetune.removeAll { $0.id == setId } }
-        persist(doc)
+    /// Stack (copy) a pre-training set or a conversation from a template/other model.
+    func stackPretrain(_ id: String, name: String, text: String) { addPretrain(id, name: name, text: text) }
+    func stackConversation(_ id: String, name: String, turns: [NeuralDoc.Turn]) {
+        guard var doc = model(id), !turns.isEmpty else { return }
+        doc.data.finetune.append(NeuralDoc.Conversation(id: NeuralDoc.newId(), name: name, turns: turns)); persist(doc)
     }
-    /// Stack (copy) a data set from another model or a template into this one.
-    func stack(_ id: String, into section: DataSection, name: String, text: String) {
-        addDataSet(id, section: section, name: name, text: text)
-    }
-
-    enum DataSection { case pretrain, finetune }
 
     // MARK: - training (on-device, off the main thread, with progress ticks)
 
@@ -226,14 +247,16 @@ final class NeuralStore: ObservableObject {
 
     // MARK: - inference
 
-    /// Generate a reply. Runs off-main and returns via the completion on the main actor.
-    func generate(_ id: String, prompt: String, length: Int, temperature: Double, completion: @escaping @MainActor (String) -> Void) {
+    /// Generate a chat reply. `prompt` is the conversation serialized in the chat template
+    /// ending with an open assistant turn; we stop at the closing "} and clean the reply.
+    func chat(_ id: String, history: [NeuralDoc.Turn], length: Int, temperature: Double, completion: @escaping @MainActor (String) -> Void) {
         guard let doc = model(id), let model = doc.model, doc.trainState.steps > 0 else { completion("(train the model first)"); return }
+        let prompt = ChatTemplate.buildPrompt(history, maxTurns: 8)
         Task.detached(priority: .userInitiated) {
-            let text = NeuralEngine.sample(model, prompt: prompt, length: length, temperature: temperature,
-                                           topK: 40, seed: UInt32.random(in: 1...UInt32.max))
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            await MainActor.run { completion(trimmed.isEmpty ? "…" : trimmed) }
+            let raw = NeuralEngine.sample(model, prompt: prompt, length: length, temperature: temperature,
+                                          topK: 40, stop: ChatTemplate.stop, seed: UInt32.random(in: 1...UInt32.max))
+            let reply = ChatTemplate.extractReply(raw)
+            await MainActor.run { completion(reply.isEmpty ? "…" : reply) }
         }
     }
 }

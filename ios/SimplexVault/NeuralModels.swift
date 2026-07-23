@@ -197,9 +197,41 @@ struct NeuralDoc: Codable, Identifiable {
         var name: String
         var text: String
     }
+    /// One chat turn. `role` is "user" or "assistant".
+    struct Turn: Codable, Identifiable, Hashable {
+        var id = UUID().uuidString
+        var role: String
+        var content: String
+        enum CodingKeys: String, CodingKey { case role, content }   // id is transient
+    }
+    /// A fine-tuning example = a User↔AI conversation (serialized in the chat template).
+    struct Conversation: Codable, Identifiable, Hashable {
+        var id: String
+        var name: String
+        var turns: [Turn]
+    }
     struct DataSets: Codable {
         var pretrain: [DataSet] = []
-        var finetune: [DataSet] = []
+        var finetune: [Conversation] = []
+
+        init(pretrain: [DataSet] = [], finetune: [Conversation] = []) {
+            self.pretrain = pretrain; self.finetune = finetune
+        }
+        // Tolerate the OLD shape where finetune was [DataSet] free text: migrate each to a
+        // single user turn so nothing is lost when loading a pre-chat-template model.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            pretrain = (try? c.decode([DataSet].self, forKey: .pretrain)) ?? []
+            if let convos = try? c.decode([Conversation].self, forKey: .finetune) {
+                finetune = convos
+            } else if let legacy = try? c.decode([DataSet].self, forKey: .finetune) {
+                finetune = legacy.compactMap { s in
+                    let t = s.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return t.isEmpty ? nil : Conversation(id: s.id, name: s.name, turns: [Turn(role: "user", content: t)])
+                }
+            } else { finetune = [] }
+        }
+        enum CodingKeys: String, CodingKey { case pretrain, finetune }
     }
     struct TrainState: Codable {
         var steps: Int = 0
@@ -223,14 +255,78 @@ struct NeuralDoc: Codable, Identifiable {
         return "n" + String(raw.prefix(15))
     }
 
-    /// Concatenated corpus: pre-training first, fine-tuning (lightly repeated) after.
+    /// Corpus: pre-training (free text) first, then fine-tuning CONVERSATIONS serialized
+    /// in the chat template so the model learns the exact chat format it's prompted with.
     func buildCorpus() -> String {
         let pre = data.pretrain.map { $0.text }.joined(separator: "\n\n")
-        let fine = data.finetune.map { $0.text }.joined(separator: "\n\n")
-        let fineRepeat = fine.isEmpty ? "" : String(repeating: fine + "\n\n", count: pre.count > fine.count * 3 ? 2 : 1)
+        let convos = data.finetune.map { ChatTemplate.serialize($0.turns) }.filter { !$0.isEmpty }
+        let fine = convos.joined(separator: "\n\n")
+        let fineRepeat = fine.isEmpty ? "" : String(repeating: fine + "\n\n", count: pre.count > fine.count * 2 ? 3 : 2)
         return (pre + "\n\n" + fineRepeat).trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    var totalDataChars: Int { (data.pretrain + data.finetune).reduce(0) { $0 + $1.text.count } }
+    var totalDataChars: Int {
+        data.pretrain.reduce(0) { $0 + $1.text.count } + data.finetune.reduce(0) { $0 + $1.turns.reduce(0) { $0 + $1.content.count } }
+    }
+}
+
+/// The ONE chat schema used for both fine-tuning and inference (mirrors neural.js CHAT).
+/// Each turn is a compact JSON object on its own line.
+enum ChatTemplate {
+    static let assistantOpen = "{\"role\":\"assistant\",\"content\":\""
+    static let stop = "\"}"
+
+    static func turnLine(_ role: String, _ content: String) -> String {
+        let r = role == "assistant" ? "assistant" : "user"
+        // Fixed key order (role, then content) so training + inference prompts match
+        // byte-for-byte; content is JSON-escaped.
+        return "{\"role\":\"\(r)\",\"content\":\(jsonString(content))}"
+    }
+    private static func jsonString(_ s: String) -> String {
+        if let d = try? JSONEncoder().encode(s), let out = String(data: d, encoding: .utf8) { return out }
+        return "\"\(s)\""
+    }
+    static func serialize(_ turns: [NeuralDoc.Turn]) -> String {
+        turns.filter { !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .map { turnLine($0.role, $0.content) }.joined(separator: "\n")
+    }
+    /// Build the inference prompt: recent history + an OPEN assistant turn to complete.
+    static func buildPrompt(_ history: [NeuralDoc.Turn], maxTurns: Int = 8) -> String {
+        var lines = history.suffix(maxTurns).map { turnLine($0.role, $0.content) }
+        lines.append(assistantOpen)
+        return lines.joined(separator: "\n")
+    }
+    /// Extract the assistant reply from raw model output following assistantOpen.
+    static func extractReply(_ raw: String) -> String {
+        var s = raw
+        if let r = s.range(of: stop) { s = String(s[s.startIndex..<r.lowerBound]) }
+        if let r = s.range(of: "{\"role\"") { s = String(s[s.startIndex..<r.lowerBound]) }
+        s = s.replacingOccurrences(of: "\\n", with: "\n")
+             .replacingOccurrences(of: "\\\"", with: "\"")
+             .replacingOccurrences(of: "\\\\", with: "\\")
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    /// Parse JSONL into conversations. Blank line = new conversation. Accepts {role,content}
+    /// or the {"User":…}/{"AI":…} shorthand. Returns (conversations, errors).
+    static func parseJSONL(_ text: String) -> (conversations: [[NeuralDoc.Turn]], errors: [String]) {
+        var conversations: [[NeuralDoc.Turn]] = []; var errors: [String] = []
+        var cur: [NeuralDoc.Turn] = []
+        for (i, line) in text.components(separatedBy: "\n").enumerated() {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.isEmpty { if !cur.isEmpty { conversations.append(cur); cur = [] }; continue }
+            guard let d = t.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
+                errors.append("Line \(i + 1): not valid JSON"); continue
+            }
+            var role: String?; var content: String?
+            if let r = obj["role"] as? String, let c = obj["content"] { role = r; content = "\(c)" }
+            else if let u = obj["User"] { role = "user"; content = "\(u)" }
+            else if let a = obj["AI"] ?? obj["Assistant"] { role = "assistant"; content = "\(a)" }
+            guard let rr = role, let cc = content else { errors.append("Line \(i + 1): expected {\"role\",\"content\"} or {\"User\"/\"AI\"}"); continue }
+            cur.append(NeuralDoc.Turn(role: rr.lowercased().hasPrefix("a") ? "assistant" : "user", content: cc))
+        }
+        if !cur.isEmpty { conversations.append(cur) }
+        return (conversations, errors)
+    }
 }
 
 // MARK: - Templates (mirror the web app's NN_TEMPLATES)
@@ -242,12 +338,16 @@ struct NeuralTemplate: Identifiable {
     let desc: String
     let arch: NeuralDoc.Arch
     let pretrain: [(String, String)]
-    let finetune: [(String, String)]
+    // fine-tune examples = conversations: (name, [(role, content)])
+    let finetune: [(String, [(String, String)])]
 
     func makeDoc() -> NeuralDoc {
         var doc = NeuralDoc.fresh(arch: arch, name: name)
         doc.data.pretrain = pretrain.map { .init(id: NeuralDoc.newId(), name: $0.0, text: $0.1) }
-        doc.data.finetune = finetune.map { .init(id: NeuralDoc.newId(), name: $0.0, text: $0.1) }
+        doc.data.finetune = finetune.map { convo in
+            NeuralDoc.Conversation(id: NeuralDoc.newId(), name: convo.0,
+                                   turns: convo.1.map { NeuralDoc.Turn(role: $0.0, content: $0.1) })
+        }
         return doc
     }
 
@@ -264,14 +364,14 @@ struct NeuralTemplate: Identifiable {
             A kind rabbit shared her carrots with the hungry fox. They became the best of friends.
 
             """, count: 4))],
-            finetune: [("Story openers", String(repeating: """
-            Once upon a time, there was a brave little mouse.
-            Long ago, in a land of snow, a friendly bear woke up.
-
-            """, count: 3))]),
+            finetune: [
+                ("Ask for a story", [("user", "Tell me a story."), ("assistant", "Once upon a time, a brave little mouse set out to find the shining stone beyond the hills.")]),
+                ("Story about a bear", [("user", "Tell me about a bear."), ("assistant", "Long ago, in a land of snow, a friendly bear woke up and went to greet the morning sun.")]),
+                ("A gentle ending", [("user", "How does it end?"), ("assistant", "And so they all became the best of friends, and the little fox learned that the world is full of kindness.")]),
+            ]),
         NeuralTemplate(
             id: "chatbot", name: "Politeness Bot", icon: "bubble.left.and.bubble.right",
-            desc: "A subword model fine-tuned on short, friendly question and answer pairs.",
+            desc: "A subword model fine-tuned on short, friendly conversations.",
             arch: .init(tokMode: "bpe", maxVocab: 800, ctx: 48, embed: 56, act: "gelu", dropout: 0.1, layers: [112, 112]),
             pretrain: [("Everyday sentences", String(repeating: """
             Hello there. How are you today? I am doing very well, thank you.
@@ -279,12 +379,14 @@ struct NeuralTemplate: Identifiable {
             Thank you so much for your patience. Have a wonderful afternoon.
 
             """, count: 6))],
-            finetune: [("Q and A", String(repeating: """
-            Q: How are you? A: I am doing great, thank you for asking!
-            Q: What is your name? A: You can call me Simplex, your friendly model.
-            Q: Can you help me? A: Of course! I would be glad to help you.
-
-            """, count: 5))]),
+            finetune: [
+                ("Greeting", [("user", "How are you?"), ("assistant", "I am doing great, thank you for asking! How can I help you today?")]),
+                ("Name", [("user", "What is your name?"), ("assistant", "You can call me Simplex, your friendly model.")]),
+                ("Help", [("user", "Can you help me?"), ("assistant", "Of course! I would be glad to help you.")]),
+                ("Thanks", [("user", "Thank you."), ("assistant", "You are very welcome. Anytime!")]),
+                ("Capabilities", [("user", "What can you do?"), ("assistant", "I can chat with you about all sorts of things. Ask me anything!")]),
+                ("Goodbye", [("user", "Goodbye."), ("assistant", "Goodbye! Have a wonderful day.")]),
+            ]),
         NeuralTemplate(
             id: "poet", name: "Couplet Poet", icon: "sparkles",
             desc: "A word-level model that learns rhythmic, rhyming lines from a small poem set.",

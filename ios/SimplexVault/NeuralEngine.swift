@@ -552,13 +552,16 @@ enum NeuralEngine {
         return matVec(m.Wout, fn, V, E, m.bout)
     }
 
-    static func sample(_ m: Model, prompt: String, length: Int, temperature: Double, topK: Int, seed: UInt32) -> String {
+    /// `stop` (optional): generation halts as soon as the DECODED new text contains it
+    /// (the chat template passes "} to stop at the end of an assistant turn). We check
+    /// the decoded text so it works across char/BPE/word tokenizers.
+    static func sample(_ m: Model, prompt: String, length: Int, temperature: Double, topK: Int, stop: String = "", seed: UInt32) -> String {
         var rng = RNG(seed == 0 ? 3 : seed)
         let temp = clampD(temperature, 0.05, 2)
         let maxNew = clampInt(length, 1, 400)
         var ids = [Tokenizer.BOS] + m.tok.encode(prompt)
         let startLen = ids.count
-        for _ in 0..<maxNew {
+        for step in 0..<maxNew {
             let window = Array(ids.suffix(m.cfg.ctx))
             var logits = logitsLast(m, window)
             for i in 0..<logits.count { logits[i] /= temp }
@@ -569,8 +572,14 @@ enum NeuralEngine {
             let pick = sampleProbs(&probs, topK: topK, rng: &rng)
             if pick == Tokenizer.EOS { break }
             ids.append(pick)
+            if !stop.isEmpty && step >= 1 {
+                let soFar = m.tok.decode(Array(ids.suffix(from: startLen)))
+                if soFar.contains(stop) { break }
+            }
         }
-        return m.tok.decode(Array(ids.suffix(from: startLen)))
+        var text = m.tok.decode(Array(ids.suffix(from: startLen)))
+        if !stop.isEmpty, let r = text.range(of: stop) { text = String(text[text.startIndex..<r.lowerBound]) }
+        return text
     }
     private static func sampleProbs(_ probs: inout [Double], topK: Int, rng: inout RNG) -> Int {
         let V = probs.count
