@@ -8,6 +8,10 @@ struct HabitDetailView: View {
     @Environment(\.dismiss) private var dismiss
     let habitId: String
 
+    @State private var started = false        // counter/timer engaged
+    @State private var showEdit = false
+    @State private var showNotifyWarning = false
+
     private var habit: Habit? { habits.habits.first { $0.id == habitId } }
 
     var body: some View {
@@ -16,9 +20,11 @@ struct HabitDetailView: View {
             if let habit {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
+                        engageCard(habit)
                         streakCard(habit)
                         gridCard(habit)
                         weekdayCard(habit)
+                        notifyRow(habit)
                         HStack(spacing: 12) {
                             actionButton(habit.archived ? "Unarchive" : "Archive", "archivebox") {
                                 Task { await habits.archive(habit, !habit.archived); dismiss() }
@@ -40,6 +46,87 @@ struct HabitDetailView: View {
             ToolbarItem(placement: .principal) {
                 Text(habit?.name ?? "Habit").font(HabitTheme.serif(16, weight: .semibold)).foregroundStyle(HabitTheme.ink)
             }
+            ToolbarItem(placement: .topBarTrailing) {
+                if let habit { Button { showEdit = true } label: { Text("Edit").foregroundStyle(HabitTheme.terracotta) }
+                    .disabled(habit.archived == true && false) }
+            }
+        }
+        .sheet(isPresented: $showEdit) {
+            if let habit { HabitAddSheet(editing: habit).environmentObject(habits) }
+        }
+    }
+
+    /// The engagement card: complete this habit. Simple habits show a slide-to-confirm.
+    /// Counter/timer habits show the same slide PLUS a "Start" that reveals the counter or
+    /// timer — so you can log real progress toward the goal.
+    @ViewBuilder
+    private func engageCard(_ h: Habit) -> some View {
+        VStack(spacing: 14) {
+            if h.isDoneToday {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.seal.fill").foregroundStyle(HabitTheme.terracotta)
+                    Text("Done for today").font(.system(size: 15, weight: .semibold)).foregroundStyle(HabitTheme.ink)
+                    Spacer()
+                    Button("Undo") { Task { await habits.toggle(h) } }
+                        .font(.system(size: 13)).foregroundStyle(HabitTheme.inkSoft)
+                }
+            } else if h.goal != .check && started {
+                // active counter / timer
+                if h.goal == .count {
+                    CounterControl(habit: h) { delta in Task { await habits.add(h, delta: delta) } }
+                } else {
+                    TimerControl(habit: h) { mins in Task { await habits.setProgress(h, value: mins) } }
+                }
+            } else {
+                if h.goal != .check {
+                    // goal habits: a Start button to open the counter/timer …
+                    Button { withAnimation { started = true } } label: {
+                        Label("Start — \(h.progressLabel)", systemImage: h.goal.icon)
+                            .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+                            .frame(maxWidth: .infinity).padding(.vertical, 13)
+                            .background(HabitTheme.terracotta, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    Text("or").font(.system(size: 12)).foregroundStyle(HabitTheme.inkSoft)
+                }
+                // … and always a slide-to-complete to mark it done outright
+                SlideToConfirm(title: h.goal == .check ? "Slide to complete" : "Slide to finish now") {
+                    Task { await habits.complete(h) }
+                }
+            }
+        }
+        .padding(16)
+        .background(HabitTheme.card, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(HabitTheme.line))
+    }
+
+    /// Per-habit notification toggle, with a warning when turning it off.
+    @ViewBuilder
+    private func notifyRow(_ h: Habit) -> some View {
+        VStack(spacing: 0) {
+            Toggle(isOn: Binding(
+                get: { h.notifyOn },
+                set: { on in
+                    if on { Task { await habits.setNotify(h, true) } }
+                    else { showNotifyWarning = true }
+                }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Reminders").font(.system(size: 15, weight: .medium)).foregroundStyle(HabitTheme.ink)
+                    Text(h.notifyOn ? "You'll be reminded during your \(h.slotEnum.title.lowercased())" : "No reminders for this habit")
+                        .font(.system(size: 12)).foregroundStyle(HabitTheme.inkSoft)
+                }
+            }
+            .tint(HabitTheme.terracotta)
+        }
+        .padding(16)
+        .background(HabitTheme.card, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(HabitTheme.line))
+        .alert("Turn off reminders?", isPresented: $showNotifyWarning) {
+            Button("Turn off", role: .destructive) { Task { await habits.setNotify(h, false); HabitNotifications.cancel(h.id) } }
+            Button("Keep reminders", role: .cancel) {}
+        } message: {
+            Text("You won't be reminded to do “\(h.name)” at all. It's up to you to remember it.")
         }
     }
 
@@ -377,6 +464,7 @@ struct HabitCelebrationView: View {
     var body: some View {
         ZStack {
             HabitTheme.terracotta.ignoresSafeArea()   // = app accent
+            ConfettiView()                            // 🎉 shoots on appear
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
                     Spacer()

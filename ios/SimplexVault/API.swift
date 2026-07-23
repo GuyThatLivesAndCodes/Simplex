@@ -154,10 +154,11 @@ actor API {
         try await patchFile(id: id, changes: ["starred": starred])
     }
 
-    /// Move one or more items into `parent` (nil = root).
+    /// Move one or more items into `parent` (nil = root). Use NSNull for root so
+    /// JSONSerialization emits an explicit null rather than throwing on a boxed nil.
     func move(ids: [String], to parent: String?) async throws {
         _ = try await run(request("/api/files/move", method: "POST",
-                                  json: ["ids": ids, "parent": parent as Any]))
+                                  json: ["ids": ids, "parent": parent ?? NSNull()]))
     }
 
     /// Soft-delete to trash (the default destructive action in the UI).
@@ -225,11 +226,14 @@ actor API {
         return try decode(R.self, from: try await run(request(path))).habits
     }
 
-    func createHabit(name: String, slot: String, icon: String?, freq: String, reminder: String?, note: String?) async throws -> Habit {
-        var body: [String: Any] = ["name": name, "slot": slot, "freq": freq]
+    func createHabit(name: String, slot: String, icon: String?, freq: String, reminder: String?, note: String?,
+                     goalType: String, goalTarget: Double, unit: String?, notify: Bool) async throws -> Habit {
+        var body: [String: Any] = ["name": name, "slot": slot, "freq": freq,
+                                   "goalType": goalType, "goalTarget": goalTarget, "notify": notify]
         if let icon { body["icon"] = icon }
         if let reminder { body["reminder"] = reminder }
         if let note { body["note"] = note }
+        if let unit { body["unit"] = unit }
         return try decode(Habit.self, from: try await run(request("/api/habits", method: "POST", json: body)))
     }
 
@@ -245,10 +249,14 @@ actor API {
         _ = try await run(request("/api/habits/reorder", method: "POST", json: ["order": order]))
     }
 
-    /// Toggle (or set) a habit's completion for a day. Returns the updated habit.
-    func toggleHabit(id: String, day: String, today: String, done: Bool?) async throws -> Habit {
+    /// Log a habit's progress for a day. Pass `done` to force complete/clear, `value` to
+    /// set an absolute progress, or `delta` to increment. Returns the updated habit.
+    func logHabit(id: String, day: String, today: String,
+                  done: Bool? = nil, value: Double? = nil, delta: Double? = nil) async throws -> Habit {
         var body: [String: Any] = ["day": day, "today": today]
         if let done { body["done"] = done }
+        if let value { body["value"] = value }
+        if let delta { body["delta"] = delta }
         return try decode(Habit.self, from: try await run(request("/api/habits/\(id)/toggle", method: "POST", json: body)))
     }
 

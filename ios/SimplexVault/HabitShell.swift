@@ -25,6 +25,10 @@ struct HabitShell: View {
             // made habits look "deleted" and popped onboarding on return).
             if !habits.loaded { await habits.load() }
             if habits.loaded && habits.error == nil && habits.habits.isEmpty { showOnboarding = true }
+            // ask for notification permission so reminders can fire (once; the OS
+            // remembers the answer). reschedule() runs inside load() afterward.
+            await HabitNotifications.requestAuthorization()
+            HabitNotifications.reschedule(habits.habits)
         }
         .fullScreenCover(isPresented: $showOnboarding) {
             HabitOnboardingView().environmentObject(habits)
@@ -128,7 +132,9 @@ struct HabitTodayView: View {
             VStack(spacing: 0) {
                 ForEach(items) { habit in
                     NavigationLink { HabitDetailView(habitId: habit.id) } label: {
-                        HabitRow(habit: habit) { Task { await habits.toggle(habit) } }
+                        HabitRow(habit: habit,
+                                 onToggle: { Task { await habits.toggle(habit) } },
+                                 onComplete: { Task { await habits.complete(habit) } })
                     }
                     .buttonStyle(.plain)
                     if habit.id != items.last?.id { Divider().background(HabitTheme.line).padding(.leading, 44) }
@@ -171,13 +177,47 @@ struct HabitTodayView: View {
     }
 }
 
-/// One habit row on Today: a check circle, name (struck through when done), and its
-/// streak count on the right (like the reference's small number).
+/// One habit row on Today: tap the circle to toggle, tap the row to open detail, or
+/// SLIDE the row to the right to check it off. Goal habits show their progress (a small
+/// bar + "3/8 glasses").
 struct HabitRow: View {
     let habit: Habit
     let onToggle: () -> Void
+    var onComplete: () -> Void = {}
+
+    @State private var drag: CGFloat = 0
+    private let completeAt: CGFloat = 90
 
     var body: some View {
+        ZStack(alignment: .leading) {
+            // reveal a check affordance behind the row as you slide
+            if drag > 4 {
+                HStack {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 20)).foregroundStyle(HabitTheme.terracotta)
+                        .padding(.leading, 16).opacity(Double(min(1, drag / completeAt)))
+                    Spacer()
+                }
+            }
+            content
+                .background(HabitTheme.card)
+                .offset(x: drag)
+                .gesture(
+                    DragGesture(minimumDistance: 12)
+                        .onChanged { g in if !habit.isDoneToday { drag = max(0, min(g.translation.width, 120)) } }
+                        .onEnded { _ in
+                            if drag >= completeAt {
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                onComplete()
+                            }
+                            withAnimation(.spring(response: 0.3)) { drag = 0 }
+                        }
+                )
+        }
+        .clipped()
+    }
+
+    private var content: some View {
         HStack(spacing: 12) {
             Button(action: onToggle) {
                 Image(systemName: habit.isDoneToday ? "checkmark.circle.fill" : "circle")
@@ -185,12 +225,18 @@ struct HabitRow: View {
                     .foregroundStyle(habit.isDoneToday ? HabitTheme.done : HabitTheme.inkSoft.opacity(0.5))
             }
             .buttonStyle(.plain)
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(habit.name)
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(habit.isDoneToday ? HabitTheme.inkSoft : HabitTheme.ink)
                     .strikethrough(habit.isDoneToday, color: HabitTheme.inkSoft)
-                if let reminder = habit.reminder, !habit.isDoneToday {
+                // goal habits: a slim progress bar + label when not yet done
+                if habit.goal != .check && !habit.isDoneToday {
+                    HStack(spacing: 6) {
+                        ProgressCapsule(fraction: habit.goalFraction).frame(width: 70, height: 5)
+                        Text(habit.progressLabel).font(SimplexTheme.mono(10)).foregroundStyle(HabitTheme.inkSoft)
+                    }
+                } else if let reminder = habit.reminder, !habit.isDoneToday {
                     Text("Reminder · \(reminder)").font(.system(size: 11)).foregroundStyle(HabitTheme.inkSoft)
                 }
             }
@@ -202,6 +248,19 @@ struct HabitRow: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 11)
         .contentShape(Rectangle())
+    }
+}
+
+/// A tiny horizontal progress bar.
+struct ProgressCapsule: View {
+    let fraction: Double
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(HabitTheme.line)
+                Capsule().fill(HabitTheme.terracotta).frame(width: geo.size.width * min(1, max(0, fraction)))
+            }
+        }
     }
 }
 

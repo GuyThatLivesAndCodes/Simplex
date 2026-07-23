@@ -12,10 +12,13 @@
 		9D5F3B0EEF4127FE678D8A50 /* AppShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF614B17593BB433107A7595 /* AppShell.swift */; };
 		A37172AE52BFE76B29FA031B /* Appearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C9558B8BE285FCB05AC15D2 /* Appearance.swift */; };
 		AAC94146DF4E73288EF8C9E5 /* AppearanceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FAE85C17916C3F903C3D8ED /* AppearanceView.swift */; };
+		7BB4C34A8D62A843444109E3 /* Confetti.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A3393972905BFC80907FC6B /* Confetti.swift */; };
 		1E4F99BCE1FB3969AA53FF59 /* ConvertSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AE50A497D444EEF28700093 /* ConvertSheet.swift */; };
 		9EF97B843951B37FB5537428 /* FileViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FB417B0D9221E6464FBE382 /* FileViewer.swift */; };
 		6F8F5F46354C4AB74116DDDB /* HabitAddSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = D77FC2BC1F82DFED5F52FF6C /* HabitAddSheet.swift */; };
+		42226152997FBE92DA05E2D1 /* HabitControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = D55C8D9B7A0C240C03D31524 /* HabitControls.swift */; };
 		4CDABF20DB92CA464ABF19BD /* HabitModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00EBE2225F19F5C701F88952 /* HabitModels.swift */; };
+		9BA38637158F000AD1B41B9A /* HabitNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EC2FA968FCD46AC8C9B99FD /* HabitNotifications.swift */; };
 		BBE66C9481F65EC2323163BF /* HabitScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB0ED4D8ADBEE91EF0E277B5 /* HabitScreens.swift */; };
 		6E3F65BC23F14BEC4435E12C /* HabitShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = F13B75661F010C924BB6FA4E /* HabitShell.swift */; };
 		D0CEFC1F776C720E02AD6CF7 /* HabitStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D9F6393D6D320F1CB882BBB /* HabitStore.swift */; };
@@ -48,10 +51,13 @@
 		DF614B17593BB433107A7595 /* AppShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppShell.swift; sourceTree = "<group>"; };
 		8C9558B8BE285FCB05AC15D2 /* Appearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Appearance.swift; sourceTree = "<group>"; };
 		8FAE85C17916C3F903C3D8ED /* AppearanceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppearanceView.swift; sourceTree = "<group>"; };
+		0A3393972905BFC80907FC6B /* Confetti.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Confetti.swift; sourceTree = "<group>"; };
 		1AE50A497D444EEF28700093 /* ConvertSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConvertSheet.swift; sourceTree = "<group>"; };
 		5FB417B0D9221E6464FBE382 /* FileViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileViewer.swift; sourceTree = "<group>"; };
 		D77FC2BC1F82DFED5F52FF6C /* HabitAddSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitAddSheet.swift; sourceTree = "<group>"; };
+		D55C8D9B7A0C240C03D31524 /* HabitControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitControls.swift; sourceTree = "<group>"; };
 		00EBE2225F19F5C701F88952 /* HabitModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitModels.swift; sourceTree = "<group>"; };
+		1EC2FA968FCD46AC8C9B99FD /* HabitNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitNotifications.swift; sourceTree = "<group>"; };
 		EB0ED4D8ADBEE91EF0E277B5 /* HabitScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitScreens.swift; sourceTree = "<group>"; };
 		F13B75661F010C924BB6FA4E /* HabitShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitShell.swift; sourceTree = "<group>"; };
 		5D9F6393D6D320F1CB882BBB /* HabitStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitStore.swift; sourceTree = "<group>"; };
@@ -103,10 +109,13 @@
 				DF614B17593BB433107A7595 /* AppShell.swift */,
 				8C9558B8BE285FCB05AC15D2 /* Appearance.swift */,
 				8FAE85C17916C3F903C3D8ED /* AppearanceView.swift */,
+				0A3393972905BFC80907FC6B /* Confetti.swift */,
 				1AE50A497D444EEF28700093 /* ConvertSheet.swift */,
 				5FB417B0D9221E6464FBE382 /* FileViewer.swift */,
 				D77FC2BC1F82DFED5F52FF6C /* HabitAddSheet.swift */,
+				D55C8D9B7A0C240C03D31524 /* HabitControls.swift */,
 				00EBE2225F19F5C701F88952 /* HabitModels.swift */,
+				1EC2FA968FCD46AC8C9B99FD /* HabitNotifications.swift */,
 				EB0ED4D8ADBEE91EF0E277B5 /* HabitScreens.swift */,
 				F13B75661F010C924BB6FA4E /* HabitShell.swift */,
 				5D9F6393D6D320F1CB882BBB /* HabitStore.swift */,
@@ -216,10 +225,13 @@
 				9D5F3B0EEF4127FE678D8A50 /* AppShell.swift in Sources */,
 				A37172AE52BFE76B29FA031B /* Appearance.swift in Sources */,
 				AAC94146DF4E73288EF8C9E5 /* AppearanceView.swift in Sources */,
+				7BB4C34A8D62A843444109E3 /* Confetti.swift in Sources */,
 				1E4F99BCE1FB3969AA53FF59 /* ConvertSheet.swift in Sources */,
 				9EF97B843951B37FB5537428 /* FileViewer.swift in Sources */,
 				6F8F5F46354C4AB74116DDDB /* HabitAddSheet.swift in Sources */,
+				42226152997FBE92DA05E2D1 /* HabitControls.swift in Sources */,
 				4CDABF20DB92CA464ABF19BD /* HabitModels.swift in Sources */,
+				9BA38637158F000AD1B41B9A /* HabitNotifications.swift in Sources */,
 				BBE66C9481F65EC2323163BF /* HabitScreens.swift in Sources */,
 				6E3F65BC23F14BEC4435E12C /* HabitShell.swift in Sources */,
 				D0CEFC1F776C720E02AD6CF7 /* HabitStore.swift in Sources */,

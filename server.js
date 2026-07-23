@@ -1183,20 +1183,39 @@ function openStore(accountId) {
     --   habits — one row per habit. slot is 'morning'|'afternoon'|'evening'|'allday';
     --     freq is 'daily' or a JSON weekday mask; icon is a small key; sort orders the
     --     list; archived hides it from Today without deleting its history.
-    --   habit_log — one row per (habit, day) that was completed. day is 'YYYY-MM-DD'
-    --     in the user's local time (the client sends it), so streaks are day-accurate.
+    --   habit_log — one row per (habit, day). value is the logged progress for that
+    --     day (glasses, minutes, or 1 for a plain check); done is whether the day's
+    --     goal was met. day is 'YYYY-MM-DD' in the user's local time (client-supplied),
+    --     so streaks are day-accurate. Editing a habit's goal never rewrites past rows.
+    --   goal columns on habits: goal_type 'check'|'count'|'timer'; goal_target (e.g. 8
+    --     glasses, 20 minutes); unit a short label ('glasses','min','pages'); notify on
+    --     by default (client schedules the local notifications).
     CREATE TABLE IF NOT EXISTS habits (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, note TEXT, icon TEXT,
       slot TEXT NOT NULL DEFAULT 'allday', freq TEXT NOT NULL DEFAULT 'daily',
       reminder TEXT, sort INTEGER NOT NULL DEFAULT 0,
-      archived INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL
+      archived INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL,
+      goal_type TEXT NOT NULL DEFAULT 'check', goal_target REAL NOT NULL DEFAULT 1,
+      unit TEXT, notify INTEGER NOT NULL DEFAULT 1
     );
     CREATE TABLE IF NOT EXISTS habit_log (
       habit_id TEXT NOT NULL, day TEXT NOT NULL, ts INTEGER NOT NULL,
+      value REAL NOT NULL DEFAULT 1, done INTEGER NOT NULL DEFAULT 1,
       PRIMARY KEY (habit_id, day)
     );
     CREATE INDEX IF NOT EXISTS idx_habit_log_day ON habit_log(day);
   `);
+  // Additive migrations for accounts created before goals/progress existed. SQLite
+  // ADD COLUMN is a no-op-safe one-liner; wrap each so a re-run (column already there)
+  // doesn't throw.
+  for (const stmt of [
+    "ALTER TABLE habits ADD COLUMN goal_type TEXT NOT NULL DEFAULT 'check'",
+    "ALTER TABLE habits ADD COLUMN goal_target REAL NOT NULL DEFAULT 1",
+    "ALTER TABLE habits ADD COLUMN unit TEXT",
+    "ALTER TABLE habits ADD COLUMN notify INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE habit_log ADD COLUMN value REAL NOT NULL DEFAULT 1",
+    "ALTER TABLE habit_log ADD COLUMN done INTEGER NOT NULL DEFAULT 1",
+  ]) { try { db.exec(stmt); } catch (e) { /* column already exists */ } }
 
   /* One-time reclassify: EXR/TIFF used to be unsupported, so any that were uploaded
      before support landed were stored as type 'document' (they'd have opened in the
@@ -3088,8 +3107,13 @@ function habitToApi(row, keys) {
     slot: row.slot || 'allday', freq: row.freq || 'daily',
     reminder: row.reminder || null, sort: row.sort || 0,
     archived: !!row.archived, created: row.created,
+    goalType: row.goal_type || 'check',
+    goalTarget: row.goal_target != null ? row.goal_target : 1,
+    unit: row.unit || null,
+    notify: row.notify == null ? true : !!row.notify,
   };
 }
+const HABIT_GOAL_TYPES = new Set(['check', 'count', 'timer']);
 
 /* local calendar-day helper: YYYY-MM-DD. The client sends its own `day`/`today` for
    day-accurate streaks in the user's timezone; this is the server-side fallback. */
@@ -3130,11 +3154,15 @@ app.get('/api/habits', (req, res) => {
   const rows = db.prepare(`SELECT * FROM habits ${includeArchived ? '' : 'WHERE archived = 0'} ORDER BY sort ASC, created ASC`).all();
   const habits = rows.map(r => {
     const h = habitToApi(r, keys);
-    const logs = db.prepare('SELECT day FROM habit_log WHERE habit_id = ?').all(r.id).map(x => x.day);
-    const daySet = new Set(logs);
+    const logs = db.prepare('SELECT day, value, done FROM habit_log WHERE habit_id = ?').all(r.id);
+    // a day counts for streaks/grids only if the goal was MET that day (done=1)
+    const doneDays = logs.filter(x => x.done).map(x => x.day);
+    const daySet = new Set(doneDays);
+    const todayRow = logs.find(x => x.day === today);
     h.doneToday = daySet.has(today);
+    h.todayValue = todayRow ? todayRow.value : 0;   // progress logged today (glasses/min/…)
     h.streak = habitStreaks(daySet, today);
-    h.days = logs;                              // full completion history (for grids/insights)
+    h.days = doneDays;                               // completed-days history (grids/insights)
     return h;
   });
   res.json({ today, habits });
@@ -3146,16 +3174,20 @@ app.post('/api/habits', (req, res) => {
   const name = String(b.name || '').trim();
   if (!name) return res.status(400).json({ error: 'name required' });
   const slot = HABIT_SLOTS.has(b.slot) ? b.slot : 'allday';
+  const goalType = HABIT_GOAL_TYPES.has(b.goalType) ? b.goalType : 'check';
+  const goalTarget = goalType === 'check' ? 1 : Math.max(1, Number(b.goalTarget) || 1);
   const id = 'h' + crypto.randomBytes(8).toString('hex');
   const maxSort = db.prepare('SELECT COALESCE(MAX(sort), 0) AS m FROM habits').get().m;
-  db.prepare(`INSERT INTO habits (id,name,note,icon,slot,freq,reminder,sort,archived,created)
-              VALUES (@id,@name,@note,@icon,@slot,@freq,@reminder,@sort,0,@created)`).run({
+  db.prepare(`INSERT INTO habits (id,name,note,icon,slot,freq,reminder,sort,archived,created,goal_type,goal_target,unit,notify)
+              VALUES (@id,@name,@note,@icon,@slot,@freq,@reminder,@sort,0,@created,@goalType,@goalTarget,@unit,@notify)`).run({
     id, name: vault.encText(name, keys),
     note: b.note ? vault.encText(String(b.note), keys) : null,
     icon: b.icon ? String(b.icon).slice(0, 40) : null,
     slot, freq: b.freq ? String(b.freq).slice(0, 40) : 'daily',
     reminder: b.reminder ? String(b.reminder).slice(0, 20) : null,
     sort: maxSort + 1, created: Date.now(),
+    goalType, goalTarget, unit: b.unit ? String(b.unit).slice(0, 16) : null,
+    notify: b.notify === false ? 0 : 1,
   });
   res.json(habitToApi(db.prepare('SELECT * FROM habits WHERE id = ?').get(id), keys));
 });
@@ -3174,6 +3206,12 @@ app.patch('/api/habits/:id', (req, res) => {
   if ('reminder' in b) { sets.push('reminder = @reminder'); vals.reminder = b.reminder ? String(b.reminder).slice(0, 20) : null; }
   if (typeof b.archived === 'boolean') { sets.push('archived = @archived'); vals.archived = b.archived ? 1 : 0; }
   if (Number.isFinite(b.sort)) { sets.push('sort = @sort'); vals.sort = Math.round(b.sort); }
+  // Goal edits change FUTURE behavior only — past habit_log rows are never rewritten,
+  // so historical analytics stay intact.
+  if (HABIT_GOAL_TYPES.has(b.goalType)) { sets.push('goal_type = @goalType'); vals.goalType = b.goalType; }
+  if (Number.isFinite(Number(b.goalTarget))) { sets.push('goal_target = @goalTarget'); vals.goalTarget = Math.max(1, Number(b.goalTarget)); }
+  if ('unit' in b) { sets.push('unit = @unit'); vals.unit = b.unit ? String(b.unit).slice(0, 16) : null; }
+  if (typeof b.notify === 'boolean') { sets.push('notify = @notify'); vals.notify = b.notify ? 1 : 0; }
   if (sets.length) db.prepare(`UPDATE habits SET ${sets.join(', ')} WHERE id = @id`).run(vals);
   res.json(habitToApi(db.prepare('SELECT * FROM habits WHERE id = ?').get(row.id), keys));
 });
@@ -3196,22 +3234,57 @@ app.post('/api/habits/reorder', (req, res) => {
   res.json({ ok: true });
 });
 
-/* toggle (or set) a completion for a given day. body { day:'YYYY-MM-DD', done:bool }.
-   day defaults to today (client-supplied or server UTC). Returns the updated habit. */
+/* Log progress / completion for a day. One endpoint drives all goal types. body:
+     { day, today, value?, delta?, done? }
+   - value: set the day's absolute progress (e.g. slider/timer sets 12 min)
+   - delta: add to the day's progress (e.g. +1 glass); starts from current
+   - done:  force complete (true → value=target) or clear (false → remove the row)
+   For a 'check' habit any of these just flips it. A day is `done` when value >= target.
+   Editing the goal later never touches these rows, so past analytics are preserved. */
 app.post('/api/habits/:id/toggle', (req, res) => {
   const b = req.body || {}, db = req.store.db, keys = req.store.keys;
   const row = db.prepare('SELECT * FROM habits WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'not found' });
   const day = /^\d{4}-\d{2}-\d{2}$/.test(b.day) ? b.day : ymdUTC();
-  const already = !!db.prepare('SELECT 1 FROM habit_log WHERE habit_id = ? AND day = ?').get(row.id, day);
-  const done = typeof b.done === 'boolean' ? b.done : !already;
-  if (done && !already) db.prepare('INSERT INTO habit_log (habit_id,day,ts) VALUES (?,?,?)').run(row.id, day, Date.now());
-  if (!done && already) db.prepare('DELETE FROM habit_log WHERE habit_id = ? AND day = ?').run(row.id, day);
-  const logs = db.prepare('SELECT day FROM habit_log WHERE habit_id = ?').all(row.id).map(x => x.day);
-  const daySet = new Set(logs);
+  const target = row.goal_target != null ? row.goal_target : 1;
+  const cur = db.prepare('SELECT value FROM habit_log WHERE habit_id = ? AND day = ?').get(row.id, day);
+  const curVal = cur ? cur.value : 0;
+
+  let value;
+  if (typeof b.done === 'boolean') {
+    if (b.done === false) {
+      db.prepare('DELETE FROM habit_log WHERE habit_id = ? AND day = ?').run(row.id, day);
+      value = null;                                   // cleared
+    } else {
+      value = target;                                 // force complete
+    }
+  } else if (Number.isFinite(Number(b.value))) {
+    value = Math.max(0, Number(b.value));
+  } else if (Number.isFinite(Number(b.delta))) {
+    value = Math.max(0, curVal + Number(b.delta));
+  } else {
+    // no args on a check habit = toggle; on a goal habit = complete
+    value = curVal >= target ? null : target;
+    if (value === null) db.prepare('DELETE FROM habit_log WHERE habit_id = ? AND day = ?').run(row.id, day);
+  }
+
+  if (value !== null) {
+    const done = value >= target ? 1 : 0;
+    db.prepare(`INSERT INTO habit_log (habit_id,day,ts,value,done) VALUES (@id,@day,@ts,@value,@done)
+                ON CONFLICT(habit_id,day) DO UPDATE SET value=@value, done=@done, ts=@ts`)
+      .run({ id: row.id, day, ts: Date.now(), value, done });
+  }
+
+  const logs = db.prepare('SELECT day, value, done FROM habit_log WHERE habit_id = ?').all(row.id);
+  const doneDays = logs.filter(x => x.done).map(x => x.day);
+  const daySet = new Set(doneDays);
   const today = /^\d{4}-\d{2}-\d{2}$/.test(b.today) ? b.today : ymdUTC();
+  const todayRow = logs.find(x => x.day === today);
   const h = habitToApi(row, keys);
-  h.doneToday = daySet.has(today); h.streak = habitStreaks(daySet, today); h.days = logs;
+  h.doneToday = daySet.has(today);
+  h.todayValue = todayRow ? todayRow.value : 0;
+  h.streak = habitStreaks(daySet, today);
+  h.days = doneDays;
   res.json(h);
 });
 
