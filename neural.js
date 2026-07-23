@@ -135,6 +135,77 @@ function defaultArch() {
   return { tokMode: 'char', maxVocab: 512, ctx: 64, embed: 48, act: 'gelu', dropout: 0.0, layers: [96, 96] };
 }
 
+/* ============================================================
+   CHAT TEMPLATE — the ONE schema used for BOTH fine-tuning and inference, so the
+   model is trained on exactly the format it's later prompted with. Each turn is one
+   JSON object on its own line (JSONL), e.g.
+       {"role":"user","content":"Hi"}
+       {"role":"assistant","content":"Hello! How can I help?"}
+   A conversation is BOS-wrapped and turns are newline-separated. At inference we feed
+   the history + an OPEN assistant turn and stop as soon as the model closes it.
+   ============================================================ */
+const CHAT = {
+  // one turn -> a JSON line. We keep it compact (no spaces) so a small model spends its
+  // tokens on words, not whitespace.
+  turnLine: (role, content) => JSON.stringify({ role, content }),
+  // the exact prefix we hand the model to make it BEGIN an assistant reply. The model
+  // has learned to continue from here with the content then `"}`.
+  assistantOpen: '{"role":"assistant","content":"',
+  // generation stops the moment the model emits this (the close of the JSON string+obj).
+  stop: '"}',
+};
+/* Serialize a whole conversation (array of {role,content}) to the training text. */
+function chatSerializeConversation(turns) {
+  return (turns || []).filter(t => t && t.content != null && String(t.content).trim())
+    .map(t => CHAT.turnLine(t.role === 'assistant' ? 'assistant' : 'user', String(t.content))).join('\n');
+}
+/* Build the inference PROMPT: the recent history serialized, then an open assistant
+   turn for the model to complete. `history` is [{role,content}] (UI messages). */
+function chatBuildPrompt(history, maxTurns) {
+  const recent = (history || []).slice(-(maxTurns || 8));
+  const lines = recent.map(m => CHAT.turnLine(m.role === 'assistant' ? 'assistant' : 'user', String(m.content)));
+  lines.push(CHAT.assistantOpen);   // no trailing newline: the model continues THIS line
+  return lines.join('\n');
+}
+/* Given the raw model output that FOLLOWS assistantOpen, extract the assistant's reply:
+   everything up to the stop sequence, JSON-unescaped. Falls back gracefully. */
+function chatExtractReply(raw) {
+  let s = String(raw || '');
+  const stopAt = s.indexOf(CHAT.stop);
+  if (stopAt >= 0) s = s.slice(0, stopAt);
+  // also cut if the model ran into the next turn instead of stopping cleanly
+  const nextTurn = s.indexOf('{"role"');
+  if (nextTurn >= 0) s = s.slice(0, nextTurn);
+  s = s.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\').trim();
+  return s;
+}
+/* JSONL <-> conversation turns, for the paste/import escape hatch. Blank line = new
+   conversation boundary; returns {conversations:[[turns]], errors:[...]}. */
+function chatParseJSONL(text) {
+  const conversations = [], errors = [];
+  let cur = [];
+  const lines = String(text || '').split('\n');
+  lines.forEach((line, i) => {
+    const t = line.trim();
+    if (!t) { if (cur.length) { conversations.push(cur); cur = []; } return; }
+    let obj;
+    try { obj = JSON.parse(t); } catch (e) { errors.push(`Line ${i + 1}: not valid JSON`); return; }
+    // accept {role,content} OR the shorthand {"User":"…"} / {"AI":"…"}
+    let role, content;
+    if (obj.role && obj.content != null) { role = obj.role; content = obj.content; }
+    else if (obj.User != null) { role = 'user'; content = obj.User; }
+    else if (obj.AI != null || obj.Assistant != null) { role = 'assistant'; content = obj.AI ?? obj.Assistant; }
+    else { errors.push(`Line ${i + 1}: expected {"role","content"} or {"User"/"AI":…}`); return; }
+    role = (String(role).toLowerCase().startsWith('a')) ? 'assistant' : 'user';
+    cur.push({ role, content: String(content) });
+  });
+  if (cur.length) conversations.push(cur);
+  return { conversations, errors };
+}
+function chatToJSONL(turns) {
+  return (turns || []).map(t => CHAT.turnLine(t.role === 'assistant' ? 'assistant' : 'user', String(t.content))).join('\n');
+}
+
 async function openNetwork(id) {
   await flushNeuralSave();
   let net; try { net = await getNetwork(id); } catch (e) { toast('Could not open model', 'close'); return; }
@@ -149,6 +220,13 @@ function migrateDoc(d) {
   d.arch = Object.assign(defaultArch(), d.arch || {});
   d.data = d.data || { pretrain: [], finetune: [] };
   d.data.pretrain = d.data.pretrain || []; d.data.finetune = d.data.finetune || [];
+  // Fine-tune sets are now CONVERSATIONS ({id,name,turns:[{role,content}]}). Migrate any
+  // old free-text finetune set into a single user→assistant turn pair so nothing is lost.
+  d.data.finetune = d.data.finetune.map(s => {
+    if (Array.isArray(s.turns)) return s;
+    const t = (s.text || '').trim();
+    return { id: s.id || nnUid(), name: s.name || 'Conversation', turns: t ? [{ role: 'user', content: t }] : [] };
+  });
   d.trainState = d.trainState || { steps: 0, lossHistory: [], opt: { kind: 'adamw', lr: 0.003, batch: 8, epochs: 1, seed: 1 } };
   d.trainState.opt = Object.assign({ kind: 'adamw', lr: 0.003, batch: 8, epochs: 1, seed: 1 }, d.trainState.opt || {});
   d.trainState.lossHistory = d.trainState.lossHistory || [];
@@ -167,7 +245,7 @@ async function createFromTemplate(tplId) {
   const t = NN_TEMPLATES.find(x => x.id === tplId); if (!t) return;
   const doc = freshDoc(JSON.parse(JSON.stringify(t.arch)), t.name);
   doc.data.pretrain = t.pretrain.map(s => ({ id: nnUid(), name: s.name, text: s.text }));
-  doc.data.finetune = t.finetune.map(s => ({ id: nnUid(), name: s.name, text: s.text }));
+  doc.data.finetune = (t.finetune || []).map(s => ({ id: nnUid(), name: s.name, turns: (s.turns || []).map(x => ({ ...x })) }));
   await createModelDoc(doc);
 }
 async function removeNetwork(id) {
@@ -427,13 +505,42 @@ function renderDataTab() {
   const d = _nnDoc.data;
   body.innerHTML = `
     <div class="nn-data">
-      ${dataSectionHTML('pretrain', 'Pre-training data', 'The bulk text the model learns general patterns from.', d.pretrain)}
-      ${dataSectionHTML('finetune', 'Fine-tuning data', 'Targeted examples (e.g. prompt → response) to shape how it responds.', d.finetune)}
+      ${dataSectionHTML('pretrain', 'Pre-training data', 'The bulk free text the model learns general language patterns from.', d.pretrain)}
+      ${finetuneSectionHTML(d.finetune)}
     </div>`;
   body.querySelectorAll('[data-add]').forEach(b => b.onclick = () => addDataSet(b.dataset.add));
   body.querySelectorAll('[data-stack]').forEach(b => b.onclick = () => openStackPicker(b.dataset.stack));
   body.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => editDataSet(b.dataset.section, b.dataset.edit));
   body.querySelectorAll('[data-rmset]').forEach(b => b.onclick = () => { removeDataSet(b.dataset.section, b.dataset.rmset); });
+  const conv = body.querySelector('[data-newconvo]'); if (conv) conv.onclick = () => editConversation(null);
+  const imp = body.querySelector('[data-importjsonl]'); if (imp) imp.onclick = () => importJSONL();
+  const fstack = body.querySelector('[data-stackft]'); if (fstack) fstack.onclick = () => openStackPicker('finetune');
+  body.querySelectorAll('[data-editconvo]').forEach(b => b.onclick = () => editConversation(b.dataset.editconvo));
+}
+/* Fine-tuning is now CONVERSATIONS (User↔AI turns). It shows the chat schema so it's
+   obvious what the model is being trained to produce. */
+function finetuneSectionHTML(sets) {
+  const totalTurns = sets.reduce((n, s) => n + (s.turns || []).length, 0);
+  const rows = sets.length ? sets.map(s => {
+    const turns = s.turns || [];
+    const preview = turns.length ? esc(String(turns[0].content || '').slice(0, 60)) : 'empty';
+    return `<div class="nn-set-row" data-editconvo="${s.id}" style="cursor:pointer">
+      <span class="nn-set-ico bg-audio t-audio">${svg('send', 15)}</span>
+      <span class="nn-set-main"><span class="nn-set-name">${esc(s.name)}</span>
+        <span class="nn-set-sub mono">${turns.length} turn${turns.length !== 1 ? 's' : ''} · “${preview}”</span></span>
+      <button class="nn-set-btn" data-section="finetune" data-rmset="${s.id}" title="Remove">${svg('trash', 14)}</button>
+    </div>`;
+  }).join('') : `<div class="nn-none mono dim">No conversations yet. The model learns to reply in a chat format from these User↔AI examples.</div>`;
+  return `<div class="nn-panel nn-data-panel">
+    <div class="nn-panel-h">Fine-tuning conversations <span class="nn-set-count mono">${sets.length} convo${sets.length !== 1 ? 's' : ''} · ${totalTurns} turns</span></div>
+    <div class="nn-panel-p mono">User↔AI examples that teach the model to respond in a chat format. Each turn is trained as <code>{"role":"user","content":…}</code> / <code>{"role":"assistant","content":…}</code> — the same schema used in the Inference chat.</div>
+    <div class="nn-set-list">${rows}</div>
+    <div class="nn-set-actions">
+      <button class="btn sm" data-newconvo>${svg('plus', 13)} New conversation</button>
+      <button class="btn ghost sm" data-importjsonl>${svg('upload', 13)} Import JSONL</button>
+      <button class="btn ghost sm" data-stackft>${svg('copy', 13)} Stack from…</button>
+    </div>
+  </div>`;
 }
 function dataSectionHTML(section, title, sub, sets) {
   const total = sets.reduce((n, s) => n + (s.text || '').length, 0);
@@ -491,6 +598,88 @@ function removeDataSet(section, id) {
   markNeuralDirty(); renderDataTab();
 }
 
+/* ---- FINE-TUNE CONVERSATION editor: turn-by-turn User/AI rows ---- */
+let _nnEditConvo = null;   // working copy while the modal is open
+function editConversation(id) {
+  const existing = id ? _nnDoc.data.finetune.find(s => s.id === id) : null;
+  _nnEditConvo = existing
+    ? { id: existing.id, name: existing.name, turns: (existing.turns || []).map(t => ({ ...t })) }
+    : { id: nnUid(), name: 'Conversation ' + (_nnDoc.data.finetune.length + 1), turns: [{ role: 'user', content: '' }, { role: 'assistant', content: '' }] };
+  openModal(existing ? 'Edit conversation' : 'New conversation', convoModalBody(), [
+    { label: 'Cancel', class: 'ghost', onClick: () => { _nnEditConvo = null; closeModal(); } },
+    { label: existing ? 'Save' : 'Add', class: 'primary', onClick: () => saveConversation(!!existing) },
+  ]);
+  wireConvoModal();
+}
+function convoModalBody() {
+  const c = _nnEditConvo;
+  const turns = c.turns.map((t, i) => `
+    <div class="nn-turn ${t.role}" data-turn="${i}">
+      <div class="nn-turn-head">
+        <button type="button" class="nn-role-toggle" data-roletoggle="${i}">${t.role === 'assistant' ? 'AI' : 'User'}</button>
+        <span class="spacer"></span>
+        <button type="button" class="nn-set-btn" data-turnup="${i}" ${i === 0 ? 'disabled' : ''} title="Move up">${svg('arrowup', 13)}</button>
+        <button type="button" class="nn-set-btn" data-turndel="${i}" title="Remove turn">${svg('trash', 13)}</button>
+      </div>
+      <textarea class="nn-turn-text" data-turntext="${i}" rows="2" placeholder="${t.role === 'assistant' ? 'What the AI should reply…' : 'What the user says…'}" spellcheck="false">${esc(t.content)}</textarea>
+    </div>`).join('');
+  return `
+    <label class="nn-modal-field"><span>Name</span><input id="nnConvoName" class="nn-wz-input" value="${esc(c.name)}" spellcheck="false"></label>
+    <div class="nn-panel-p mono">Alternate <b>User</b> and <b>AI</b> turns. This trains the model to reply in the same chat format.</div>
+    <div class="nn-turns" id="nnTurns">${turns}</div>
+    <div class="nn-turn-add">
+      <button type="button" class="btn ghost sm" id="nnAddUser">${svg('plus', 12)} User turn</button>
+      <button type="button" class="btn ghost sm" id="nnAddAI">${svg('plus', 12)} AI turn</button>
+    </div>`;
+}
+function wireConvoModal() {
+  const nameEl = document.getElementById('nnConvoName');
+  if (nameEl) nameEl.oninput = () => { _nnEditConvo.name = nameEl.value.slice(0, 80); };
+  const rerender = () => { const host = document.querySelector('.nn-modal-body'); if (host) { host.innerHTML = convoModalBody(); wireConvoModal(); } };
+  // capture text edits live (so re-render/reorder keeps them)
+  document.querySelectorAll('[data-turntext]').forEach(el => el.oninput = () => { _nnEditConvo.turns[+el.dataset.turntext].content = el.value; });
+  document.querySelectorAll('[data-roletoggle]').forEach(b => b.onclick = () => { const i = +b.dataset.roletoggle; _nnEditConvo.turns[i].role = _nnEditConvo.turns[i].role === 'assistant' ? 'user' : 'assistant'; rerender(); });
+  document.querySelectorAll('[data-turndel]').forEach(b => b.onclick = () => { _nnEditConvo.turns.splice(+b.dataset.turndel, 1); rerender(); });
+  document.querySelectorAll('[data-turnup]').forEach(b => b.onclick = () => { const i = +b.dataset.turnup; if (i > 0) { const t = _nnEditConvo.turns; [t[i - 1], t[i]] = [t[i], t[i - 1]]; rerender(); } });
+  const au = document.getElementById('nnAddUser'); if (au) au.onclick = () => { _nnEditConvo.turns.push({ role: 'user', content: '' }); rerender(); };
+  const aa = document.getElementById('nnAddAI'); if (aa) aa.onclick = () => { _nnEditConvo.turns.push({ role: 'assistant', content: '' }); rerender(); };
+}
+function saveConversation(isEdit) {
+  const c = _nnEditConvo; if (!c) return;
+  c.turns = c.turns.filter(t => String(t.content || '').trim());
+  if (!c.turns.length) { toast('Add at least one turn with text', 'close'); return; }
+  const set = { id: c.id, name: c.name || 'Conversation', turns: c.turns };
+  if (isEdit) { const i = _nnDoc.data.finetune.findIndex(s => s.id === c.id); if (i >= 0) _nnDoc.data.finetune[i] = set; else _nnDoc.data.finetune.push(set); }
+  else _nnDoc.data.finetune.push(set);
+  _nnEditConvo = null; markNeuralDirty(); closeModal(); renderDataTab();
+}
+
+/* ---- Import fine-tune conversations from JSONL (bulk escape hatch) ---- */
+function importJSONL() {
+  openModal('Import conversations (JSONL)', `
+    <div class="nn-panel-p mono">One turn per line as <code>{"role":"user","content":"…"}</code> or the shorthand <code>{"User":"…"}</code> / <code>{"AI":"…"}</code>. A <b>blank line</b> starts a new conversation.</div>
+    <textarea id="nnJsonl" class="nn-corpus" rows="12" spellcheck="false" placeholder='{"User":"Hi"}
+{"AI":"Hello! How can I help?"}
+
+{"User":"What is 2+2?"}
+{"AI":"4."}'></textarea>
+    <div class="nn-modal-row"><button class="btn ghost sm" id="nnJsonlFile">${svg('upload', 13)} Load a .jsonl/.txt file</button><span class="mono dim" id="nnJsonlStat"></span></div>
+  `, [
+    { label: 'Cancel', class: 'ghost', onClick: closeModal },
+    { label: 'Import', class: 'primary', onClick: () => {
+      const txt = document.getElementById('nnJsonl').value || '';
+      const { conversations, errors } = chatParseJSONL(txt);
+      if (errors.length) { toast(errors[0] + (errors.length > 1 ? ` (+${errors.length - 1} more)` : ''), 'close'); return; }
+      if (!conversations.length) { toast('No conversations found', 'close'); return; }
+      conversations.forEach((turns, i) => _nnDoc.data.finetune.push({ id: nnUid(), name: `Imported ${_nnDoc.data.finetune.length + 1}`, turns }));
+      markNeuralDirty(); closeModal(); renderDataTab();
+      toast(`Imported ${conversations.length} conversation${conversations.length > 1 ? 's' : ''}`, 'check');
+    } },
+  ]);
+  const f = document.getElementById('nnJsonlFile');
+  if (f) f.onclick = () => pickTextFile(t => { const ta = document.getElementById('nnJsonl'); ta.value = (ta.value ? ta.value + '\n' : '') + t; document.getElementById('nnJsonlStat').textContent = t.length.toLocaleString() + ' chars loaded'; });
+}
+
 /* ---- STACKING: import data sets from templates or your own models ---- */
 async function openStackPicker(targetSection) {
   // gather sources: templates + your saved models (need their full data)
@@ -508,22 +697,29 @@ async function openStackPicker(targetSection) {
     if (data) sources.push({ kind: 'net', id: n.id, name: n.name, sub: 'Your model', pretrain: (data.data && data.data.pretrain) || [], finetune: (data.data && data.data.finetune) || [] });
   }
   const listEl = document.getElementById('nnStackList'); if (!listEl) return;
+  // Only offer sets that MATCH the target section (pretrain=free text, finetune=convos)
+  // so stacking always produces the right shape.
   const rows = sources.map((src, si) => {
-    const sets = [...src.pretrain.map(s => ({ ...s, from: 'pretrain' })), ...src.finetune.map(s => ({ ...s, from: 'finetune' }))];
+    const sets = (targetSection === 'pretrain' ? src.pretrain : src.finetune);
     if (!sets.length) return '';
     return `<div class="nn-stack-src"><div class="nn-stack-src-h">${esc(src.name)} <span class="mono dim">${src.sub}</span></div>
-      ${sets.map((s, i) => `<label class="nn-stack-item"><input type="checkbox" data-si="${si}" data-from="${s.from}" data-name="${esc(s.name)}"><span>${esc(s.name)}</span><span class="mono dim">${(s.text || '').length.toLocaleString()} chars · ${s.from}</span></label>`).join('')}</div>`;
-  }).join('') || `<div class="nn-none mono dim">No other data sets available to stack.</div>`;
-  listEl.innerHTML = rows + (sources.some(s => s.pretrain.length + s.finetune.length) ? `<button class="btn primary sm" id="nnStackApply" style="margin-top:12px">${svg('plus', 13)} Add selected</button>` : '');
-  // keep a lookup for apply
+      ${sets.map((s) => {
+        const meta = targetSection === 'pretrain' ? `${(s.text || '').length.toLocaleString()} chars` : `${(s.turns || []).length} turns`;
+        return `<label class="nn-stack-item"><input type="checkbox" data-si="${si}" data-name="${esc(s.name)}"><span>${esc(s.name)}</span><span class="mono dim">${meta}</span></label>`;
+      }).join('')}</div>`;
+  }).join('') || `<div class="nn-none mono dim">No matching ${targetSection === 'pretrain' ? 'pre-training text' : 'conversations'} available to stack.</div>`;
+  const anyMatch = sources.some(s => (targetSection === 'pretrain' ? s.pretrain.length : s.finetune.length));
+  listEl.innerHTML = rows + (anyMatch ? `<button class="btn primary sm" id="nnStackApply" style="margin-top:12px">${svg('plus', 13)} Add selected</button>` : '');
   const apply = document.getElementById('nnStackApply');
   if (apply) apply.onclick = () => {
     const boxes = Array.from(listEl.querySelectorAll('input[type=checkbox]:checked'));
     let added = 0;
     boxes.forEach(box => {
-      const src = sources[+box.dataset.si]; const from = box.dataset.from; const name = box.dataset.name;
-      const set = (from === 'pretrain' ? src.pretrain : src.finetune).find(s => s.name === name);
-      if (set && set.text) { _nnDoc.data[targetSection].push({ id: nnUid(), name: (src.kind === 'tpl' ? '' : '') + set.name, text: set.text }); added++; }
+      const src = sources[+box.dataset.si]; const name = box.dataset.name;
+      const set = (targetSection === 'pretrain' ? src.pretrain : src.finetune).find(s => s.name === name);
+      if (!set) return;
+      if (targetSection === 'pretrain') { if (set.text) { _nnDoc.data.pretrain.push({ id: nnUid(), name: set.name, text: set.text }); added++; } }
+      else { const turns = (set.turns || []).map(t => ({ ...t })); if (turns.length) { _nnDoc.data.finetune.push({ id: nnUid(), name: set.name, turns }); added++; } }
     });
     if (added) { markNeuralDirty(); toast(`Stacked ${added} set${added > 1 ? 's' : ''}`, 'copy'); }
     closeModal(); renderDataTab();
@@ -592,16 +788,24 @@ function hpField(key, label, val, type, min, max, step) {
 function lastLoss(ts) { return ts.lossHistory.length ? ts.lossHistory[ts.lossHistory.length - 1].toFixed(3) : '—'; }
 function totalDataChars() {
   const d = _nnDoc.data;
-  return [...d.pretrain, ...d.finetune].reduce((n, s) => n + (s.text || '').length, 0);
+  return d.pretrain.reduce((n, s) => n + (s.text || '').length, 0) + finetuneChars();
 }
 function buildCorpus() {
   const d = _nnDoc.data;
-  // pre-training first, then fine-tuning (weighted by simple repetition so it isn't
-  // drowned out). Separate sets with a blank line.
+  // Pre-training = free text (general patterns). Fine-tuning = conversations serialized
+  // in the CHAT TEMPLATE, so the model learns to produce the exact JSON turn format it's
+  // prompted with at inference. Each conversation is its own block (blank-line separated).
   const pre = d.pretrain.map(s => s.text).join('\n\n');
-  const fine = d.finetune.map(s => s.text).join('\n\n');
-  const fineRepeat = fine ? (fine + '\n\n').repeat(pre.length > fine.length * 3 ? 2 : 1) : '';
+  const convos = d.finetune.map(s => chatSerializeConversation(s.turns)).filter(Boolean);
+  const fine = convos.join('\n\n');
+  // Fine-tune data is usually small vs pretrain; repeat it so the chat format isn't
+  // drowned out (this is a poor-man's loss weighting for the tiny model).
+  const fineRepeat = fine ? (fine + '\n\n').repeat(pre.length > fine.length * 2 ? 3 : 2) : '';
   return (pre + '\n\n' + fineRepeat).trim();
+}
+/* Count fine-tune content for the "enough data" check (turns' content chars). */
+function finetuneChars() {
+  return _nnDoc.data.finetune.reduce((n, s) => n + (s.turns || []).reduce((m, t) => m + String(t.content || '').length, 0), 0);
 }
 
 async function startTraining() {
@@ -683,18 +887,24 @@ function drawLoss() {
 function renderInferenceTab() {
   const body = document.getElementById('nnTabBody'); if (!body) return;
   const trained = _nnDoc.trainState.steps > 0 && _nnDoc.model;
-  if (!_nnChat) _nnChat = [];
+  // chat history is PER MODEL — reset it whenever a different model is open.
+  if (!_nnChat || _nnChatFor !== _nnId) { _nnChat = []; _nnChatFor = _nnId; }
   body.innerHTML = `
     <div class="nn-chat">
+      <div class="nn-chat-bar">
+        <span class="mono dim">${trained ? 'Talking to your model in a chat format' : 'Not trained yet'}</span>
+        <span class="spacer"></span>
+        <button class="btn ghost sm" id="nnChatReset" title="Clear the conversation and start over" ${_nnChat.length ? '' : 'disabled'}>${svg('refresh', 13)} Reset chat</button>
+      </div>
       ${!trained ? `<div class="nn-chat-empty mono dim">${svg('info', 14)} Train the model first (Training tab) — then it can chat here as it was trained.</div>` : ''}
-      <div class="nn-chat-log" id="nnChatLog">${_nnChat.map(chatBubbleHTML).join('') || (trained ? `<div class="nn-chat-hint mono dim">Say something to your model. It replies with what it learned.</div>` : '')}</div>
+      <div class="nn-chat-log" id="nnChatLog">${_nnChat.map(chatBubbleHTML).join('') || (trained ? `<div class="nn-chat-hint mono dim">Say something to your model. Each turn is sent as <code>{"role":"user","content":…}</code> and it replies as the assistant.</div>` : '')}</div>
       <div class="nn-gen-opts mono">
         <label>Creativity <input type="range" id="nnTemp" min="0.1" max="1.5" step="0.05" value="0.8"><b id="nnTempV">0.80</b></label>
         <label>Reply length <input type="range" id="nnLen" min="20" max="300" step="10" value="120"><b id="nnLenV">120</b></label>
       </div>
       <div class="nn-chat-input">
         <input id="nnChatBox" class="nn-prompt" placeholder="${trained ? 'Message your model…' : 'Train the model to chat'}" ${trained ? '' : 'disabled'} spellcheck="false">
-        <button class="btn primary" id="nnChatSend" ${trained ? '' : 'disabled'}>${svg('back', 15, 2)}</button>
+        <button class="btn primary" id="nnChatSend" ${trained ? '' : 'disabled'}>${svg('send', 15, 2)}</button>
       </div>
     </div>`;
   const temp = body.querySelector('#nnTemp'), len = body.querySelector('#nnLen');
@@ -703,11 +913,15 @@ function renderInferenceTab() {
   const box = body.querySelector('#nnChatBox'), send = body.querySelector('#nnChatSend');
   if (send) send.onclick = () => sendChat();
   if (box) box.onkeydown = (e) => { if (e.key === 'Enter') sendChat(); };
+  const reset = body.querySelector('#nnChatReset'); if (reset) reset.onclick = () => resetChat();
   scrollChat();
 }
-let _nnChat = null;
+let _nnChat = null;      // [{role:'user'|'assistant', content, thinking?}]
+let _nnChatFor = null;   // the model id _nnChat belongs to
+function resetChat() { _nnChat = []; _nnChatFor = _nnId; renderInferenceTab(); }
 function chatBubbleHTML(m) {
-  return `<div class="nn-bubble ${m.role}"><span class="nn-bubble-role mono">${m.role === 'user' ? 'You' : 'Model'}</span><span class="nn-bubble-txt">${esc(m.text)}${m.thinking ? '<span class="nn-gen-think">▍</span>' : ''}</span></div>`;
+  const who = m.role === 'user' ? 'You' : 'Model';
+  return `<div class="nn-bubble ${m.role === 'user' ? 'user' : 'bot'}"><span class="nn-bubble-role mono">${who}</span><span class="nn-bubble-txt">${esc(m.content)}${m.thinking ? '<span class="nn-gen-think">▍</span>' : ''}</span></div>`;
 }
 function scrollChat() { const l = document.getElementById('nnChatLog'); if (l) l.scrollTop = l.scrollHeight; }
 async function sendChat() {
@@ -715,23 +929,27 @@ async function sendChat() {
   const text = box.value.trim(); if (!text) return;
   if (!_nnDoc.model || !_nnDoc.trainState.steps) { toast('Train the model first', 'close'); return; }
   box.value = '';
-  _nnChat.push({ role: 'user', text });
-  const botMsg = { role: 'bot', text: '', thinking: true };
+  _nnChat.push({ role: 'user', content: text });
+  const botMsg = { role: 'assistant', content: '', thinking: true };
   _nnChat.push(botMsg);
   redrawChat();
   const temp = +document.getElementById('nnTemp').value, len = +document.getElementById('nnLen').value;
-  // build a prompt out of the recent conversation so it stays on-topic-ish
-  const prompt = _nnChat.slice(-6).filter(m => !m.thinking).map(m => m.text).join('\n') + '\n';
+  // Serialize the conversation in the CHAT TEMPLATE and prompt an open assistant turn;
+  // the model completes it and we stop at the closing "}. (Same schema it was fine-tuned
+  // on — that's what makes it reply like a chat assistant.)
+  const history = _nnChat.filter(m => !m.thinking);
+  const prompt = chatBuildPrompt(history, 8);
   try {
-    const r = await nnRun('llm-sample', { model: _nnDoc.model, gen: { prompt, length: len, temperature: temp, topK: 40, seed: (Math.random() * 1e9) | 0 } });
-    botMsg.text = (r.text || '').trim() || '…'; botMsg.thinking = false;
-  } catch (e) { botMsg.text = '(generation failed)'; botMsg.thinking = false; }
+    const r = await nnRun('llm-sample', { model: _nnDoc.model, gen: { prompt, length: len, temperature: temp, topK: 40, stop: CHAT.stop, seed: (Math.random() * 1e9) | 0 } });
+    botMsg.content = chatExtractReply(r.text) || '…'; botMsg.thinking = false;
+  } catch (e) { botMsg.content = '(generation failed)'; botMsg.thinking = false; }
   redrawChat();
 }
 function redrawChat() {
   const log = document.getElementById('nnChatLog'); if (!log) return;
   log.innerHTML = _nnChat.map(chatBubbleHTML).join('');
   scrollChat();
+  const reset = document.getElementById('nnChatReset'); if (reset) reset.disabled = _nnChat.length === 0;
 }
 
 /* ============================================================
@@ -779,11 +997,20 @@ When winter came, the animals gathered warm and safe inside the cozy den.
 The fox and the owl and the rabbit told stories until the fire grew low and soft.
 And so the little fox learned that the world is full of friends, if only you are kind.
 The river sang a quiet song as it flowed gently toward the wide and shining sea.`.repeat(4) }],
-    finetune: [{ name: 'Story openers', text:
-`Once upon a time, there was a brave little mouse.
-Long ago, in a land of snow, a friendly bear woke up.
-In a quiet forest, a young deer opened her eyes to the morning light.
-Beyond the blue mountains lived a wise old turtle who knew many tales.`.repeat(3) }],
+    finetune: [
+      { name: 'Ask for a story', turns: [
+        { role: 'user', content: 'Tell me a story.' },
+        { role: 'assistant', content: 'Once upon a time, a brave little mouse set out to find the shining stone beyond the hills.' },
+      ] },
+      { name: 'Story about a bear', turns: [
+        { role: 'user', content: 'Tell me about a bear.' },
+        { role: 'assistant', content: 'Long ago, in a land of snow, a friendly bear woke up and went to greet the morning sun.' },
+      ] },
+      { name: 'A gentle ending', turns: [
+        { role: 'user', content: 'How does it end?' },
+        { role: 'assistant', content: 'And so they all became the best of friends, and the little fox learned that the world is full of kindness.' },
+      ] },
+    ],
   },
   {
     id: 'chatbot', name: 'Politeness Bot', tint: 'audio', icon: 'send',
@@ -797,13 +1024,32 @@ Thank you so much for your patience. Have a wonderful afternoon.
 I hope you have a great day. Take care and stay safe out there.
 Good morning. Would you like a cup of tea or some coffee?
 That sounds like a good idea. Let us get started right away.`.repeat(6) }],
-    finetune: [{ name: 'Q and A', text:
-`Q: How are you? A: I am doing great, thank you for asking!
-Q: What is your name? A: You can call me Simplex, your friendly model.
-Q: Can you help me? A: Of course! I would be glad to help you.
-Q: Thank you. A: You are very welcome. Anytime!
-Q: Goodbye. A: Goodbye! Have a wonderful day.
-Q: What can you do? A: I can chat with you about all sorts of things.`.repeat(5) }],
+    finetune: [
+      { name: 'Greeting', turns: [
+        { role: 'user', content: 'How are you?' },
+        { role: 'assistant', content: 'I am doing great, thank you for asking! How can I help you today?' },
+      ] },
+      { name: 'Name', turns: [
+        { role: 'user', content: 'What is your name?' },
+        { role: 'assistant', content: 'You can call me Simplex, your friendly model.' },
+      ] },
+      { name: 'Help', turns: [
+        { role: 'user', content: 'Can you help me?' },
+        { role: 'assistant', content: 'Of course! I would be glad to help you.' },
+      ] },
+      { name: 'Thanks', turns: [
+        { role: 'user', content: 'Thank you.' },
+        { role: 'assistant', content: 'You are very welcome. Anytime!' },
+      ] },
+      { name: 'Capabilities', turns: [
+        { role: 'user', content: 'What can you do?' },
+        { role: 'assistant', content: 'I can chat with you about all sorts of things. Ask me anything!' },
+      ] },
+      { name: 'Goodbye', turns: [
+        { role: 'user', content: 'Goodbye.' },
+        { role: 'assistant', content: 'Goodbye! Have a wonderful day.' },
+      ] },
+    ],
   },
   {
     id: 'poet', name: 'Couplet Poet', tint: 'document', icon: 'spark',

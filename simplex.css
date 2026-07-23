@@ -3416,6 +3416,19 @@ body::before {
 @keyframes nnBlink { 50% { opacity: 0; } }
 .nn-chat-input { display: flex; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
 .nn-chat-input .nn-prompt { flex: 1; }
+.nn-chat-bar { display: flex; align-items: center; gap: 8px; padding-bottom: 8px; font-size: 11px; }
+.nn-chat-hint code, .nn-panel-p code { font-family: var(--mono); font-size: 0.92em; background: var(--bg-deep); padding: 1px 5px; border-radius: 5px; color: var(--ink-dim); }
+
+/* fine-tune conversation editor: turn rows */
+.nn-turns { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; max-height: 44vh; overflow: auto; }
+.nn-turn { border: 1px solid var(--line-soft); border-radius: 10px; padding: 8px 10px; background: var(--bg-deep); }
+.nn-turn.assistant { border-color: oklch(0.78 0.115 300 / 0.35); }
+.nn-turn-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.nn-role-toggle { font-size: 11px; font-weight: 650; padding: 3px 12px; border-radius: 999px; border: 1px solid var(--line-soft); background: var(--card); color: var(--ink-dim); cursor: pointer; min-width: 54px; }
+.nn-turn.assistant .nn-role-toggle { background: var(--aud); color: var(--bg-deep); border-color: var(--aud); }
+.nn-turn-text { width: 100%; background: var(--card); border: 1px solid var(--line-soft); border-radius: 8px; padding: 8px 10px; color: var(--ink); font-size: 13px; resize: vertical; font-family: var(--sans); }
+.nn-turn-text:focus { border-color: var(--aud); outline: none; }
+.nn-turn-add { display: flex; gap: 8px; }
 
 /* modal (reuses .modal-bg / .modal) */
 .nn-modal { max-width: 560px; width: 92vw; }

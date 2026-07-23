@@ -643,10 +643,15 @@
     const temp = clampNum(gen.temperature, 0.05, 2, 0.9);
     const topK = clampInt(gen.topK, 0, tokVocabSize(m.tok), 0);
     const maxNew = clampInt(gen.length, 1, 400, 120);
+    // Optional stop string: generation halts as soon as the DECODED new text contains it
+    // (used by the chat template to stop at the end of an assistant turn). We check the
+    // decoded text, not token ids, so it works across char/BPE/word tokenizers.
+    const stop = (gen.stop != null) ? String(gen.stop) : '';
     const rng = mulberry32(((gen.seed ?? Date.now()) >>> 0) || 3);
     let ids = tokenizerEncode(m.tok, String(gen.prompt || ''));
     ids = [BOS].concat(ids);
     const startLen = ids.length;
+    let stopped = false;
     for (let step = 0; step < maxNew; step++) {
       const window = ids.slice(Math.max(0, ids.length - ctx));
       const logits = llmLogitsLast(m, window);
@@ -659,8 +664,14 @@
       let pick = sampleProbs(probs, topK, rng);
       if (pick === EOS) break;
       ids.push(pick);
+      if (stop && step >= 1) {
+        const soFar = tokenizerDecode(m.tok, ids.slice(startLen));
+        if (soFar.indexOf(stop) >= 0) { stopped = true; break; }
+      }
     }
-    return { text: tokenizerDecode(m.tok, ids.slice(startLen)), ids: ids.slice(startLen) };
+    let text = tokenizerDecode(m.tok, ids.slice(startLen));
+    if (stop) { const at = text.indexOf(stop); if (at >= 0) text = text.slice(0, at); }
+    return { text, ids: ids.slice(startLen), stopped };
   }
   function sampleProbs(probs, topK, rng) {
     const V = probs.length;
