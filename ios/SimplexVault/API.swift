@@ -250,6 +250,53 @@ actor API {
         catch let e as APIError where e.status == 404 { return nil }
     }
 
+    // MARK: - Neural models (the Neural system: local-first, synced via /api/networks)
+
+    struct NetMeta: Decodable, Identifiable { let id: String; let kind: String; let name: String; let updated: Double }
+
+    /// List the account's saved networks (metadata only). Filter to our kind server-side
+    /// isn't available, so we filter client-side.
+    func listNetworks() async throws -> [NetMeta] {
+        try decode([NetMeta].self, from: try await run(request("/api/networks")))
+    }
+    /// Fetch a full model doc. `data` is our NeuralDoc JSON (as a nested object).
+    func getNetworkDoc(_ id: String) async throws -> (name: String, updated: Double, doc: NeuralDoc?) {
+        let data = try await run(request("/api/networks/\(id)"))
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw APIError(status: -1, message: "bad response", needsReauth: false)
+        }
+        let name = obj["name"] as? String ?? "Untitled model"
+        let updated = (obj["updated"] as? Double) ?? 0
+        var doc: NeuralDoc? = nil
+        if let dataObj = obj["data"], !(dataObj is NSNull),
+           let raw = try? JSONSerialization.data(withJSONObject: dataObj) {
+            doc = try? JSONDecoder().decode(NeuralDoc.self, from: raw)
+        }
+        return (name, updated, doc)
+    }
+    /// Create a network (kind llm2). Returns the new id.
+    func createNetwork(name: String, doc: NeuralDoc) async throws -> String {
+        let dataObj = try jsonObject(doc)
+        let data = try await run(request("/api/networks", method: "POST",
+                                         json: ["kind": "llm2", "name": name, "data": dataObj]))
+        struct R: Decodable { let id: String }
+        return try decode(R.self, from: data).id
+    }
+    /// Update a network's name + data.
+    func updateNetwork(_ id: String, name: String, doc: NeuralDoc) async throws {
+        let dataObj = try jsonObject(doc)
+        _ = try await run(request("/api/networks/\(id)", method: "PATCH",
+                                  json: ["name": name, "data": dataObj]))
+    }
+    func deleteNetwork(_ id: String) async throws {
+        _ = try await run(request("/api/networks/\(id)", method: "DELETE"))
+    }
+    /// Encode a Codable into a JSON object (dictionary) for embedding in a request body.
+    private func jsonObject<T: Encodable>(_ value: T) throws -> Any {
+        let data = try JSONEncoder().encode(value)
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
     // MARK: - Terms of Service
 
     struct Tos: Decodable { let version: Int; let text: String }

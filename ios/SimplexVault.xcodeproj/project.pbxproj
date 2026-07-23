@@ -23,6 +23,11 @@
 		9BA38637158F000AD1B41B9A /* HabitNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1EC2FA968FCD46AC8C9B99FD /* HabitNotifications.swift */; };
 		BBE66C9481F65EC2323163BF /* HabitScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB0ED4D8ADBEE91EF0E277B5 /* HabitScreens.swift */; };
 		6E3F65BC23F14BEC4435E12C /* HabitShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = F13B75661F010C924BB6FA4E /* HabitShell.swift */; };
+		C7CECD6DD1AECE8393C74662 /* NeuralEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F58EBBF59E91E98E730466B /* NeuralEngine.swift */; };
+		1CB2EB102468596DC5399CC8 /* NeuralModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A84665A2454009E8F40AAF92 /* NeuralModels.swift */; };
+		9F945023FE22F08348F46A80 /* NeuralStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 923D13FE1BE7EC53D87829BB /* NeuralStore.swift */; };
+		7E38DC5A1A8A8DF55FA51E97 /* NeuralShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC0034CA6D3D5F938E11AB86 /* NeuralShell.swift */; };
+		63B67D2423FA76D72400A250 /* NeuralScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6454AADD714545BFA1EEB175 /* NeuralScreens.swift */; };
 		D0CEFC1F776C720E02AD6CF7 /* HabitStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D9F6393D6D320F1CB882BBB /* HabitStore.swift */; };
 		AE72946AE574918F6B1A5181 /* HabitTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBF23384152D364DE69F46D4 /* HabitTheme.swift */; };
 		F5E288ADDA5AAAB3F18047D8 /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 145FF7943920C5F0C6BF880D /* LoginView.swift */; };
@@ -64,6 +69,11 @@
 		1EC2FA968FCD46AC8C9B99FD /* HabitNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitNotifications.swift; sourceTree = "<group>"; };
 		EB0ED4D8ADBEE91EF0E277B5 /* HabitScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitScreens.swift; sourceTree = "<group>"; };
 		F13B75661F010C924BB6FA4E /* HabitShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitShell.swift; sourceTree = "<group>"; };
+		9F58EBBF59E91E98E730466B /* NeuralEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeuralEngine.swift; sourceTree = "<group>"; };
+		A84665A2454009E8F40AAF92 /* NeuralModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeuralModels.swift; sourceTree = "<group>"; };
+		923D13FE1BE7EC53D87829BB /* NeuralStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeuralStore.swift; sourceTree = "<group>"; };
+		AC0034CA6D3D5F938E11AB86 /* NeuralShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeuralShell.swift; sourceTree = "<group>"; };
+		6454AADD714545BFA1EEB175 /* NeuralScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeuralScreens.swift; sourceTree = "<group>"; };
 		5D9F6393D6D320F1CB882BBB /* HabitStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitStore.swift; sourceTree = "<group>"; };
 		DBF23384152D364DE69F46D4 /* HabitTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitTheme.swift; sourceTree = "<group>"; };
 		145FF7943920C5F0C6BF880D /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
@@ -124,6 +134,11 @@
 				1EC2FA968FCD46AC8C9B99FD /* HabitNotifications.swift */,
 				EB0ED4D8ADBEE91EF0E277B5 /* HabitScreens.swift */,
 				F13B75661F010C924BB6FA4E /* HabitShell.swift */,
+				9F58EBBF59E91E98E730466B /* NeuralEngine.swift */,
+				A84665A2454009E8F40AAF92 /* NeuralModels.swift */,
+				923D13FE1BE7EC53D87829BB /* NeuralStore.swift */,
+				AC0034CA6D3D5F938E11AB86 /* NeuralShell.swift */,
+				6454AADD714545BFA1EEB175 /* NeuralScreens.swift */,
 				5D9F6393D6D320F1CB882BBB /* HabitStore.swift */,
 				DBF23384152D364DE69F46D4 /* HabitTheme.swift */,
 				145FF7943920C5F0C6BF880D /* LoginView.swift */,
@@ -242,6 +257,11 @@
 				9BA38637158F000AD1B41B9A /* HabitNotifications.swift in Sources */,
 				BBE66C9481F65EC2323163BF /* HabitScreens.swift in Sources */,
 				6E3F65BC23F14BEC4435E12C /* HabitShell.swift in Sources */,
+				C7CECD6DD1AECE8393C74662 /* NeuralEngine.swift in Sources */,
+				1CB2EB102468596DC5399CC8 /* NeuralModels.swift in Sources */,
+				9F945023FE22F08348F46A80 /* NeuralStore.swift in Sources */,
+				7E38DC5A1A8A8DF55FA51E97 /* NeuralShell.swift in Sources */,
+				63B67D2423FA76D72400A250 /* NeuralScreens.swift in Sources */,
 				D0CEFC1F776C720E02AD6CF7 /* HabitStore.swift in Sources */,
 				AE72946AE574918F6B1A5181 /* HabitTheme.swift in Sources */,
 				F5E288ADDA5AAAB3F18047D8 /* LoginView.swift in Sources */,

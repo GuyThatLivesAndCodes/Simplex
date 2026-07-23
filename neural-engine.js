@@ -1,19 +1,23 @@
 /* ============================================================
-   NEURAL ENGINE — the math core for the Neural Network app.
+   NEURAL ENGINE — the math core for the Neural app.
    Shared, dependency-free, and isomorphic: it runs UNCHANGED in the browser
-   (client compute) and in Node (backend compute, gated by can_neural_backend).
-   Everything here is plain Float64 arrays + JSON-serializable model objects, so a
-   model can be trained a few steps on either side and the weights handed back and
-   forth or saved to the encrypted `networks` table verbatim.
+   (client / on-device compute) and in Node (backend compute, gated by
+   can_neural_backend). Everything here is plain arrays + JSON-serializable model
+   objects, so a model can be trained a chunk on either side and the weights handed
+   back and forth or saved to the encrypted `networks` table verbatim.
 
-   Two model families:
-     • MLP  — a small multi-layer perceptron, trained by NEUROEVOLUTION. This is the
-              "brain" the graph/physics sandbox (path A) drops into whatever world
-              the user wires up. We evolve a population instead of backprop because
-              the sandbox's reward is a black-box simulation, not a labeled dataset.
-     • CHARLM — a char-level language model (embedding → GRU cell → output), trained
-              by backprop/Adam on the user's uploaded text (path B). Internals are
-              intentionally hidden from the user; they just upload text and chat.
+   Two model families live here:
+     • LLM — a small-but-real transformer language model the user builds FROM THE
+              GROUND UP: choose a tokenizer (char / BPE subwords / whole words /
+              sentences), context length, embedding dim, activation, dropout and the
+              hidden layer stack; then train it with a real optimizer (AdamW / RAdam
+              / Lion / LAMB / SGD) on their own text and chat with the result. This is
+              the whole Neural app. Educational-scale by design so a browser tab, the
+              Node box, or a phone can actually train it — but it is a genuine
+              decoder-only transformer trained by backprop, not a toy.
+     • ORGANIZER — a per-user file-organization classifier (path C). NOT part of the
+              Neural app UI; it is the brain behind the vault's "AI Organization"
+              feature and is required by server.js. Left intact below.
 
    Determinism: a tiny seedable PRNG (mulberry32) so a saved seed reproduces a run.
    ============================================================ */
@@ -41,566 +45,679 @@
     return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
   }
 
-  /* ---------- activations ---------- */
-  const ACT = {
-    tanh: (x) => Math.tanh(x),
-    relu: (x) => (x > 0 ? x : 0),
-    sigmoid: (x) => 1 / (1 + Math.exp(-x)),
-    linear: (x) => x,
-    sin: (x) => Math.sin(x),
-  };
-
-  /* ============================================================
-     MLP — dense feed-forward net, evolved (path A: the sandbox brain)
-     A genome is a flat Float64 weight vector; `mlpShape` describes the layers.
-     ============================================================ */
-  function mlpLayerSizes(inputs, hidden, outputs) {
-    // hidden is an array like [8,8]; build [in, ...hidden, out]
-    return [inputs, ...(hidden && hidden.length ? hidden : [8]), outputs];
-  }
-  function mlpParamCount(sizes) {
-    let n = 0;
-    for (let i = 0; i < sizes.length - 1; i++) n += sizes[i] * sizes[i + 1] + sizes[i + 1];   // W + b
-    return n;
-  }
-  function mlpRandomGenome(sizes, rng) {
-    const n = mlpParamCount(sizes), g = new Float64Array(n);
-    for (let i = 0; i < n; i++) g[i] = gaussian(rng) * 0.6;
-    return g;
-  }
-  // forward pass; `act` is the hidden activation name, output is tanh-bounded so the
-  // sandbox gets clean [-1,1] control signals.
-  function mlpForward(genome, sizes, input, act) {
-    const fn = ACT[act] || ACT.tanh;
-    let a = input, p = 0;
-    for (let L = 0; L < sizes.length - 1; L++) {
-      const inN = sizes[L], outN = sizes[L + 1], out = new Float64Array(outN);
-      for (let j = 0; j < outN; j++) {
-        let s = genome[p + inN * outN + j];                  // bias (stored after weights)
-        for (let i = 0; i < inN; i++) s += a[i] * genome[p + i * outN + j];
-        out[j] = (L === sizes.length - 2) ? Math.tanh(s) : fn(s);
-      }
-      p += inN * outN + outN;
-      a = out;
-    }
-    return a;
-  }
-  function mlpMutate(genome, rate, scale, rng) {
-    const out = new Float64Array(genome.length);
-    for (let i = 0; i < genome.length; i++) out[i] = genome[i] + (rng() < rate ? gaussian(rng) * scale : 0);
-    return out;
-  }
-  function mlpCrossover(a, b, rng) {
-    const out = new Float64Array(a.length);
-    for (let i = 0; i < a.length; i++) out[i] = rng() < 0.5 ? a[i] : b[i];
-    return out;
-  }
-
-  /* A "brain" model object is what we save/load for path A networks. */
-  function makeBrain({ inputs, outputs, hidden, act, seed }) {
-    const sizes = mlpLayerSizes(inputs, hidden || [10, 8], outputs);
-    return { type: 'mlp', sizes, act: act || 'tanh', seed: seed >>> 0 || 1 };
-  }
-  // Build the next generation from ranked genomes (fittest first). Elitism keeps the
-  // top few unchanged; the rest are crossover+mutation of tournament-selected parents.
-  function evolveGeneration({ ranked, popSize, sizes, mutRate, mutScale, elite, seed }) {
-    const rng = mulberry32(seed >>> 0 || 1);
-    const next = [];
-    const keep = Math.min(elite || 2, ranked.length);
-    for (let i = 0; i < keep; i++) next.push(Float64Array.from(ranked[i].genome));
-    const pick = () => {
-      // tournament of 3 — bias toward the front of the (already sorted) list
-      let best = ranked[(rng() * ranked.length) | 0];
-      for (let k = 0; k < 2; k++) { const c = ranked[(rng() * ranked.length) | 0]; if (c.rank < best.rank) best = c; }
-      return best.genome;
-    };
-    while (next.length < popSize) {
-      const child = mlpCrossover(pick(), pick(), rng);
-      next.push(mlpMutate(child, mutRate ?? 0.1, mutScale ?? 0.4, rng));
-    }
-    return next.map(g => Array.from(g));   // JSON-friendly
-  }
-
-  /* ============================================================
-     CHARLM — char-level language model (path B: the text template)
-     Architecture: embedding(V→E) → GRU(E→H) → linear(H→V), softmax.
-     Trained with Adam on next-char prediction. Small by design so a browser tab
-     (or the box) can actually train it. Internals are not surfaced to the user.
-     ============================================================ */
+  /* ---------- shared tensor helpers (used by LLM + organizer) ---------- */
   function zeros(n) { return new Float64Array(n); }
   function randMat(rows, cols, rng, scale) {
     const m = new Float64Array(rows * cols);
     for (let i = 0; i < m.length; i++) m[i] = gaussian(rng) * (scale ?? (1 / Math.sqrt(cols)));
     return m;
   }
-  // Build the vocabulary from a corpus (unique chars, stable order).
-  function buildVocab(text) {
-    const seen = Object.create(null), chars = [];
-    for (const ch of String(text)) if (!(ch in seen)) { seen[ch] = chars.length; chars.push(ch); }
-    if (!chars.length) { chars.push('\n'); seen['\n'] = 0; }
-    return { chars, stoi: seen, size: chars.length };
-  }
-  function charlmInit({ vocab, embed, hidden, seed }) {
-    const rng = mulberry32(seed >>> 0 || 7);
-    const V = vocab.size, E = embed || 24, H = hidden || 64;
-    const m = { type: 'charlm', V, E, H, vocab: { chars: vocab.chars }, seed: seed >>> 0 || 7,
-      Wemb: Array.from(randMat(V, E, rng, 0.4)),
-      // GRU params (z, r, h gates): each maps [E+H] -> H
-      Wz: Array.from(randMat(H, E + H, rng)), bz: Array.from(zeros(H)),
-      Wr: Array.from(randMat(H, E + H, rng)), br: Array.from(zeros(H)),
-      Wh: Array.from(randMat(H, E + H, rng)), bh: Array.from(zeros(H)),
-      Wo: Array.from(randMat(V, H, rng)), bo: Array.from(zeros(V)),
-    };
-    return m;
-  }
-  function sigmoidArr(x) { const o = new Float64Array(x.length); for (let i = 0; i < x.length; i++) o[i] = 1 / (1 + Math.exp(-x[i])); return o; }
-  // one GRU step: returns new hidden state + cache for backprop
-  function gruStep(m, xEmb, hPrev) {
-    const H = m.H, E = m.E, cat = new Float64Array(E + H);
-    cat.set(xEmb, 0); cat.set(hPrev, E);
-    const z = new Float64Array(H), r = new Float64Array(H), hh = new Float64Array(H), hNew = new Float64Array(H);
-    for (let j = 0; j < H; j++) {
-      let sz = m.bz[j], sr = m.br[j];
-      const baseZ = j * (E + H);
-      for (let k = 0; k < E + H; k++) { sz += m.Wz[baseZ + k] * cat[k]; sr += m.Wr[baseZ + k] * cat[k]; }
-      z[j] = 1 / (1 + Math.exp(-sz)); r[j] = 1 / (1 + Math.exp(-sr));
+  function clampInt(v, lo, hi, d) { v = Math.floor(Number(v)); if (!Number.isFinite(v)) v = d; return Math.max(lo, Math.min(hi, v)); }
+  function clampNum(v, lo, hi, d) { v = Number(v); if (!Number.isFinite(v)) v = d; return Math.max(lo, Math.min(hi, v)); }
+
+  /* ---------- activations (value + derivative given the activated output y) ----------
+     Each entry: f(x) forward, df(y) derivative expressed in terms of the OUTPUT y
+     (cheap for the ones we care about). Used by the transformer MLP block. */
+  const ACT = {
+    relu:    { f: (x) => (x > 0 ? x : 0),                 df: (y) => (y > 0 ? 1 : 0) },
+    leaky:   { f: (x) => (x > 0 ? x : 0.01 * x),          df: (y) => (y > 0 ? 1 : 0.01) },
+    tanh:    { f: (x) => Math.tanh(x),                    df: (y) => 1 - y * y },
+    sigmoid: { f: (x) => 1 / (1 + Math.exp(-x)),          df: (y) => y * (1 - y) },
+    // tanh-approx GELU; df via the same approximation (good enough, stable, cheap).
+    gelu:    {
+      f: (x) => 0.5 * x * (1 + Math.tanh(0.7978845608 * (x + 0.044715 * x * x * x))),
+      // derivative of the tanh-GELU (in terms of x, recomputed — y not sufficient here)
+      dfx: (x) => {
+        const c = 0.7978845608, a = 0.044715;
+        const inner = c * (x + a * x * x * x);
+        const t = Math.tanh(inner);
+        const sech2 = 1 - t * t;
+        return 0.5 * (1 + t) + 0.5 * x * sech2 * c * (1 + 3 * a * x * x);
+      },
+    },
+    linear:  { f: (x) => x,                               df: () => 1 },
+  };
+  function actName(a) { return ACT[a] ? a : 'gelu'; }
+
+  /* ============================================================
+     LLM — a small decoder-only transformer the user builds from scratch.
+
+     Model doc shape (all JSON-serializable, arrays not typed arrays on the wire):
+       {
+         type:'llm', v:2,
+         tok: <tokenizer doc>,           // see Tokenizer below
+         cfg: { ctx, embed, act, dropout, layers:[h,h,...], heads },
+         // parameters, flat Float64 arrays (row-major):
+         Wtok:  [V*E],   Wpos:[ctx*E],
+         blocks: [ { ln1g,ln1b, Wq,Wk,Wv,Wo, ln2g,ln2b, W1,b1, W2,b2 }, ... ],
+         lnFg, lnFb,     Wout:[V*E]  (tied? no — separate head)
+       }
+     "layers" is the hidden-MLP width PER transformer block (the user's "layer
+     structure"): its length = number of transformer blocks, each value = that
+     block's feed-forward inner width. heads = attention heads (derived, kept even).
+     ============================================================ */
+
+  /* ---------------- Tokenizers ----------------
+     One doc shape, four modes. A tokenizer doc:
+       { mode:'char'|'bpe'|'word'|'sentence', vocab:[...tokens], merges?:[[a,b],...] }
+     vocab[0..3] are reserved specials: <pad> <unk> <bos> <eos>. */
+  const SPECIALS = ['<pad>', '<unk>', '<bos>', '<eos>'];
+  const PAD = 0, UNK = 1, BOS = 2, EOS = 3;
+
+  function tokenizerTrain(text, opts) {
+    const mode = opts && opts.mode || 'char';
+    const maxVocab = clampInt(opts && opts.maxVocab, 16, 8000, mode === 'char' ? 512 : 3000);
+    text = String(text || '');
+    if (mode === 'char') {
+      const seen = Object.create(null), vocab = SPECIALS.slice();
+      for (const ch of text) if (!(ch in seen) && vocab.length < maxVocab) { seen[ch] = 1; vocab.push(ch); }
+      return { mode, vocab };
     }
-    const catH = new Float64Array(E + H); catH.set(xEmb, 0);
-    for (let j = 0; j < H; j++) catH[E + j] = r[j] * hPrev[j];
-    for (let j = 0; j < H; j++) {
-      let sh = m.bh[j]; const baseH = j * (E + H);
-      for (let k = 0; k < E + H; k++) sh += m.Wh[baseH + k] * catH[k];
-      hh[j] = Math.tanh(sh);
-      hNew[j] = (1 - z[j]) * hPrev[j] + z[j] * hh[j];
+    if (mode === 'word') {
+      return { mode, vocab: SPECIALS.concat(topCounts(wordPieces(text), maxVocab - SPECIALS.length)) };
     }
-    return { hNew, z, r, hh, cat, catH, hPrev, xEmb };
-  }
-  function softmax(logits) {
-    let mx = -Infinity; for (let i = 0; i < logits.length; i++) if (logits[i] > mx) mx = logits[i];
-    const e = new Float64Array(logits.length); let s = 0;
-    for (let i = 0; i < logits.length; i++) { e[i] = Math.exp(logits[i] - mx); s += e[i]; }
-    for (let i = 0; i < logits.length; i++) e[i] /= s;
-    return e;
-  }
-  function outLogits(m, h) {
-    const V = m.V, H = m.H, o = new Float64Array(V);
-    for (let i = 0; i < V; i++) { let s = m.bo[i]; const base = i * H; for (let j = 0; j < H; j++) s += m.Wo[base + j] * h[j]; o[i] = s; }
-    return o;
-  }
-  // Adam optimizer state lives alongside the model during a training session (not
-  // saved — recreated on load). Train on random windows of `seqLen` from `ids`.
-  function charlmTrainChunk(m, ids, opt) {
-    const seqLen = Math.min(opt.seqLen || 48, Math.max(2, ids.length - 1));
-    const steps = opt.steps || 20, lr = opt.lr || 0.01, H = m.H, E = m.E, V = m.V;
-    const rng = mulberry32((opt.seed ?? m.seed ?? 1) + (opt.iter || 0) | 0);
-    // grad accumulators reused per step
-    let totalLoss = 0, totalChars = 0;
-    // Adam moment buffers, lazily attached to opt
-    const keys = ['Wemb', 'Wz', 'bz', 'Wr', 'br', 'Wh', 'bh', 'Wo', 'bo'];
-    if (!opt.mom) { opt.mom = {}; opt.vel = {}; for (const k of keys) { opt.mom[k] = new Float64Array(m[k].length); opt.vel[k] = new Float64Array(m[k].length); } }
-    opt.t = (opt.t || 0);
-    for (let step = 0; step < steps; step++) {
-      const start = (rng() * (ids.length - seqLen - 1)) | 0;
-      // forward, caching states
-      const caches = []; let h = new Float64Array(H);
-      const probsArr = [], targets = [];
-      for (let t = 0; t < seqLen; t++) {
-        const x = ids[start + t], y = ids[start + t + 1];
-        const xEmb = m.Wemb.slice(x * E, x * E + E);
-        const c = gruStep(m, Float64Array.from(xEmb), h);
-        const logits = outLogits(m, c.hNew);
-        const p = softmax(logits);
-        caches.push({ c, x, h }); probsArr.push(p); targets.push(y);
-        totalLoss += -Math.log(Math.max(p[y], 1e-9)); totalChars++;
-        h = c.hNew;
-      }
-      // backward (BPTT) — accumulate grads
-      const g = {}; for (const k of keys) g[k] = new Float64Array(m[k].length);
-      let dhNext = new Float64Array(H);
-      for (let t = seqLen - 1; t >= 0; t--) {
-        const p = probsArr[t], y = targets[t], cc = caches[t].c, x = caches[t].x;
-        const dlogits = Float64Array.from(p); dlogits[y] -= 1;
-        // output layer grads
-        for (let i = 0; i < V; i++) { const base = i * H; const dl = dlogits[i]; g.bo[i] += dl; for (let j = 0; j < H; j++) g.Wo[base + j] += dl * cc.hNew[j]; }
-        const dh = new Float64Array(H);
-        for (let j = 0; j < H; j++) { let s = dhNext[j]; for (let i = 0; i < V; i++) s += dlogits[i] * m.Wo[i * H + j]; dh[j] = s; }
-        // GRU backward
-        const { z, r, hh, cat, catH, hPrev, xEmb } = cc;
-        const dz = new Float64Array(H), dhh = new Float64Array(H), dhPrev = new Float64Array(H);
-        for (let j = 0; j < H; j++) {
-          dhh[j] = dh[j] * z[j] * (1 - hh[j] * hh[j]);
-          dz[j] = dh[j] * (hh[j] - hPrev[j]) * z[j] * (1 - z[j]);
-          dhPrev[j] += dh[j] * (1 - z[j]);
-        }
-        // Wh / bh
-        const dcatH = new Float64Array(E + H);
-        for (let j = 0; j < H; j++) { const base = j * (E + H); g.bh[j] += dhh[j]; for (let k = 0; k < E + H; k++) { g.Wh[base + k] += dhh[j] * catH[k]; dcatH[k] += dhh[j] * m.Wh[base + k]; } }
-        const dr = new Float64Array(H);
-        for (let j = 0; j < H; j++) { dr[j] = dcatH[E + j] * hPrev[j] * r[j] * (1 - r[j]); dhPrev[j] += dcatH[E + j] * r[j]; }
-        // Wz / bz, Wr / br
-        const dcat = new Float64Array(E + H);
-        for (let j = 0; j < H; j++) { const base = j * (E + H); g.bz[j] += dz[j]; g.br[j] += dr[j]; for (let k = 0; k < E + H; k++) { g.Wz[base + k] += dz[j] * cat[k]; g.Wr[base + k] += dr[j] * cat[k]; dcat[k] += dz[j] * m.Wz[base + k] + dr[j] * m.Wr[base + k]; } }
-        for (let k = 0; k < E; k++) dcat[k] += dcatH[k];   // embedding grad path
-        for (let j = 0; j < H; j++) dhNext[j] = dhPrev[j] + dcat[E + j];
-        // embedding grad
-        for (let k = 0; k < E; k++) g.Wemb[x * E + k] += dcat[k];
-      }
-      // Adam update
-      opt.t++;
-      const b1 = 0.9, b2 = 0.999, eps = 1e-8;
-      const bc1 = 1 - Math.pow(b1, opt.t), bc2 = 1 - Math.pow(b2, opt.t);
-      for (const k of keys) {
-        const arr = m[k], gr = g[k], mo = opt.mom[k], ve = opt.vel[k];
-        for (let i = 0; i < arr.length; i++) {
-          let gi = gr[i]; if (gi > 5) gi = 5; else if (gi < -5) gi = -5;   // grad clip
-          mo[i] = b1 * mo[i] + (1 - b1) * gi;
-          ve[i] = b2 * ve[i] + (1 - b2) * gi * gi;
-          arr[i] -= lr * (mo[i] / bc1) / (Math.sqrt(ve[i] / bc2) + eps);
-        }
-      }
+    if (mode === 'sentence') {
+      return { mode, vocab: SPECIALS.concat(topCounts(sentencePieces(text), maxVocab - SPECIALS.length)) };
     }
-    return { loss: totalLoss / Math.max(1, totalChars) };
+    // BPE: start from bytes/chars, greedily merge the most frequent adjacent pair.
+    return bpeTrain(text, maxVocab);
   }
-  // Sample text from a trained model. temperature>0; topK optional.
-  function charlmSample(m, { prompt, length, temperature, topK, seed }) {
-    const E = m.E, H = m.H, V = m.V, stoi = Object.create(null);
-    m.vocab.chars.forEach((c, i) => stoi[c] = i);
-    const rng = mulberry32((seed ?? Date.now()) >>> 0 || 3);
-    const temp = Math.max(0.05, temperature ?? 0.9);
-    let h = new Float64Array(H), out = '';
-    const seed0 = String(prompt || '\n');
-    let lastId = stoi[seed0[seed0.length - 1]] ?? 0;
-    // warm the hidden state on the prompt
-    for (let i = 0; i < seed0.length; i++) {
-      const id = stoi[seed0[i]]; if (id == null) continue;
-      const xEmb = Float64Array.from(m.Wemb.slice(id * E, id * E + E));
-      h = gruStep(m, xEmb, h).hNew; lastId = id;
-    }
-    const N = Math.min(length || 200, 2000);
-    for (let i = 0; i < N; i++) {
-      const xEmb = Float64Array.from(m.Wemb.slice(lastId * E, lastId * E + E));
-      const c = gruStep(m, xEmb, h); h = c.hNew;
-      let logits = outLogits(m, h);
-      for (let k = 0; k < V; k++) logits[k] /= temp;
-      let probs = softmax(logits);
-      if (topK && topK < V) {
-        const idx = Array.from(probs.keys()).sort((a, b) => probs[b] - probs[a]).slice(0, topK);
-        const mask = new Float64Array(V); let s = 0;
-        for (const k of idx) { mask[k] = probs[k]; s += probs[k]; }
-        for (let k = 0; k < V; k++) probs[k] = mask[k] / (s || 1);
-      }
-      // sample
-      let rv = rng(), acc = 0, pick = V - 1;
-      for (let k = 0; k < V; k++) { acc += probs[k]; if (rv <= acc) { pick = k; break; } }
-      out += m.vocab.chars[pick];
-      lastId = pick;
-    }
+
+  // split helpers ------------------------------------------------------------
+  function wordPieces(text) {
+    // words and standalone punctuation as separate tokens; keep a trailing space
+    // marker implicitly by lowercasing nothing (case preserved).
+    const out = []; const re = /[A-Za-z0-9']+|[^\sA-Za-z0-9']/g; let m;
+    while ((m = re.exec(text))) out.push(m[0]);
     return out;
   }
-  function encodeIds(text, chars) {
-    const stoi = Object.create(null); chars.forEach((c, i) => stoi[c] = i);
-    const ids = []; for (const ch of String(text)) { const id = stoi[ch]; if (id != null) ids.push(id); }
+  function sentencePieces(text) {
+    return String(text).split(/(?<=[.!?])\s+|\n+/).map(s => s.trim()).filter(Boolean);
+  }
+  function topCounts(pieces, k) {
+    const c = new Map();
+    for (const p of pieces) c.set(p, (c.get(p) || 0) + 1);
+    return Array.from(c.entries()).sort((a, b) => b[1] - a[1]).slice(0, Math.max(0, k)).map(e => e[0]);
+  }
+
+  // A compact BPE trainer over characters. Produces vocab + ordered merges.
+  function bpeTrain(text, maxVocab) {
+    // seed vocab: specials + all unique chars
+    const charSet = []; const seen = Object.create(null);
+    for (const ch of text) if (!(ch in seen)) { seen[ch] = 1; charSet.push(ch); }
+    const vocab = SPECIALS.concat(charSet);
+    const vset = new Set(vocab);
+    // represent the corpus as an array of symbol-arrays (one per "word" chunk to
+    // keep merges from spanning whitespace — standard BPE pre-tokenization).
+    const chunks = String(text).split(/(\s+)/).filter(s => s.length).map(w => Array.from(w));
+    const merges = [];
+    const budget = Math.min(maxVocab - vocab.length, 4000);
+    for (let step = 0; step < budget; step++) {
+      const pairs = new Map();
+      for (const w of chunks) for (let i = 0; i < w.length - 1; i++) {
+        const key = w[i] + ' ' + w[i + 1];
+        pairs.set(key, (pairs.get(key) || 0) + 1);
+      }
+      let best = null, bestN = 1;
+      for (const [k, n] of pairs) if (n > bestN) { bestN = n; best = k; }
+      if (!best) break;
+      const [a, b] = best.split(' '); const merged = a + b;
+      if (vset.has(merged)) continue;
+      merges.push([a, b]); vocab.push(merged); vset.add(merged);
+      for (const w of chunks) for (let i = 0; i < w.length - 1; i++) {
+        if (w[i] === a && w[i + 1] === b) { w.splice(i, 2, merged); }
+      }
+      if (vocab.length >= maxVocab) break;
+    }
+    return { mode: 'bpe', vocab, merges };
+  }
+
+  function tokVocabSize(tok) { return tok.vocab.length; }
+  function tokStoi(tok) {
+    if (tok._stoi) return tok._stoi;
+    const s = Object.create(null); tok.vocab.forEach((t, i) => s[t] = i);
+    Object.defineProperty(tok, '_stoi', { value: s, enumerable: false, configurable: true });
+    return s;
+  }
+
+  function tokenizerEncode(tok, text) {
+    const stoi = tokStoi(tok);
+    const ids = [];
+    if (tok.mode === 'char') {
+      for (const ch of String(text)) ids.push(stoi[ch] ?? UNK);
+      return ids;
+    }
+    if (tok.mode === 'word') {
+      for (const p of wordPieces(text)) ids.push(stoi[p] ?? UNK);
+      return ids;
+    }
+    if (tok.mode === 'sentence') {
+      for (const p of sentencePieces(text)) ids.push(stoi[p] ?? UNK);
+      return ids;
+    }
+    // bpe: apply learned merges greedily per whitespace chunk
+    const chunks = String(text).split(/(\s+)/).filter(s => s.length);
+    for (const chunk of chunks) {
+      let w = Array.from(chunk);
+      for (const [a, b] of (tok.merges || [])) {
+        for (let i = 0; i < w.length - 1; i++) if (w[i] === a && w[i + 1] === b) { w.splice(i, 2, a + b); i--; }
+      }
+      for (const sym of w) ids.push(stoi[sym] ?? UNK);
+    }
     return ids;
   }
 
-  /* ============================================================
-     ACTOR LAB — a 2D actor engine with a per-actor node graph (path A, advanced)
-     The user authors ACTOR TYPES (Agent, Wall, Obstacle, …). Each type has:
-       • custom variables (name -> initial number)
-       • a physics body (dynamic / static / none) sized w x h
-       • optionally a BRAIN: a shared MLP for all instances of that type, with the
-         user declaring its inputs (fed by BrainInput nodes) and outputs (read by
-         BrainOutput nodes). One brain per agent type; evolved by neuroevolution.
-       • a GRAPH that runs every tick: nodes wired by edges. Pull-based evaluation
-         from the "sink" nodes (SetVar / actions / reward).
-     A MAP places instances of those types at positions. An episode simulates the
-     whole map for maxTicks; total reward (from AddReward nodes) is the fitness.
-
-     The node catalog (type -> behavior) is small but composable:
-       events:  onTick (always), onHit(typeName) (fires the tick a collision with
-                that type happens; exposes that collision as a gate = 1/0)
-       value:   const, getVar(var), brainOut(i), raycast(angle) -> distance,
-                rayHitType(angle,typeName) -> 1/0, self(x|y|vx|vy via vars)
-       math:    add, sub, mul, div, neg, min, max, abs, sin, cos, clamp, gt, lt, ifte
-       sinks:   setVar(var)=in, addReward=in, brainIn(i)=in (feeds the brain),
-                destroy=gate, impulse(axis=x|y)=in (adds to vx/vy)
-     Everything is plain JSON so a whole lab round-trips through the networks table
-     and the backend compute endpoint unchanged.
-     ============================================================ */
-
-  /* Pin/edge model (v2): every edge is { from, fromPort, to, toPort }.
-       • EXEC (action) flow: white wires. An edge with toPort 'exec' / fromPort
-         'exec'|'true'|'false' threads control through the action nodes in order.
-       • DATA flow: typed wires (number=green, bool=red, brain=violet). A data
-         edge feeds a node's input port (a/b/in/cond/…) from another node's 'out'.
-     Data nodes (const/bool/getVar/self/brainOut/raycast/math/compare) are PURE —
-     no exec pins; they're pulled on demand by evalNode. Action nodes (setVar/
-     impulse/addReward/brainIn/destroy/branch + the event nodes) carry exec pins
-     and run only when the exec chain reaches them. */
-
-  // Evaluate one DATA node's value, memoized per tick. Pulls its data inputs.
-  function evalNode(graph, nodeId, ctx) {
-    if (nodeId == null) return 0;
-    if (ctx.cache[nodeId] !== undefined) return ctx.cache[nodeId];
-    ctx.cache[nodeId] = 0;                          // cycle guard (default 0)
-    if (ctx.depth > 256) return 0; ctx.depth++;
-    const n = ctx.byId[nodeId]; let out = 0;
-    if (n) {
-      const inv = (port) => { const e = ctx.inEdge(nodeId, port); return e ? evalNode(graph, e.from, ctx) : 0; };
-      switch (n.t) {
-        case 'const': out = +n.v || 0; break;
-        case 'bool': out = n.v ? 1 : 0; break;
-        case 'getVar': out = ctx.actor.vars[n.var] ?? 0; break;
-        case 'brainOut': out = ctx.brainOut[n.i | 0] ?? 0; break;
-        case 'raycast': out = ctx.ray(n.angle || 0).dist; break;
-        case 'rayHitType': out = ctx.ray(n.angle || 0).type === n.typeName ? 1 : 0; break;
-        case 'self': out = n.field === 'x' ? ctx.actor.x : n.field === 'y' ? ctx.actor.y : n.field === 'vx' ? (ctx.actor.vars.velX || 0) : (ctx.actor.vars.velY || 0); break;
-        case 'onHitTest': out = ctx.hitTypes.has(n.typeName) ? 1 : 0; break;   // data: "am I touching type?"
-        case 'add': out = inv('a') + inv('b'); break;
-        case 'sub': out = inv('a') - inv('b'); break;
-        case 'mul': out = inv('a') * inv('b'); break;
-        case 'div': { const b = inv('b'); out = b ? inv('a') / b : 0; break; }
-        case 'neg': out = -inv('a'); break;
-        case 'min': out = Math.min(inv('a'), inv('b')); break;
-        case 'max': out = Math.max(inv('a'), inv('b')); break;
-        case 'abs': out = Math.abs(inv('a')); break;
-        case 'sin': out = Math.sin(inv('a')); break;
-        case 'cos': out = Math.cos(inv('a')); break;
-        case 'clamp': out = Math.max(inv('lo'), Math.min(inv('hi'), inv('a'))); break;
-        case 'gt': out = inv('a') > inv('b') ? 1 : 0; break;
-        case 'lt': out = inv('a') < inv('b') ? 1 : 0; break;
-        case 'eq': out = inv('a') === inv('b') ? 1 : 0; break;
-        case 'and': out = (inv('a') && inv('b')) ? 1 : 0; break;
-        case 'or': out = (inv('a') || inv('b')) ? 1 : 0; break;
-        case 'not': out = inv('a') ? 0 : 1; break;
-        case 'ifte': out = inv('c') ? inv('a') : inv('b'); break;
-        default: out = 0;
-      }
+  function tokenizerDecode(tok, ids) {
+    const V = tok.vocab;
+    let out = '';
+    for (const id of ids) {
+      if (id === PAD || id === BOS || id === EOS) continue;
+      const t = V[id]; if (t == null) continue;
+      if (id === UNK) { out += '�'; continue; }
+      if (tok.mode === 'word') out += (out && /[A-Za-z0-9']$/.test(out) && /^[A-Za-z0-9']/.test(t) ? ' ' : (out ? '' : '')) + t;
+      else if (tok.mode === 'sentence') out += (out ? ' ' : '') + t;
+      else out += t; // char / bpe already carry their own spacing
     }
-    if (!Number.isFinite(out)) out = 0;
-    ctx.cache[nodeId] = out; ctx.depth--;
+    // word mode: we joined selectively; ensure spaces between alnum tokens
+    if (tok.mode === 'word') return decodeWords(tok, ids);
+    return out;
+  }
+  function decodeWords(tok, ids) {
+    const V = tok.vocab; let out = '';
+    for (const id of ids) {
+      if (id === PAD || id === BOS || id === EOS) continue;
+      const t = id === UNK ? '�' : V[id]; if (t == null) continue;
+      const isPunct = /^[^\sA-Za-z0-9']$/.test(t);
+      if (out && !isPunct) out += ' ';
+      out += t;
+    }
     return out;
   }
 
-  // Walk the EXEC chain from an event node, running each action node in order.
-  // `effects` collects side-effects (reward, brain-input writes) for the caller.
-  function runExecChain(graph, startId, ctx, effects) {
-    let id = ctx.execOut(startId, 'exec'), guard = 0;
-    while (id != null && guard++ < 512) {
-      const n = ctx.byId[id]; if (!n) break;
-      const inv = (port) => { const e = ctx.inEdge(id, port); return e ? evalNode(graph, e.from, ctx) : 0; };
-      let nextPort = 'exec';
-      switch (n.t) {
-        case 'branch': nextPort = inv('cond') ? 'true' : 'false'; break;
-        case 'setVar': ctx.actor.vars[n.var] = inv('value'); break;
-        case 'impulse': if (n.axis === 'y') ctx.actor.vars.velY = (ctx.actor.vars.velY || 0) + inv('value'); else ctx.actor.vars.velX = (ctx.actor.vars.velX || 0) + inv('value'); break;
-        case 'addReward': effects.reward += inv('value'); break;
-        case 'brainIn': effects.brainIn[n.i | 0] = inv('value'); break;
-        case 'destroy': ctx.actor.alive = false; return;
-        default: break;
-      }
-      id = ctx.execOut(id, nextPort);
-    }
+  /* ---------------- Model construction ---------------- */
+  // heads: pick the largest divisor of E that is <= a cap, so head dim stays sane.
+  function pickHeads(E) {
+    for (const h of [8, 6, 4, 3, 2]) if (E % h === 0 && E / h >= 8) return h;
+    return 1;
   }
-
-  // Run the whole map for one episode. `lab` is the document; `brains` maps an
-  // actor-type id -> genome (Float64Array) for agent types. Returns total reward.
-  function actorLabEpisode(lab, brains, opts) {
-    const world = lab.world || { w: 600, h: 400, maxTicks: 360 };
-    const W = world.w || 600, H = world.h || 400, maxT = clampInt(world.maxTicks, 30, 2000, 360);
-    (lab.actorTypes || []).forEach(t => { if (t.graph) migrateActorGraph(t.graph); });   // tolerate v1 graphs
-    const typeById = {}; (lab.actorTypes || []).forEach(t => typeById[t.id] = t);
-    // spawn instances
-    let actors = (lab.instances || []).map((inst, idx) => {
-      const T = typeById[inst.typeId]; if (!T) return null;
-      const vars = {}; (T.vars || []).forEach(v => vars[v.name] = +v.init || 0);
-      return { id: 'a' + idx, type: T, x: inst.x, y: inst.y, w: (T.body && T.body.w) || 24, h: (T.body && T.body.h) || 24, vars, alive: true, hitTypes: new Set() };
-    }).filter(Boolean);
-    // precompute brain shapes
-    const brainSizes = {};
-    for (const T of lab.actorTypes || []) if (T.brain && T.brain.inputs && T.brain.outputs && T.brain.outputs.length) brainSizes[T.id] = mlpLayerSizes(Math.max(1, T.brain.inputs.length), T.brain.hidden || [8], T.brain.outputs.length);
-    let reward = 0;
-    // A ray sweeps from the actor along (its heading + angleDeg) until it hits a
-    // solid actor or the world edge. Returns the normalized distance + hit type +
-    // the world-space endpoint (for the "Visible Raycasts" overlay during playback).
-    const raycastFrom = (actor, angleDeg) => {
-      const ang = (angleDeg || 0) * Math.PI / 180; const ca = Math.cos(ang), sa = Math.sin(ang);
-      const max = 260, step = 7;
-      for (let r = step; r < max; r += step) {
-        const px = actor.x + ca * r, py = actor.y + sa * r;
-        if (px < 0 || px > W || py < 0 || py > H) return { dist: r / max, type: '__edge', ex: px, ey: py, hit: true };
-        for (const o of actors) { if (o === actor || !o.alive || (o.type.body && o.type.body.mode === 'none')) continue; if (px > o.x - o.w / 2 && px < o.x + o.w / 2 && py > o.y - o.h / 2 && py < o.y + o.h / 2) return { dist: r / max, type: o.type.name, ex: px, ey: py, hit: true }; }
-      }
-      return { dist: 1, type: '', ex: actor.x + ca * max, ey: actor.y + sa * max, hit: false };
-    };
-    const recording = !!(opts && opts.record);
-    for (let tick = 0; tick < maxT; tick++) {
-      // 1) compute brain outputs per agent instance. Brain INPUTS come from the
-      //    exec chain (brainIn nodes write effects.brainIn), but the brain must run
-      //    BEFORE the chain so brainOut nodes have values. We resolve this by
-      //    gathering brain inputs via a pre-pass: run the exec chain in "input
-      //    mode" (only brainIn writes take effect, brainOut reads as 0), feed the
-      //    brain, then run the real chain with brainOut available.
-      for (const actor of actors) {
-        if (!actor.alive) continue;
-        const T = actor.type;
-        actor.brainOut = [];
-        if (T.brain && brainSizes[T.id] && brains[T.id]) {
-          const ctxIn = makeCtx(T.graph, actor, [], actors, raycastFrom, world);
-          const pre = { reward: 0, brainIn: {} };
-          for (const ev of eventNodes(T.graph, tick, actor)) runExecChain(T.graph, ev, ctxIn, pre);
-          const nIn = (T.brain.inputs || []).length || 1;
-          const inputs = []; for (let i = 0; i < nIn; i++) inputs.push(pre.brainIn[i] || 0);
-          actor.brainOut = Array.from(mlpForward(brains[T.id], brainSizes[T.id], Float64Array.from(inputs), T.brain.act || 'tanh'));
-        }
-      }
-      // 2) run each actor's exec chain for real (brainOut now available) — applies
-      //    setVar / impulse / addReward / destroy along the white wire from events.
-      if (recording) for (const a of actors) a._recRays = [];   // keep only THIS pass's rays for the overlay
-      for (const actor of actors) {
-        if (!actor.alive) continue;
-        const T = actor.type, g = T.graph || { nodes: [], edges: [] };
-        const ctx = makeCtx(g, actor, actor.brainOut, actors, raycastFrom, world);
-        const eff = { reward: 0, brainIn: {} };
-        for (const ev of eventNodes(g, tick, actor)) { if (!actor.alive) break; runExecChain(g, ev, ctx, eff); }
-        reward += eff.reward;
-      }
-      // 3) integrate motion from velX/velY (dynamic bodies only), reset per-tick hit sets
-      for (const actor of actors) {
-        actor.hitTypes = new Set();
-        if (!actor.alive) continue;
-        const mode = actor.type.body ? actor.type.body.mode : 'none';
-        if (mode === 'dynamic') {
-          actor.x += (actor.vars.velX || 0); actor.y += (actor.vars.velY || 0);
-          if (actor.x < actor.w / 2) { actor.x = actor.w / 2; actor.vars.velX = 0; }
-          if (actor.x > W - actor.w / 2) { actor.x = W - actor.w / 2; actor.vars.velX = 0; }
-          if (actor.y < actor.h / 2) { actor.y = actor.h / 2; actor.vars.velY = 0; }
-          if (actor.y > H - actor.h / 2) { actor.y = H - actor.h / 2; actor.vars.velY = 0; }
-        }
-      }
-      // 4) collision detection (AABB) — record hit types; push dynamic out of solids
-      for (let i = 0; i < actors.length; i++) {
-        const A = actors[i]; if (!A.alive || !A.type.body || A.type.body.mode === 'none') continue;
-        for (let j = 0; j < actors.length; j++) {
-          if (i === j) continue; const B = actors[j]; if (!B.alive || !B.type.body || B.type.body.mode === 'none') continue;
-          if (Math.abs(A.x - B.x) < (A.w + B.w) / 2 && Math.abs(A.y - B.y) < (A.h + B.h) / 2) {
-            A.hitTypes.add(B.type.name);
-            if (A.type.body.mode === 'dynamic' && B.type.body.mode === 'static') {
-              // resolve along the least-overlap axis
-              const ox = (A.w + B.w) / 2 - Math.abs(A.x - B.x), oy = (A.h + B.h) / 2 - Math.abs(A.y - B.y);
-              if (ox < oy) { A.x += A.x < B.x ? -ox : ox; A.vars.velX = 0; } else { A.y += A.y < B.y ? -oy : oy; A.vars.velY = 0; }
-            }
-          }
-        }
-      }
-      if (opts && opts.record) opts.record(tick, actors, reward);
-    }
-    return { reward, actors };
-  }
-  // a lightweight per-evaluation context (edge lookups + raycast + cache)
-  function makeCtx(graph, actor, brainOut, actors, raycastFrom, world) {
-    const byId = {}; (graph.nodes || []).forEach(n => byId[n.id] = n);
-    const edges = graph.edges || [];
-    const rayCache = {};
+  function newBlock(E, hidden, rng) {
     return {
-      byId, actor, brainOut: brainOut || [], world, cache: {}, depth: 0,
-      hitTypes: actor.hitTypes || new Set(),
-      // a DATA input edge into (toId, toPort)
-      inEdge: (toId, port) => edges.find(e => e.to === toId && (e.toPort || e.port || 'in') === port),
-      // follow an EXEC wire out of (fromId, fromPort) -> the next node id
-      execOut: (fromId, fromPort) => { const e = edges.find(e => e.from === fromId && (e.fromPort || 'exec') === fromPort && (e.toPort || 'exec') === 'exec'); return e ? e.to : null; },
-      ray: (angle) => {
-        const key = angle | 0;
-        if (rayCache[key]) return rayCache[key];
-        const res = rayCache[key] = raycastFrom(actor, angle);
-        // when recording (playback), remember every ray this actor casts this tick
-        // so the "Visible Raycasts" overlay can draw them. Cheap; off otherwise.
-        if (actor._recRays) actor._recRays.push({ x: actor.x, y: actor.y, ex: res.ex, ey: res.ey, hit: res.hit });
-        return res;
-      },
+      ln1g: Array.from(ones(E)), ln1b: Array.from(zeros(E)),
+      Wq: Array.from(randMat(E, E, rng, 1 / Math.sqrt(E))),
+      Wk: Array.from(randMat(E, E, rng, 1 / Math.sqrt(E))),
+      Wv: Array.from(randMat(E, E, rng, 1 / Math.sqrt(E))),
+      Wo: Array.from(randMat(E, E, rng, 1 / Math.sqrt(E))),
+      ln2g: Array.from(ones(E)), ln2b: Array.from(zeros(E)),
+      W1: Array.from(randMat(hidden, E, rng, Math.sqrt(2 / E))), b1: Array.from(zeros(hidden)),
+      W2: Array.from(randMat(E, hidden, rng, 1 / Math.sqrt(hidden))), b2: Array.from(zeros(E)),
+      h: hidden,
     };
   }
-  // which event nodes fire this tick for this actor: onTick always; onSpawn on
-  // tick 0; onHit when the actor collided with the node's chosen type this tick.
-  function eventNodes(graph, tick, actor) {
+  function ones(n) { const a = new Float64Array(n); a.fill(1); return a; }
+
+  function llmInit(arch) {
+    const tok = arch.tok || tokenizerTrain('', { mode: 'char' });
+    const V = tokVocabSize(tok);
+    const ctx = clampInt(arch.ctx, 8, 512, 64);
+    const E = clampInt(arch.embed, 8, 256, 48);
+    const layers = (Array.isArray(arch.layers) && arch.layers.length ? arch.layers : [E * 2])
+      .map(w => clampInt(w, 8, 1024, E * 2)).slice(0, 8);
+    const act = actName(arch.act);
+    const dropout = clampNum(arch.dropout, 0, 0.6, 0);
+    const heads = pickHeads(E);
+    const rng = mulberry32((arch.seed >>> 0) || 7);
+    const m = {
+      type: 'llm', v: 2, tok, cfg: { ctx, embed: E, act, dropout, layers, heads },
+      Wtok: Array.from(randMat(V, E, rng, 0.4)),
+      Wpos: Array.from(randMat(ctx, E, rng, 0.02)),
+      blocks: layers.map(h => newBlock(E, h, rng)),
+      lnFg: Array.from(ones(E)), lnFb: Array.from(zeros(E)),
+      Wout: Array.from(randMat(V, E, rng, 1 / Math.sqrt(E))), bout: Array.from(zeros(V)),
+      seed: (arch.seed >>> 0) || 7,
+    };
+    return m;
+  }
+
+  function llmParamCount(m) {
+    let n = m.Wtok.length + m.Wpos.length + m.Wout.length + m.bout.length + m.lnFg.length + m.lnFb.length;
+    for (const b of m.blocks) n += b.Wq.length + b.Wk.length + b.Wv.length + b.Wo.length +
+      b.W1.length + b.b1.length + b.W2.length + b.b2.length + b.ln1g.length * 2 + b.ln2g.length * 2;
+    return n;
+  }
+
+  /* ---------------- Forward / backward ----------------
+     We run a full sequence of length T (<= ctx) and predict the next token at every
+     position (causal LM). Math is written for clarity + correctness over raw speed;
+     it is bounded per call so it stays off the event loop too long. */
+  function layerNorm(x, g, b, E, cache) {
+    // x: Float64Array length E → normalized y
+    let mean = 0; for (let i = 0; i < E; i++) mean += x[i]; mean /= E;
+    let v = 0; for (let i = 0; i < E; i++) { const d = x[i] - mean; v += d * d; } v /= E;
+    const inv = 1 / Math.sqrt(v + 1e-5);
+    const y = new Float64Array(E), xh = new Float64Array(E);
+    for (let i = 0; i < E; i++) { xh[i] = (x[i] - mean) * inv; y[i] = xh[i] * g[i] + b[i]; }
+    if (cache) { cache.xh = xh; cache.inv = inv; }
+    return y;
+  }
+  // backprop through layernorm: given dy (grad wrt output), accumulate into dg,db and
+  // return dx. Uses the standard LN gradient.
+  function layerNormBack(dy, xh, inv, g, E, dg, db) {
+    const dx = new Float64Array(E);
+    let sumDy = 0, sumDyXh = 0;
+    const dxh = new Float64Array(E);
+    for (let i = 0; i < E; i++) { dxh[i] = dy[i] * g[i]; dg[i] += dy[i] * xh[i]; db[i] += dy[i]; sumDy += dxh[i]; sumDyXh += dxh[i] * xh[i]; }
+    for (let i = 0; i < E; i++) dx[i] = inv / E * (E * dxh[i] - sumDy - xh[i] * sumDyXh);
+    return dx;
+  }
+  function matVec(W, x, rows, cols, bias) {
+    // W is [rows*cols] row-major, x is [cols] → [rows]
+    const o = new Float64Array(rows);
+    for (let r = 0; r < rows; r++) { let s = bias ? bias[r] : 0; const base = r * cols; for (let c = 0; c < cols; c++) s += W[base + c] * x[c]; o[r] = s; }
+    return o;
+  }
+
+  // Full forward+backward over one sequence of token ids; returns {loss, grads}.
+  // grads mirrors the model's parameter structure. dropoutMask applied in train only.
+  function llmForwardBackward(m, ids, opt, rng) {
+    const E = m.cfg.embed, ctx = m.cfg.ctx, heads = m.cfg.heads, hd = E / heads;
+    const V = tokVocabSize(m.tok);
+    const T = Math.min(ids.length - 1, ctx);
+    const actf = ACT[m.cfg.act] || ACT.gelu;
+    const drop = opt && opt.training ? m.cfg.dropout : 0;
+    const grads = opt ? blankGrads(m) : null;
+
+    // ---- embeddings ----
+    const X = [];          // X[t] = Float64Array(E) residual stream input
+    for (let t = 0; t < T; t++) {
+      const id = ids[t]; const x = new Float64Array(E);
+      const tb = id * E, pb = t * E;
+      for (let i = 0; i < E; i++) x[i] = m.Wtok[tb + i] + m.Wpos[pb + i];
+      X.push(x);
+    }
+
+    // caches for backward
+    const blkCache = [];
+    let stream = X;
+    for (let L = 0; L < m.blocks.length; L++) {
+      const blk = m.blocks[L];
+      const c = { ln1: [], q: [], k: [], v: [], att: [], ctxv: [], ao: [], ln2: [], h: [], mlpPre: [], res1: [] };
+      // --- LN1 + self-attention ---
+      const normed = [];
+      for (let t = 0; t < T; t++) { const cc = {}; normed.push(layerNorm(stream[t], blk.ln1g, blk.ln1b, E, cc)); c.ln1.push(cc); }
+      const Q = [], K = [], Vv = [];
+      for (let t = 0; t < T; t++) { Q.push(matVec(blk.Wq, normed[t], E, E)); K.push(matVec(blk.Wk, normed[t], E, E)); Vv.push(matVec(blk.Wv, normed[t], E, E)); }
+      c.q = Q; c.k = K; c.v = Vv; c.normed1 = normed;
+      const attnOut = [];
+      const attProb = [];   // attProb[t] = per-head prob arrays
+      for (let t = 0; t < T; t++) {
+        const outVec = new Float64Array(E);
+        const probsHeads = [];
+        for (let h = 0; h < heads; h++) {
+          const off = h * hd;
+          // scores over j<=t
+          const scores = new Float64Array(t + 1);
+          for (let j = 0; j <= t; j++) { let s = 0; for (let d = 0; d < hd; d++) s += Q[t][off + d] * K[j][off + d]; scores[j] = s / Math.sqrt(hd); }
+          // softmax
+          let mx = -Infinity; for (let j = 0; j <= t; j++) if (scores[j] > mx) mx = scores[j];
+          let sm = 0; for (let j = 0; j <= t; j++) { scores[j] = Math.exp(scores[j] - mx); sm += scores[j]; }
+          for (let j = 0; j <= t; j++) scores[j] /= sm;
+          probsHeads.push(scores);
+          for (let d = 0; d < hd; d++) { let acc = 0; for (let j = 0; j <= t; j++) acc += scores[j] * Vv[j][off + d]; outVec[off + d] = acc; }
+        }
+        attnOut.push(outVec); attProb.push(probsHeads);
+      }
+      c.attProb = attProb; c.attnOut = attnOut;
+      // output projection + residual
+      const res1 = [];
+      const proj = [];
+      for (let t = 0; t < T; t++) { const p = matVec(blk.Wo, attnOut[t], E, E); proj.push(p); const r = new Float64Array(E); for (let i = 0; i < E; i++) r[i] = stream[t][i] + p[i]; res1.push(r); }
+      c.proj = proj; c.res1 = res1;
+      // --- LN2 + MLP ---
+      const out2 = [];
+      const normed2 = [], hAct = [], hPre = [];
+      for (let t = 0; t < T; t++) {
+        const cc = {}; const n2 = layerNorm(res1[t], blk.ln2g, blk.ln2b, E, cc); normed2.push(n2); c.ln2.push(cc);
+        const pre = matVec(blk.W1, n2, blk.h, E, blk.b1);
+        const a = new Float64Array(blk.h);
+        for (let i = 0; i < blk.h; i++) a[i] = actf.f(pre[i]);
+        // dropout on the hidden activation
+        if (drop > 0) for (let i = 0; i < blk.h; i++) { if (rng() < drop) a[i] = 0; else a[i] /= (1 - drop); }
+        hPre.push(pre); hAct.push(a);
+        const o = matVec(blk.W2, a, E, blk.h, blk.b2);
+        const r = new Float64Array(E); for (let i = 0; i < E; i++) r[i] = res1[t][i] + o[i];
+        out2.push(r);
+      }
+      c.normed2 = normed2; c.hAct = hAct; c.hPre = hPre;
+      blkCache.push(c);
+      stream = out2;
+    }
+
+    // ---- final LN + output head + loss ----
+    let loss = 0; let count = 0;
+    const dStream = [];  // grad flowing back into `stream` (post-final-block)
+    for (let t = 0; t < T; t++) dStream.push(new Float64Array(E));
+    const fCache = [];
+    for (let t = 0; t < T; t++) {
+      const cc = {}; const fn = layerNorm(stream[t], m.lnFg, m.lnFb, E, cc); fCache.push(cc); cc.fn = fn;
+      const logits = matVec(m.Wout, fn, V, E, m.bout);
+      // softmax + cross-entropy vs next token
+      let mx = -Infinity; for (let i = 0; i < V; i++) if (logits[i] > mx) mx = logits[i];
+      let s = 0; const probs = new Float64Array(V);
+      for (let i = 0; i < V; i++) { probs[i] = Math.exp(logits[i] - mx); s += probs[i]; }
+      for (let i = 0; i < V; i++) probs[i] /= s;
+      const y = ids[t + 1];
+      loss += -Math.log(Math.max(probs[y], 1e-9)); count++;
+      if (grads) {
+        // dlogits
+        const dlog = probs; dlog[y] -= 1;
+        // Wout / bout grads + grad into fn
+        const dfn = new Float64Array(E);
+        for (let i = 0; i < V; i++) { const dl = dlog[i]; grads.bout[i] += dl; const base = i * E; for (let j = 0; j < E; j++) { grads.Wout[base + j] += dl * fCache[t].fn[j]; dfn[j] += dl * m.Wout[base + j]; } }
+        // back through final LN
+        const dx = layerNormBack(dfn, cc.xh, cc.inv, m.lnFg, E, grads.lnFg, grads.lnFb);
+        for (let j = 0; j < E; j++) dStream[t][j] += dx[j];
+      }
+    }
+
+    if (!grads) return { loss: loss / Math.max(1, count), count };
+
+    // ---- backward through blocks (reverse) ----
+    let dOut = dStream;   // grad wrt each block's output (== next block's input grad)
+    for (let L = m.blocks.length - 1; L >= 0; L--) {
+      const blk = m.blocks[L], g = grads.blocks[L], c = blkCache[L];
+      const dRes1 = []; for (let t = 0; t < T; t++) dRes1.push(new Float64Array(E));
+      // --- MLP backward ---
+      for (let t = 0; t < T; t++) {
+        const dO = dOut[t];
+        // residual: out2 = res1 + o  → dres1 += dO ; do = dO
+        for (let i = 0; i < E; i++) dRes1[t][i] += dO[i];
+        // W2: o = W2 · a
+        const a = c.hAct[t]; const da = new Float64Array(blk.h);
+        for (let i = 0; i < E; i++) { const dl = dO[i]; g.b2[i] += dl; const base = i * blk.h; for (let k = 0; k < blk.h; k++) { g.W2[base + k] += dl * a[k]; da[k] += dl * blk.W2[base + k]; } }
+        // activation backward
+        const dpre = new Float64Array(blk.h); const pre = c.hPre[t];
+        for (let k = 0; k < blk.h; k++) { const d = actf.dfx ? actf.dfx(pre[k]) : actf.df(a[k]); dpre[k] = da[k] * d; }
+        // W1: pre = W1 · n2
+        const dn2 = new Float64Array(E); const n2 = c.normed2[t];
+        for (let k = 0; k < blk.h; k++) { const dl = dpre[k]; g.b1[k] += dl; const base = k * E; for (let j = 0; j < E; j++) { g.W1[base + j] += dl * n2[j]; dn2[j] += dl * blk.W1[base + j]; } }
+        // back through LN2 into res1
+        const dx = layerNormBack(dn2, c.ln2[t].xh, c.ln2[t].inv, blk.ln2g, E, g.ln2g, g.ln2b);
+        for (let j = 0; j < E; j++) dRes1[t][j] += dx[j];
+      }
+      // --- attention backward ---
+      const dStreamIn = []; for (let t = 0; t < T; t++) dStreamIn.push(new Float64Array(E));
+      const dNormed = []; for (let t = 0; t < T; t++) dNormed.push(new Float64Array(E));
+      const dAttnOut = []; for (let t = 0; t < T; t++) dAttnOut.push(new Float64Array(E));
+      for (let t = 0; t < T; t++) {
+        // res1 = stream + proj → dstream += dRes1 ; dproj = dRes1
+        for (let i = 0; i < E; i++) dStreamIn[t][i] += dRes1[t][i];
+        // Wo: proj = Wo · attnOut
+        const ao = c.attnOut[t]; const dO = dRes1[t];
+        for (let i = 0; i < E; i++) { const dl = dO[i]; const base = i * E; for (let k = 0; k < E; k++) { g.Wo[base + k] += dl * ao[k]; dAttnOut[t][k] += dl * blk.Wo[base + k]; } }
+      }
+      // through attention to Q,K,V
+      const dQ = []; const dK = []; const dV = [];
+      for (let t = 0; t < T; t++) { dQ.push(new Float64Array(E)); dK.push(new Float64Array(E)); dV.push(new Float64Array(E)); }
+      const heads2 = heads, hd2 = hd;
+      for (let t = 0; t < T; t++) {
+        for (let h = 0; h < heads2; h++) {
+          const off = h * hd2; const probs = c.attProb[t][h];
+          // dV and dscores
+          const dScores = new Float64Array(t + 1);
+          for (let d = 0; d < hd2; d++) {
+            const grad = dAttnOut[t][off + d];
+            for (let j = 0; j <= t; j++) { dV[j][off + d] += probs[j] * grad; dScores[j] += grad * c.v[j][off + d]; }
+          }
+          // softmax backward
+          let dot = 0; for (let j = 0; j <= t; j++) dot += dScores[j] * probs[j];
+          for (let j = 0; j <= t; j++) { const ds = probs[j] * (dScores[j] - dot) / Math.sqrt(hd2); for (let d = 0; d < hd2; d++) { dQ[t][off + d] += ds * c.k[j][off + d]; dK[j][off + d] += ds * c.q[t][off + d]; } }
+        }
+      }
+      // Q,K,V projections back to normed1
+      for (let t = 0; t < T; t++) {
+        const n1 = c.normed1[t];
+        accumProjGrad(g.Wq, blk.Wq, dQ[t], n1, dNormed[t], E);
+        accumProjGrad(g.Wk, blk.Wk, dK[t], n1, dNormed[t], E);
+        accumProjGrad(g.Wv, blk.Wv, dV[t], n1, dNormed[t], E);
+      }
+      // back through LN1 into the block input stream
+      for (let t = 0; t < T; t++) {
+        const dx = layerNormBack(dNormed[t], c.ln1[t].xh, c.ln1[t].inv, blk.ln1g, E, g.ln1g, g.ln1b);
+        for (let j = 0; j < E; j++) dStreamIn[t][j] += dx[j];
+      }
+      dOut = dStreamIn;
+    }
+
+    // ---- embeddings backward ----
+    for (let t = 0; t < T; t++) {
+      const id = ids[t]; const tb = id * E, pb = t * E;
+      for (let i = 0; i < E; i++) { grads.Wtok[tb + i] += dOut[t][i]; grads.Wpos[pb + i] += dOut[t][i]; }
+    }
+
+    return { loss: loss / Math.max(1, count), count, grads };
+  }
+  // proj: y = W · x (rows=E, cols=E). Accumulate dW and dx from dy.
+  function accumProjGrad(dW, W, dy, x, dx, E) {
+    for (let r = 0; r < E; r++) { const dl = dy[r]; const base = r * E; for (let c = 0; c < E; c++) { dW[base + c] += dl * x[c]; dx[c] += dl * W[base + c]; } }
+  }
+
+  function blankGrads(m) {
+    const z = (a) => new Float64Array(a.length);
+    return {
+      Wtok: z(m.Wtok), Wpos: z(m.Wpos), Wout: z(m.Wout), bout: z(m.bout), lnFg: z(m.lnFg), lnFb: z(m.lnFb),
+      blocks: m.blocks.map(b => ({
+        ln1g: z(b.ln1g), ln1b: z(b.ln1b), Wq: z(b.Wq), Wk: z(b.Wk), Wv: z(b.Wv), Wo: z(b.Wo),
+        ln2g: z(b.ln2g), ln2b: z(b.ln2b), W1: z(b.W1), b1: z(b.b1), W2: z(b.W2), b2: z(b.b2),
+      })),
+    };
+  }
+  // flat list of {name, arr(model), grad} tensors for the optimizer to iterate.
+  function paramTensors(m, grads) {
     const out = [];
-    for (const n of graph.nodes || []) {
-      if (n.t === 'onTick') out.push(n.id);
-      else if (n.t === 'onSpawn' && tick === 0) out.push(n.id);
-      else if (n.t === 'onHit' && actor.hitTypes && actor.hitTypes.has(n.typeName)) out.push(n.id);
+    const push = (key, arr, garr) => out.push({ arr, g: garr });
+    push('Wtok', m.Wtok, grads.Wtok); push('Wpos', m.Wpos, grads.Wpos);
+    push('Wout', m.Wout, grads.Wout); push('bout', m.bout, grads.bout);
+    push('lnFg', m.lnFg, grads.lnFg); push('lnFb', m.lnFb, grads.lnFb);
+    for (let i = 0; i < m.blocks.length; i++) {
+      const b = m.blocks[i], gb = grads.blocks[i];
+      for (const k of ['ln1g', 'ln1b', 'Wq', 'Wk', 'Wv', 'Wo', 'ln2g', 'ln2b', 'W1', 'b1', 'W2', 'b2']) push(k, b[k], gb[k]);
     }
     return out;
   }
-  // Migrate a v1 (sink-style, no exec wires) graph to v2 (exec flow). Detect v1 by
-  // the absence of any exec edge and presence of legacy 'gate'/'in' ports. We thread
-  // an On Tick -> [all sink nodes] exec chain, remap legacy data ports, and convert
-  // the old data-driven 'destroy'/gates into a best-effort branch-free chain.
-  function migrateActorGraph(g) {
-    if (!g || !Array.isArray(g.nodes)) return g;
-    const edges = g.edges || [];
-    const hasExec = edges.some(e => (e.toPort || e.port) === 'exec' || (e.fromPort && e.fromPort !== 'out'));
-    const looksV1 = edges.some(e => { const p = e.toPort || e.port || 'in'; return p === 'gate' || p === 'in'; }) || g.nodes.some(n => ['setVar', 'impulse', 'addReward', 'brainIn', 'destroy'].includes(n.t));
-    if (hasExec || !looksV1) { return g; }   // already v2 (or empty) — leave alone
-    // remap legacy data ports: setVar/impulse/addReward/brainIn used 'in' -> 'value'
-    const newEdges = [];
-    for (const e of edges) {
-      const p = e.toPort || e.port || 'in';
-      if (p === 'gate') continue;                                   // gates become exec ordering; drop the data gate
-      const toPort = (p === 'in') ? 'value' : p;
-      newEdges.push({ from: e.from, fromPort: e.fromPort || 'out', to: e.to, toPort });
+  function addGrads(dst, src) {
+    for (let i = 0; i < dst.Wtok.length; i++) dst.Wtok[i] += src.Wtok[i];
+    for (let i = 0; i < dst.Wpos.length; i++) dst.Wpos[i] += src.Wpos[i];
+    for (let i = 0; i < dst.Wout.length; i++) dst.Wout[i] += src.Wout[i];
+    for (let i = 0; i < dst.bout.length; i++) dst.bout[i] += src.bout[i];
+    for (let i = 0; i < dst.lnFg.length; i++) { dst.lnFg[i] += src.lnFg[i]; dst.lnFb[i] += src.lnFb[i]; }
+    for (let L = 0; L < dst.blocks.length; L++) {
+      const d = dst.blocks[L], s = src.blocks[L];
+      for (const k in d) for (let i = 0; i < d[k].length; i++) d[k][i] += s[k][i];
     }
-    // ensure an On Tick node exists
-    let tickNode = g.nodes.find(n => n.t === 'onTick');
-    if (!tickNode) { tickNode = { id: 'evtick', t: 'onTick', x: 20, y: 20 }; g.nodes.unshift(tickNode); }
-    // thread exec: onTick -> each action node in node order
-    const SINKS = new Set(['setVar', 'impulse', 'addReward', 'brainIn', 'destroy', 'branch']);
-    const sinks = g.nodes.filter(n => SINKS.has(n.t));
-    let prev = tickNode.id;
-    for (const s of sinks) { newEdges.push({ from: prev, fromPort: 'exec', to: s.id, toPort: 'exec' }); prev = s.id; }
-    g.edges = newEdges;
-    return g;
   }
 
-  // Evolve per-agent-type brains for one generation. `pops` maps typeId -> array
-  // of genomes; we evaluate each candidate set, rank, and breed. To keep it simple
-  // and fast we co-evolve: index k uses genome[k] from every type's population.
-  function actorLabEvolve(lab, pops, cfg) {
-    const agentTypes = (lab.actorTypes || []).filter(T => T.brain && T.brain.outputs && T.brain.outputs.length);
-    const popSize = clampInt(cfg.pop, 2, 200, 30);
-    const sizesByType = {};
-    for (const T of agentTypes) sizesByType[T.id] = mlpLayerSizes(Math.max(1, (T.brain.inputs || []).length), T.brain.hidden || [8], T.brain.outputs.length);
-    // ensure populations exist + correct length
-    for (const T of agentTypes) {
-      const want = mlpParamCount(sizesByType[T.id]);
-      if (!pops[T.id] || !pops[T.id].length || pops[T.id][0].length !== want) {
-        const rng = mulberry32(((cfg.seed || 1) ^ hashStr(T.id)) >>> 0);
-        pops[T.id] = []; for (let i = 0; i < popSize; i++) pops[T.id].push(Array.from(mlpRandomGenome(sizesByType[T.id], rng)));
+  /* ---------------- Optimizers ----------------
+     One step given the accumulated (mean) grads. opt carries persistent moment
+     buffers (m,v) keyed by tensor index, plus t. Supports adamw/radam/lion/lamb/sgd.
+     We clip grads and apply decoupled weight decay (AdamW/LAMB). */
+  function optStep(model, grads, opt) {
+    const tensors = paramTensors(model, grads);
+    const kind = opt.kind || 'adamw';
+    const lr = opt.lr, wd = opt.wd ?? 0.01, b1 = 0.9, b2 = 0.999, eps = 1e-8, clip = 5;
+    if (!opt.mom) { opt.mom = tensors.map(t => new Float64Array(t.arr.length)); opt.vel = tensors.map(t => new Float64Array(t.arr.length)); opt.t = 0; }
+    opt.t++;
+    const bc1 = 1 - Math.pow(b1, opt.t), bc2 = 1 - Math.pow(b2, opt.t);
+    for (let ti = 0; ti < tensors.length; ti++) {
+      const { arr, g } = tensors[ti], mo = opt.mom[ti], ve = opt.vel[ti];
+      if (kind === 'sgd') {
+        for (let i = 0; i < arr.length; i++) { let gi = g[i]; if (gi > clip) gi = clip; else if (gi < -clip) gi = -clip; mo[i] = 0.9 * mo[i] + gi; arr[i] -= lr * mo[i]; }
+        continue;
+      }
+      if (kind === 'lion') {
+        for (let i = 0; i < arr.length; i++) {
+          let gi = g[i]; if (gi > clip) gi = clip; else if (gi < -clip) gi = -clip;
+          const upd = Math.sign(0.9 * mo[i] + 0.1 * gi);
+          arr[i] -= lr * (upd + wd * arr[i]);
+          mo[i] = 0.99 * mo[i] + 0.01 * gi;
+        }
+        continue;
+      }
+      // adam-family (adamw / radam / lamb)
+      let r1 = 0, r2 = 0;   // for LAMB trust ratio
+      const updBuf = kind === 'lamb' ? new Float64Array(arr.length) : null;
+      for (let i = 0; i < arr.length; i++) {
+        let gi = g[i]; if (gi > clip) gi = clip; else if (gi < -clip) gi = -clip;
+        mo[i] = b1 * mo[i] + (1 - b1) * gi;
+        ve[i] = b2 * ve[i] + (1 - b2) * gi * gi;
+        const mh = mo[i] / bc1, vh = ve[i] / bc2;
+        let upd;
+        if (kind === 'radam') {
+          const rhoInf = 2 / (1 - b2) - 1;
+          const rho = rhoInf - 2 * opt.t * Math.pow(b2, opt.t) / bc2;
+          if (rho > 4) { const rect = Math.sqrt(((rho - 4) * (rho - 2) * rhoInf) / ((rhoInf - 4) * (rhoInf - 2) * rho)); upd = rect * mh / (Math.sqrt(vh) + eps); }
+          else upd = mh; // fall back to plain momentum early
+        } else {
+          upd = mh / (Math.sqrt(vh) + eps);
+        }
+        if (kind === 'lamb') { updBuf[i] = upd + wd * arr[i]; r2 += updBuf[i] * updBuf[i]; r1 += arr[i] * arr[i]; }
+        else { arr[i] -= lr * (upd + (kind === 'adamw' ? wd * arr[i] : 0)); }
+      }
+      if (kind === 'lamb') {
+        const wNorm = Math.sqrt(r1), uNorm = Math.sqrt(r2) || 1;
+        const trust = (wNorm > 0 && uNorm > 0) ? wNorm / uNorm : 1;
+        for (let i = 0; i < arr.length; i++) arr[i] -= lr * trust * updBuf[i];
       }
     }
-    // evaluate each candidate index
-    const fits = new Array(popSize).fill(0);
-    for (let k = 0; k < popSize; k++) {
-      const brains = {}; for (const T of agentTypes) brains[T.id] = Float64Array.from(pops[T.id][k]);
-      fits[k] = actorLabEpisode(lab, brains, null).reward;
-    }
-    const order = fits.map((f, k) => ({ f, k })).sort((a, b) => b.f - a.f);
-    const bestFit = order.length ? order[0].f : 0, bestK = order.length ? order[0].k : 0;
-    // breed each type independently using the same ranking
-    const rng = mulberry32(((cfg.seed || 1) + 7) >>> 0);
-    const nextPops = {};
-    for (const T of agentTypes) {
-      const ranked = order.map(o => ({ genome: Float64Array.from(pops[T.id][o.k]) }));
-      const next = [];
-      const keep = Math.min(clampInt(cfg.elite, 0, 50, 2), ranked.length);
-      for (let i = 0; i < keep; i++) next.push(Array.from(ranked[i].genome));
-      const pick = () => { let best = ranked[(rng() * ranked.length) | 0], bi = ranked.indexOf(best); for (let z = 0; z < 2; z++) { const ci = (rng() * ranked.length) | 0; if (ci < bi) { best = ranked[ci]; bi = ci; } } return best.genome; };
-      while (next.length < popSize) next.push(Array.from(mlpMutate(mlpCrossover(pick(), pick(), rng), cfg.mutRate ?? 0.12, cfg.mutScale ?? 0.4, rng)));
-      nextPops[T.id] = next;
-    }
-    const bestBrains = {}; for (const T of agentTypes) bestBrains[T.id] = pops[T.id][bestK];
-    return { pops: nextPops, bestFit, best: bestBrains };
   }
-  function hashStr(s) { let h = 2166136261; s = String(s); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+
+  /* ---------------- Training driver ----------------
+     Runs a bounded chunk: `steps` optimizer steps, each over a micro-batch of
+     `batch` random windows. Grads are averaged across the batch — this is the
+     "parallelism by design" seam: llmTrainBatchGrads computes per-sample grads that
+     a Worker pool can produce concurrently and we just sum. Returns updated loss. */
+  function sampleWindow(ids, ctx, rng) {
+    const T = Math.min(ids.length - 1, ctx);
+    const start = ids.length - 1 - T <= 0 ? 0 : (rng() * (ids.length - 1 - T)) | 0;
+    return ids.slice(start, start + T + 1);
+  }
+  // Compute summed grads + loss over a batch (used both inline and by workers).
+  function llmBatchGrads(m, batchIds, opt, rng) {
+    const total = blankGrads(m); let loss = 0, n = 0;
+    for (const win of batchIds) {
+      const r = llmForwardBackward(m, win, { training: true }, rng);
+      if (r.grads) { addGrads(total, r.grads); loss += r.loss; n++; }
+    }
+    // mean
+    const scale = 1 / Math.max(1, n);
+    scaleGrads(total, scale);
+    return { grads: total, loss: loss / Math.max(1, n), n };
+  }
+  function scaleGrads(g, s) {
+    for (const key of ['Wtok', 'Wpos', 'Wout', 'bout', 'lnFg', 'lnFb']) for (let i = 0; i < g[key].length; i++) g[key][i] *= s;
+    for (const b of g.blocks) for (const k in b) for (let i = 0; i < b[k].length; i++) b[k][i] *= s;
+  }
+
+  function llmTrainChunk(m, ids, opt) {
+    hydrateLlm(m);
+    const ctx = m.cfg.ctx;
+    const steps = clampInt(opt.steps, 1, 100, 10);
+    const batch = clampInt(opt.batch, 1, 64, 8);
+    const rng = mulberry32(((opt.seed ?? m.seed ?? 1) >>> 0) + (opt.iter | 0));
+    opt.lr = clampNum(opt.lr, 1e-5, 1, 3e-3);
+    opt.kind = ['adamw', 'radam', 'lion', 'lamb', 'sgd'].includes(opt.kind) ? opt.kind : 'adamw';
+    let lastLoss = 0;
+    for (let s = 0; s < steps; s++) {
+      const windows = [];
+      for (let b = 0; b < batch; b++) windows.push(sampleWindow(ids, ctx, rng));
+      const { grads, loss } = llmBatchGrads(m, windows, opt, rng);
+      optStep(m, grads, opt);
+      lastLoss = loss;
+    }
+    return { loss: lastLoss };
+  }
+
+  /* ---------------- Sampling / chat ---------------- */
+  function llmSample(m, gen) {
+    hydrateLlm(m);
+    const ctx = m.cfg.ctx;
+    const temp = clampNum(gen.temperature, 0.05, 2, 0.9);
+    const topK = clampInt(gen.topK, 0, tokVocabSize(m.tok), 0);
+    const maxNew = clampInt(gen.length, 1, 400, 120);
+    const rng = mulberry32(((gen.seed ?? Date.now()) >>> 0) || 3);
+    let ids = tokenizerEncode(m.tok, String(gen.prompt || ''));
+    ids = [BOS].concat(ids);
+    const startLen = ids.length;
+    for (let step = 0; step < maxNew; step++) {
+      const window = ids.slice(Math.max(0, ids.length - ctx));
+      const logits = llmLogitsLast(m, window);
+      for (let i = 0; i < logits.length; i++) logits[i] /= temp;
+      // softmax
+      let mx = -Infinity; for (let i = 0; i < logits.length; i++) if (logits[i] > mx) mx = logits[i];
+      let sm = 0; const probs = new Float64Array(logits.length);
+      for (let i = 0; i < logits.length; i++) { probs[i] = Math.exp(logits[i] - mx); sm += probs[i]; }
+      for (let i = 0; i < logits.length; i++) probs[i] /= sm;
+      let pick = sampleProbs(probs, topK, rng);
+      if (pick === EOS) break;
+      ids.push(pick);
+    }
+    return { text: tokenizerDecode(m.tok, ids.slice(startLen)), ids: ids.slice(startLen) };
+  }
+  function sampleProbs(probs, topK, rng) {
+    const V = probs.length;
+    if (topK && topK < V) {
+      const idx = Array.from(probs.keys()).sort((a, b) => probs[b] - probs[a]).slice(0, topK);
+      const keep = new Float64Array(V); let s = 0;
+      for (const k of idx) { keep[k] = probs[k]; s += probs[k]; }
+      for (let k = 0; k < V; k++) probs[k] = keep[k] / (s || 1);
+    }
+    let rv = rng(), acc = 0;
+    for (let k = 0; k < V; k++) { acc += probs[k]; if (rv <= acc) return k; }
+    return V - 1;
+  }
+  // forward-only, returns logits at the LAST position.
+  function llmLogitsLast(m, ids) {
+    const E = m.cfg.embed, heads = m.cfg.heads, hd = E / heads;
+    const V = tokVocabSize(m.tok);
+    const T = Math.min(ids.length, m.cfg.ctx);
+    const actf = ACT[m.cfg.act] || ACT.gelu;
+    let stream = [];
+    for (let t = 0; t < T; t++) { const id = ids[ids.length - T + t]; const x = new Float64Array(E); const tb = id * E, pb = t * E; for (let i = 0; i < E; i++) x[i] = m.Wtok[tb + i] + m.Wpos[pb + i]; stream.push(x); }
+    for (const blk of m.blocks) {
+      const normed = stream.map(x => layerNorm(x, blk.ln1g, blk.ln1b, E, null));
+      const Q = normed.map(n => matVec(blk.Wq, n, E, E)), K = normed.map(n => matVec(blk.Wk, n, E, E)), Vv = normed.map(n => matVec(blk.Wv, n, E, E));
+      const attn = [];
+      for (let t = 0; t < T; t++) {
+        const outVec = new Float64Array(E);
+        for (let h = 0; h < heads; h++) {
+          const off = h * hd; const scores = new Float64Array(t + 1);
+          for (let j = 0; j <= t; j++) { let s = 0; for (let d = 0; d < hd; d++) s += Q[t][off + d] * K[j][off + d]; scores[j] = s / Math.sqrt(hd); }
+          let mx = -Infinity; for (let j = 0; j <= t; j++) if (scores[j] > mx) mx = scores[j];
+          let sm = 0; for (let j = 0; j <= t; j++) { scores[j] = Math.exp(scores[j] - mx); sm += scores[j]; }
+          for (let j = 0; j <= t; j++) scores[j] /= sm;
+          for (let d = 0; d < hd; d++) { let acc = 0; for (let j = 0; j <= t; j++) acc += scores[j] * Vv[j][off + d]; outVec[off + d] = acc; }
+        }
+        attn.push(outVec);
+      }
+      const res1 = stream.map((x, t) => { const p = matVec(blk.Wo, attn[t], E, E); const r = new Float64Array(E); for (let i = 0; i < E; i++) r[i] = x[i] + p[i]; return r; });
+      stream = res1.map((r) => {
+        const n2 = layerNorm(r, blk.ln2g, blk.ln2b, E, null);
+        const pre = matVec(blk.W1, n2, blk.h, E, blk.b1);
+        const a = new Float64Array(blk.h); for (let i = 0; i < blk.h; i++) a[i] = actf.f(pre[i]);
+        const o = matVec(blk.W2, a, E, blk.h, blk.b2);
+        const out = new Float64Array(E); for (let i = 0; i < E; i++) out[i] = r[i] + o[i]; return out;
+      });
+    }
+    const fn = layerNorm(stream[T - 1], m.lnFg, m.lnFb, E, null);
+    return matVec(m.Wout, fn, V, E, m.bout);
+  }
+
+  // On the wire, big arrays may arrive as plain Arrays; the math indexes them fine.
+  // We just ensure shape fields + drop the non-enumerable stoi cache.
+  function hydrateLlm(m) {
+    if (!m || m.type !== 'llm') throw new Error('bad llm model');
+    if (m.tok && m.tok._stoi) { try { delete m.tok._stoi; } catch (e) {} }
+    return m;
+  }
 
   /* ============================================================
      ORGANIZER — a per-user file-organization classifier (path C).
@@ -1074,40 +1191,27 @@
      BACKEND DISPATCH — neuralCompute({op, ...}) used by /api/neural/compute.
      Stateless: the client sends the model + data, we run a bounded chunk of work
      and return the updated model/loss/sample. Bounds keep one request off the
-     event loop for long (the LLM steps are capped; evolution is per-generation).
+     event loop for long. The organizer ops are unchanged (AI Organization).
      ============================================================ */
-  function clampInt(v, lo, hi, d) { v = Math.floor(Number(v)); if (!Number.isFinite(v)) v = d; return Math.max(lo, Math.min(hi, v)); }
-
   function neuralCompute(req) {
     const op = req && req.op;
-    if (op === 'charlm-train') {
-      const m = hydrateCharlm(req.model);
-      const ids = Array.isArray(req.ids) ? req.ids : encodeIds(req.text || '', m.vocab.chars);
-      if (ids.length < 3) throw new Error('not enough training text');
+    // ---- LLM ops (the Neural app) ----
+    if (op === 'llm-tokenize') {
+      const tok = tokenizerTrain(req.text || '', req.opts || {});
+      return { tok, vocab: tokVocabSize(tok) };
+    }
+    if (op === 'llm-train') {
+      const m = req.model;
+      const ids = Array.isArray(req.ids) ? req.ids : tokenizerEncode(m.tok, req.text || '');
+      if (!ids || ids.length < 3) throw new Error('not enough training tokens');
       const opt = req.opt || {};
-      opt.steps = clampInt(opt.steps, 1, 200, 20);
-      opt.seqLen = clampInt(opt.seqLen, 4, 128, 48);
-      const r = charlmTrainChunk(m, ids, opt);
-      return { model: dehydrateCharlm(m), loss: r.loss };
+      const r = llmTrainChunk(m, ids, opt);
+      return { model: m, loss: r.loss };
     }
-    if (op === 'charlm-sample') {
-      const m = hydrateCharlm(req.model);
-      return { text: charlmSample(m, req.gen || {}) };
+    if (op === 'llm-sample') {
+      return llmSample(req.model, req.gen || {});
     }
-    if (op === 'evolve') {
-      const next = evolveGeneration({
-        ranked: (req.ranked || []).map((g, i) => ({ genome: Float64Array.from(g.genome || g), rank: g.rank ?? i })),
-        popSize: clampInt(req.popSize, 2, 500, 40),
-        sizes: req.sizes, mutRate: req.mutRate, mutScale: req.mutScale,
-        elite: clampInt(req.elite, 0, 50, 2), seed: req.seed >>> 0 || 1,
-      });
-      return { population: next };
-    }
-    if (op === 'actorlab-evolve') {
-      if (!req.lab || !Array.isArray(req.lab.actorTypes)) throw new Error('bad lab');
-      const r = actorLabEvolve(req.lab, req.pops || {}, req.cfg || {});
-      return { pops: r.pops, bestFit: r.bestFit, best: r.best };
-    }
+    // ---- Organizer ops (AI Organization; unchanged) ----
     if (op === 'organizer-train') {
       const m = (req.model && req.model.type === 'organizer') ? req.model : organizerInit(req.init || {});
       const r = organizerTrain(m, Array.isArray(req.examples) ? req.examples : [], req.opt || {});
@@ -1119,24 +1223,13 @@
     }
     throw new Error('unknown op: ' + op);
   }
-  // model arrays come over JSON as plain arrays; keep them as arrays (the math
-  // indexes them fine) — only ensure shape fields exist.
-  function hydrateCharlm(model) {
-    if (!model || model.type !== 'charlm') throw new Error('bad model');
-    return model;
-  }
-  function dehydrateCharlm(m) { return m; }
 
   return {
     mulberry32, gaussian, ACT,
-    // MLP / evolution (path A)
-    mlpLayerSizes, mlpParamCount, mlpRandomGenome, mlpForward, mlpMutate, mlpCrossover,
-    makeBrain, evolveGeneration,
-    // CharLM (path B)
-    buildVocab, charlmInit, charlmTrainChunk, charlmSample, encodeIds, gruStep, outLogits, softmax,
-    // Actor Lab (path A advanced)
-    actorLabEpisode, actorLabEvolve, evalNode, migrateActorGraph,
-    // Organizer (path C: per-user file-organization classifier)
+    // LLM (the Neural app): tokenizers + transformer
+    tokenizerTrain, tokenizerEncode, tokenizerDecode, tokVocabSize,
+    llmInit, llmParamCount, llmTrainChunk, llmSample, llmLogitsLast, llmForwardBackward,
+    // Organizer (path C: per-user file-organization classifier) — required by server.js
     organizerInit, organizerForward, organizerTrain, organizerPredict, organizerSync,
     organizerInputDim, orgFeatures, orgTokens, fingerprintBytes, ORG_INPUT,
     // backend dispatch

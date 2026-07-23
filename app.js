@@ -683,7 +683,7 @@ const APPS = [
   { id: 'tools',      name: 'Tools',      icon: 'wrench',   tint: 'image',    status: 'ready', beta: true, desc: 'Converters & handy utilities.' },
   { id: 'settings',   name: 'Settings',   icon: 'gear',     tint: '',         status: 'ready', beta: true, desc: 'Account, members & appearance.' },
   { id: 'connectors', name: 'Connectors', icon: 'plug',     tint: '',         status: 'ready', beta: true, desc: 'Link services & automate with connectors.' },
-  { id: 'neural',     name: 'Neural Network', icon: 'brain', tint: 'audio',   status: 'ready', beta: true, desc: 'Build, train & run your own neural networks.' },
+  { id: 'neural',     name: 'Neural', icon: 'brain', tint: 'audio',   status: 'ready', beta: true, desc: 'Train your own language model from the ground up, then chat with it.' },
   { id: 'analytics',  name: 'Analytics',  icon: 'chart',    tint: 'video',    status: 'ready', beta: true, desc: 'See how & when you use your workspace.' },
   { id: 'trading',    name: 'Trading',    icon: 'trend',    tint: 'audio',    status: 'ready', beta: true, desc: 'Let an always-learning AI trade — sandbox or live.' },
   { id: 'music',      name: 'Music',      icon: 'audio',    tint: 'audio',    status: 'ready', beta: true, desc: 'A shared library, playlists & listening together.' },
@@ -836,8 +836,8 @@ async function openApp(id) {
   else if (id === 'connectors') { openAppScreen(app, connectorsHTML(), { wide: true }); wireConnectors(); }
   else if (id === 'neural') {
     // neural.js + neural-engine.js (~200KB) are loaded on demand, not at boot.
-    openAppScreen(app, `<div class="pad-sm dim mono">Loading Neural Network…</div>`, { wide: true });
-    try { await loadFeature('neural'); } catch (e) { openAppScreen(app, `<div class="pad-sm">Couldn't load the Neural Network app. Check your connection and try again.</div>`); return; }
+    openAppScreen(app, `<div class="pad-sm dim mono">Loading Neural…</div>`, { wide: true });
+    try { await loadFeature('neural'); } catch (e) { openAppScreen(app, `<div class="pad-sm">Couldn't load the Neural app. Check your connection and try again.</div>`); return; }
     if (currentApp !== 'neural') return;   // user navigated away while it loaded
     openAppScreen(app, neuralHTML(), { wide: true }); wireNeural();
   }
@@ -995,7 +995,7 @@ function renderDashboard() {
         <span class="wnb-text">
           <span class="wnb-tag">${esc(wnLatestRealTag())} · just landed</span>
           <span class="wnb-head">What's new in Simplex</span>
-          <span class="wnb-sub">The AI app can now run models entirely on this server — a new Local tab runs your own GGUF models privately, with a CPU-temperature safety net so long sessions can't overheat the hardware.</span>
+          <span class="wnb-sub">The Neural app is now a real LLM trainer — design a small transformer, feed it your own text, train it with a proper optimizer, and chat with what you built. Start from a template and just hit train.</span>
         </span>
         <span class="wnb-go">Read it ${svg('back', 13, 2)}</span>
       </button>
@@ -1072,6 +1072,31 @@ function openWhatsNew() {
    (see wnTagFor / wnRelTime) — never hardcoded. To ship an update, prepend one
    object here; the banner, footer, numbering, dates and paging all follow. */
 const WHATS_NEW = [
+  {
+    date: '2026-07-23',
+    title: 'Neural, reborn — train your own language model from the ground up',
+    dek: `The old Neural Network app is now <strong>Neural</strong>: a real (if pint-sized) <strong>LLM trainer</strong>. Design the architecture, feed it your own text, train it with a proper optimizer, and <strong>chat with what you built</strong> — all in your browser, all saved to your encrypted vault. Start from a <strong>template</strong> and just hit train.`,
+    items: [
+      {
+        icon: 'brain', tint: 'audio',
+        head: 'Build the architecture, step by step',
+        badge: { text: 'New', cls: 'new' },
+        body: `A short wizard walks you through a genuine transformer: pick a <strong>tokenizer</strong> (characters, BPE subwords, whole words, or sentences), the <strong>context length</strong> and <strong>embedding size</strong>, an <strong>activation</strong> (ReLU / Leaky / GELU / Tanh / Sigmoid), <strong>dropout</strong>, and the <strong>hidden layer stack</strong>. It's small by design so a browser tab — or a phone — can actually train it.`,
+      },
+      {
+        icon: 'spark', tint: 'audio',
+        head: 'Data, Training, Inference',
+        badge: { text: 'New', cls: 'new' },
+        body: `Each model opens on three tabs. <strong>Data</strong> holds your pre-training and fine-tuning text — and can <strong>stack</strong> data in from any template or any model you've made. <strong>Training</strong> gives you <strong>AdamW, RAdam, Lion, LAMB or SGD</strong> with learning rate, batch size, epochs and a seed, plus a live loss curve. <strong>Inference</strong> is a chat room with your creation.`,
+      },
+      {
+        icon: 'note', tint: 'document',
+        head: 'Templates & upgrades',
+        badge: { text: 'New', cls: 'new' },
+        body: `Don't want to start from scratch? Pick a <strong>template</strong> — a pre-built structure that already ships with all its training data — and just hit train. Later, <strong>Upgrade</strong> any model to a bigger or smaller structure (or a different tokenizer) <em>while keeping all its data</em> — handy when a model overfits or you want to try something new without re-entering everything.`,
+      },
+    ],
+  },
   {
     date: '2026-07-18',
     title: 'The High-Quality Image update — EXR & TIFF support',
@@ -9183,7 +9208,7 @@ function newAccount(after) {
       { key: 'is_admin', label: 'Administrator (can manage all accounts)', type: 'checkbox', value: false },
       { key: 'can_code', label: 'Can run code (execute programs in the Code app)', type: 'checkbox', value: false },
       { key: 'can_ai', label: 'Can use AI (chat in the AI app)', type: 'checkbox', value: false },
-      { key: 'can_neural_backend', label: 'Can use backend compute (run Neural Network training on the server)', type: 'checkbox', value: false },
+      { key: 'can_neural_backend', label: 'Can use backend compute (run Neural training on the server)', type: 'checkbox', value: false },
       { key: 'org_max_tier', label: 'AI Organization — highest scale this account may pick', type: 'select', value: 'medium', options: [{ value: 'small', label: 'Small' }, { value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }] },
       { key: 'security_tier', label: 'Login security tier (how failed sign-ins are punished)', type: 'select', value: 'minimal', options: [{ value: 'minimal', label: 'Minimal' }, { value: 'limited', label: 'Limited' }, { value: 'locked', label: 'Locked' }] },
     ],
@@ -9214,7 +9239,7 @@ function editAccount(a, after) {
       { key: 'is_admin', label: 'Administrator', type: 'checkbox', value: !!a.is_admin },
       { key: 'can_code', label: 'Can run code (Code app execution)', type: 'checkbox', value: !!a.can_code },
       { key: 'can_ai', label: 'Can use AI (AI app)', type: 'checkbox', value: !!a.can_ai },
-      { key: 'can_neural_backend', label: 'Can use backend compute (Neural Network server training)', type: 'checkbox', value: !!a.can_neural_backend },
+      { key: 'can_neural_backend', label: 'Can use backend compute (Neural server training)', type: 'checkbox', value: !!a.can_neural_backend },
       { key: 'org_max_tier', label: 'AI Organization — highest scale this account may pick', type: 'select', value: a.org_max_tier || 'medium', options: [{ value: 'small', label: 'Small' }, { value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }] },
       { key: 'security_tier', label: 'Login security tier (how failed sign-ins are punished)', type: 'select', value: a.security_tier || 'minimal', options: [{ value: 'minimal', label: 'Minimal' }, { value: 'limited', label: 'Limited' }, { value: 'locked', label: 'Locked' }] },
     ],

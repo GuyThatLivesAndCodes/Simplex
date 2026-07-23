@@ -1417,7 +1417,7 @@ function openStore(accountId) {
     /* ---------- Neural Network app ---------- */
     netList: () => ncq.netAll.all().map(r => ({ id: r.id, kind: r.kind, name: decT(r.name) || 'Untitled network', updated: r.updated })),
     netGet: (id) => { const r = ncq.netGet.get(id); if (!r) return null; let data = null; try { data = JSON.parse(decT(r.data) || 'null'); } catch (e) {} return { id: r.id, kind: r.kind, name: decT(r.name) || 'Untitled network', data, updated: r.updated }; },
-    netCreate: ({ kind, name, data }) => { const id = uid(); const now = Date.now(); const k = (kind === 'llm' || kind === 'actorlab') ? kind : 'graph'; ncq.netIns.run(id, k, encT(name || 'Untitled network'), encT(JSON.stringify(data ?? null)), now); return s.netGet(id); },
+    netCreate: ({ kind, name, data }) => { const id = uid(); const now = Date.now(); const k = (kind === 'llm2') ? kind : 'llm2'; ncq.netIns.run(id, k, encT(name || 'Untitled model'), encT(JSON.stringify(data ?? null)), now); return s.netGet(id); },
     netUpdate: (id, p) => { const r = ncq.netGet.get(id); if (!r) return null; const now = Date.now(); const name = p.name != null ? encT(p.name) : r.name; const data = p.data !== undefined ? encT(JSON.stringify(p.data)) : r.data; ncq.netUpd.run(name, data, now, id); return s.netGet(id); },
     netDelete: (id) => ncq.netDel.run(id).changes > 0,
     netStats: () => ncq.netBytes.get(),

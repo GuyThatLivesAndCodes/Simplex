@@ -11,6 +11,9 @@ struct AppShell: View {
     // destroy + recreate the store — which made habits briefly vanish and could pop
     // onboarding on return. It stays loaded for the life of the session.
     @StateObject private var habitStore = HabitStore()
+    // Owned HERE too so training keeps running across system switches and models don't
+    // reload (mirrors the habitStore decision).
+    @StateObject private var neuralStore = NeuralStore()
 
     var body: some View {
         Group {
@@ -19,13 +22,16 @@ struct AppShell: View {
                 DatabaseShell()
             case .habit:
                 HabitShell()
+            case .neural:
+                NeuralShell()
             }
         }
-        // Both systems follow the app's chosen appearance (dark/light + accent), so the
+        // Every system follows the app's chosen appearance (dark/light + accent), so the
         // whole app reads as one product with no outlier screens.
         .preferredColorScheme(appr.colorScheme)
         .tint(appr.accent)
         .environmentObject(habitStore)
+        .environmentObject(neuralStore)
         .sheet(isPresented: $router.showSwitcher) { SystemSwitcher() }
     }
 }
