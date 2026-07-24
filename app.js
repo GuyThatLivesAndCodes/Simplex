@@ -1692,6 +1692,12 @@ function settingsHTML() {
         </div>
         <button class="btn ghost" id="setAccount">${svg('rename', 14)} Edit profile</button>
       </div>
+      <div class="set-row">
+        <div class="sr-main">
+          <div class="sr-title">${svg('brain', 13)} AI image edits</div>
+          <div class="sr-sub mono">${(() => { const t = a.img_edit || {}; return t.unlimited ? 'unlimited (admin)' : `${t.remaining ?? 0} of ${t.limit ?? 5} left today · resets at midnight`; })()}</div>
+        </div>
+      </div>
     </div>
     ${a.is_admin ? `<div class="set-section">
       <span class="eyebrow">Members</span>
@@ -2203,12 +2209,14 @@ async function openAiConfig() {
     fields: [
       { key: 'workerUrl', label: 'Cloudflare worker URL', value: c.workerUrl || '' },
       { key: 'xaiKey', label: `xAI API key ${c.xaiKeySet ? '(connected — blank keeps it)' : '(optional — enables Grok)'}`, type: 'password', placeholder: c.xaiKeySet ? '••••••••' : 'xai-…', attrs: 'autocomplete="off"' },
+      { key: 'imgDailyLimit', label: 'AI image edits per member per day', type: 'number', value: String(c.imgDailyLimit ?? 5), attrs: 'min="0" max="1000"' },
     ],
     okLabel: 'Save',
     onSubmit: async (vals, close) => {
       const payload = {};
       if (vals.workerUrl !== undefined && vals.workerUrl.trim() !== (c.workerUrl || '')) payload.workerUrl = vals.workerUrl.trim();
       if (vals.xaiKey) payload.xaiKey = vals.xaiKey;
+      if (vals.imgDailyLimit !== undefined && String(vals.imgDailyLimit).trim() !== String(c.imgDailyLimit ?? '')) payload.imgDailyLimit = parseInt(vals.imgDailyLimit, 10);
       await aiConfigSet(payload);
       close(); toast('AI providers updated', 'check'); reopenSettingsIfOpen();
     },
@@ -3810,6 +3818,145 @@ function openCompressDialog(f) {
       resultEl.innerHTML = `<p class="mono" style="color:var(--danger,#e0574a);margin-top:10px">${esc(e && e.message ? e.message : 'Compression failed')}</p>`;
     }
   };
+}
+
+/* ---- AI Image Editing (xAI Grok Imagine) ---- */
+/* Only real, unlocked PNG/JPEG images, and only for accounts with AI enabled. */
+function canAiEditImage(f) {
+  if (!f || f.type !== 'image' || _looksLocked(f) || f.locked) return false;
+  if (!(ACCOUNT && (ACCOUNT.is_admin || ACCOUNT.can_ai))) return false;
+  const ext = (f.name.match(/\.([^.]+)$/) || [])[1];
+  return ['png', 'jpg', 'jpeg'].includes(String(ext || '').toLowerCase());
+}
+function _imgTokenInfo() {
+  const t = (ACCOUNT && ACCOUNT.img_edit) || { unlimited: false, remaining: 0, limit: 5 };
+  return t;
+}
+/* remaining-tokens line for the modal (admins are unlimited). */
+function _imgTokenLine() {
+  const t = _imgTokenInfo();
+  if (t.unlimited) return `<span class="ai-tok">Unlimited edits (admin)</span>`;
+  return `<span class="ai-tok"><b>${t.remaining}</b> of ${t.limit} daily edits left</span>`;
+}
+
+function openAiEditDialog(f) {
+  if (!canAiEditImage(f)) { toast('AI Edit needs an unlocked PNG or JPEG image', 'close'); return; }
+  const t = _imgTokenInfo();
+  const premiumOk = t.unlimited || t.remaining >= 2;
+  const anyOk = t.unlimited || t.remaining >= 1;
+  const srcUrl = (typeof mediaUrl === 'function' && mediaUrl(f)) || (f.url || '');
+
+  const bg = document.createElement('div'); bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal ai-edit-modal">
+    <h3>${svg('brain', 16)} AI Edit image</h3>
+    <p class="mono dim" style="margin:-2px 0 12px">${esc(f.name)}</p>
+    <div class="ai-edit-preview" id="aiPrev"><img src="${esc(srcUrl)}" alt=""></div>
+    <div class="tool-opt"><span class="eyebrow">Quality</span>
+      <div class="seg set-seg" id="aiQual">
+        <button type="button" data-q="default" class="on">Default · 1 token</button>
+        ${premiumOk ? `<button type="button" data-q="premium">Premium · 2 tokens</button>` : ''}
+      </div>
+    </div>
+    <label class="tool-opt"><span class="eyebrow">Describe the edit</span>
+      <textarea id="aiPrompt" class="ai-prompt" rows="3" maxlength="1000" placeholder="e.g. make it night-time with neon lighting"></textarea>
+    </label>
+    <div class="ai-edit-foot mono">${_imgTokenLine()}</div>
+    <div class="tool-result" id="aiResult"></div>
+    <div class="acts" style="margin-top:14px">
+      <button class="btn ghost" id="aiCancel">Cancel</button>
+      <button class="btn primary" id="aiGo" ${anyOk ? '' : 'disabled'}>${svg('brain', 15)} Edit image</button>
+    </div>
+  </div>`;
+  document.body.appendChild(bg);
+
+  let quality = 'default', running = false, abort = null;
+  const qualSeg = bg.querySelector('#aiQual'), promptEl = bg.querySelector('#aiPrompt');
+  const goBtn = bg.querySelector('#aiGo'), cancelBtn = bg.querySelector('#aiCancel');
+  const resultEl = bg.querySelector('#aiResult'), prev = bg.querySelector('#aiPrev');
+
+  qualSeg.querySelectorAll('[data-q]').forEach(b => b.onclick = () => {
+    if (running) return;
+    quality = b.dataset.q;
+    qualSeg.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+  });
+
+  const close = () => { if (abort) { try { abort.abort(); } catch (e) {} } bg.remove(); };
+  cancelBtn.onclick = close;
+  bg.onclick = (e) => { if (e.target === bg && !running) close(); };
+
+  goBtn.onclick = async () => {
+    if (running) return;
+    const prompt = promptEl.value.trim();
+    if (!prompt) { toast('Describe the edit you want', 'close'); promptEl.focus(); return; }
+    const cost = quality === 'premium' ? 2 : 1;
+    const tok = _imgTokenInfo();
+    // Confirm the credit spend (skipped for admins with unlimited use).
+    if (!tok.unlimited) {
+      const ok = await confirmDialog(`Use ${cost} edit ${cost === 1 ? 'credit' : 'credits'}?`,
+        `This ${quality === 'premium' ? 'Premium' : 'Default'} edit will use ${cost} of your ${tok.remaining} remaining edits today.`,
+        'Edit image');
+      if (!ok) return;
+    }
+
+    running = true;
+    goBtn.disabled = true; cancelBtn.disabled = true;
+    qualSeg.querySelectorAll('button').forEach(b => b.disabled = true);
+    promptEl.disabled = true;
+    prev.classList.add('editing');   // blur the source while it generates
+    resultEl.innerHTML = `<div class="tool-working" style="margin-top:12px">
+      <div class="tw-top"><span class="mono" id="aiPhase">Starting…</span></div>
+      <div class="tool-prog indet"><i></i></div>
+    </div>`;
+    const phaseEl = resultEl.querySelector('#aiPhase');
+    const phaseText = { starting: 'Starting…', reading: 'Reading image…', editing: 'Editing with AI…', saving: 'Saving to your vault…', done: 'Done!' };
+    abort = new AbortController();
+    try {
+      const j = await runImageEdit({
+        fileId: f.id, quality, prompt, signal: abort.signal,
+        onPhase: (p) => { if (phaseEl) phaseEl.textContent = phaseText[p] || 'Working…'; },
+      });
+      abort = null;
+      const saved = j.file;
+      // update the token line, reveal the result + celebrate
+      const foot = bg.querySelector('.ai-edit-foot'); if (foot) foot.innerHTML = _imgTokenLine();
+      if (saved) {
+        prev.classList.remove('editing');
+        prev.innerHTML = `<img src="${esc((typeof mediaUrl === 'function' && mediaUrl(saved)) || saved.url || '')}" alt="">`;
+      }
+      resultEl.innerHTML = `<div class="ai-edit-done">${svg('check', 15)} Saved as <b>${esc(saved ? saved.name : 'a new image')}</b></div>`;
+      confettiBurst(bg);
+      try { render(); } catch (e) {}
+      goBtn.textContent = 'Done'; goBtn.disabled = false; goBtn.onclick = close;
+      cancelBtn.textContent = 'Close'; cancelBtn.disabled = false;
+    } catch (e) {
+      abort = null; running = false;
+      if (e && (e.name === 'AbortError' || e.message === 'aborted')) { close(); return; }
+      prev.classList.remove('editing');
+      goBtn.disabled = false; cancelBtn.disabled = false;
+      qualSeg.querySelectorAll('button').forEach(b => b.disabled = false);
+      promptEl.disabled = false;
+      const foot = bg.querySelector('.ai-edit-foot'); if (foot) foot.innerHTML = _imgTokenLine();
+      resultEl.innerHTML = `<p class="mono" style="color:var(--danger,#e0574a);margin-top:10px">${esc(e && e.message ? e.message : 'Image edit failed')}</p>`;
+    }
+  };
+  setTimeout(() => promptEl && promptEl.focus(), 60);
+}
+
+/* A quick confetti burst inside a modal (pure CSS/JS, no deps). */
+function confettiBurst(host) {
+  const layer = document.createElement('div'); layer.className = 'confetti-layer';
+  const colors = ['#ffd479', '#8fbf9f', '#e6a0c4', '#7fb3ff', '#ffffff', '#f5a35c'];
+  for (let i = 0; i < 80; i++) {
+    const p = document.createElement('i');
+    p.style.left = Math.random() * 100 + '%';
+    p.style.background = colors[i % colors.length];
+    p.style.animationDelay = (Math.random() * 0.4) + 's';
+    p.style.animationDuration = (1.6 + Math.random() * 1.2) + 's';
+    p.style.transform = `translateX(${(Math.random() * 60 - 30)}px) rotate(${Math.random() * 360}deg)`;
+    layer.appendChild(p);
+  }
+  host.appendChild(layer);
+  setTimeout(() => layer.remove(), 3200);
 }
 
 let _toolView = 'grid', _toolAbort = null, _toolsFfmpeg = true;
@@ -6736,6 +6883,11 @@ function showCtx(x, y, id, fromBtn) {
       if (f.type === 'image' && !_looksLocked(f) && !f.locked && typeof openHeightmap === 'function') {
         items.push({ ic: 'model3d', label: 'View as heightmap...', fn: () => void openHeightmap(id) });
       }
+      // "AI Edit…": describe a change and let xAI Grok Imagine re-imagine the image,
+      // saved as a new file beside it. Costs a daily image-edit token. PNG/JPEG only.
+      if (canAiEditImage(f)) {
+        items.push({ ic: 'brain', label: 'AI Edit...', fn: () => openAiEditDialog(f) });
+      }
     }
     // UE4 save files (.sav/.save): open the GVAS property editor
     if (!multi && f.type !== 'folder' && /\.(sav|save)$/i.test(f.name) && !_looksLocked(f) && !f.locked) {
@@ -7349,6 +7501,22 @@ function confirmModal(title, desc, onYes, okLabel = 'Delete') {
   bg.querySelector('[data-cancel]').onclick = close;
   bg.querySelector('[data-ok]').onclick = () => { close(); onYes(); };
   bg.onclick = e => { if (e.target === bg) close(); };
+}
+
+/* Promise-based confirm with a non-destructive (primary) action. Resolves true/false.
+   Used for the "spend a credit?" AI-edit prompt. */
+function confirmDialog(title, desc, okLabel = 'Confirm') {
+  return new Promise(resolve => {
+    const bg = document.createElement('div'); bg.className = 'modal-bg';
+    bg.innerHTML = `<div class="modal"><h3>${esc(title)}</h3><p>${esc(desc)}</p>
+      <div class="acts"><button class="btn ghost" data-cancel>Cancel</button><button class="btn primary" data-ok>${esc(okLabel)}</button></div></div>`;
+    document.body.appendChild(bg);
+    let settled = false;
+    const done = (v) => { if (settled) return; settled = true; bg.remove(); resolve(v); };
+    bg.querySelector('[data-cancel]').onclick = () => done(false);
+    bg.querySelector('[data-ok]').onclick = () => done(true);
+    bg.onclick = e => { if (e.target === bg) done(false); };
+  });
 }
 
 /* ---------- upload failure report ("Uh oh!") ----------

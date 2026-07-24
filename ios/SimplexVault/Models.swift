@@ -133,8 +133,28 @@ struct Account: Codable, Hashable {
     // Terms of Service state, so the app knows whether to prompt before an upload.
     var tos_accepted: Bool?
     var tos_version: Int?
+    // AI Image Editing daily allowance (nil on older servers).
+    var img_edit: ImgEditTokens?
     // The freeform appearance/prefs blob (accent/theme/bgFx/fonts + tos markers).
     var prefs: [String: AnyCodable]?
+}
+
+/// The per-day AI Image Edit allowance echoed by the server (`account.img_edit`).
+/// `remaining`/`limit` are nil when `unlimited` (admins).
+struct ImgEditTokens: Codable, Hashable {
+    var unlimited: Bool? = false
+    var limit: Int? = 5
+    var used: Int? = 0
+    var remaining: Int? = 0
+    var resets: String? = nil
+
+    var isUnlimited: Bool { unlimited == true }
+    /// Tokens the account can still spend today (a very large number when unlimited).
+    var left: Int { isUnlimited ? .max : (remaining ?? 0) }
+    /// Whether a Premium (2-token) edit is affordable right now.
+    var canPremium: Bool { isUnlimited || left >= 2 }
+    /// Whether any edit is affordable right now.
+    var canEdit: Bool { isUnlimited || left >= 1 }
 }
 
 /// Login can complete in one step, or bounce to a TOTP code step.

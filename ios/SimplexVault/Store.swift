@@ -94,6 +94,18 @@ final class Store: ObservableObject {
         }
     }
 
+    /// Re-fetch the account (picks up e.g. the AI image-edit token counter). Best-effort.
+    func refreshAccount() async {
+        if let a = try? await API.shared.me() { account = a }
+    }
+
+    /// Merge a fresh token allowance into the cached account without a full /me round-trip.
+    func updateImageTokens(_ tokens: ImgEditTokens?) {
+        guard let tokens, var a = account else { return }
+        a.img_edit = tokens
+        account = a
+    }
+
     /// Non-trashed children of a folder (nil = root), folders first then by name.
     func children(of parent: String?) -> [FileItem] {
         files.filter { $0.parent == parent && !$0.isTrashed }

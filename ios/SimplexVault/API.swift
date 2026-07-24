@@ -196,6 +196,31 @@ actor API {
         return try? JSONDecoder().decode(ConvertProgress.self, from: data)
     }
 
+    // MARK: - AI Image Editing (xAI Grok Imagine via /api/ai/image/*)
+
+    /// Response of starting an edit: the server debits the token and runs a DETACHED
+    /// job that finishes even if we disconnect. `jobId` is polled via `imageJob`.
+    struct ImageEditStart: Decodable { let ok: Bool; let jobId: String; let quality: String; let cost: Int; let tokens: ImgEditTokens? }
+    /// One poll of an edit job. `status` is running|done|error; `file` is the saved
+    /// result once done; `tokens` is the refreshed daily allowance.
+    struct ImageJob: Decodable { let id: String; let status: String; let phase: String?; let error: String?; let file: FileItem?; let quality: String?; let cost: Int?; let tokens: ImgEditTokens? }
+
+    /// Kick off an edit. Returns immediately with a jobId (the work continues server-side).
+    func startImageEdit(fileId: String, quality: String, prompt: String) async throws -> ImageEditStart {
+        var req = request("/api/ai/image/edit", method: "POST",
+                          json: ["fileId": fileId, "quality": quality, "prompt": prompt])
+        req.timeoutInterval = 60
+        return try decode(ImageEditStart.self, from: try await run(req))
+    }
+    /// Poll a job's status once.
+    func imageJob(_ id: String) async throws -> ImageJob {
+        try decode(ImageJob.self, from: try await run(request("/api/ai/image/job/\(id)")))
+    }
+    /// The account's current daily image-edit token allowance.
+    func imageTokens() async throws -> ImgEditTokens {
+        try decode(ImgEditTokens.self, from: try await run(request("/api/ai/image/tokens")))
+    }
+
     /// Which convert tools the server has ready (ffmpeg present).
     func toolsAvailable() async -> Bool {
         struct T: Decodable { let ffmpeg: Bool }

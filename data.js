@@ -478,6 +478,44 @@ async function convertTool({ tool, fileId, format, preset, mode, value, output =
   return { kind: 'download', blob: await res.blob(), outSize };
 }
 
+/* ---- AI Image Editing (xAI Grok Imagine) ----
+   Start an edit (server debits a token + runs a DETACHED job that finishes even if
+   we disconnect), then poll the job until it's done. Returns { file, tokens }. */
+async function startImageEdit({ fileId, quality, prompt }) {
+  const res = await fetch('/api/ai/image/edit', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fileId, quality, prompt }),
+  });
+  if (!res.ok) { let msg = 'could not start edit', code; try { const j = await res.json(); msg = j.error || msg; code = j.code; } catch (e) {} const err = new Error(msg); err.status = res.status; err.code = code; throw err; }
+  return res.json();   // { ok, jobId, quality, cost, tokens }
+}
+async function pollImageJob(jobId) {
+  const res = await fetch('/api/ai/image/job/' + jobId, { cache: 'no-store' });
+  if (!res.ok) { const err = new Error('job lookup failed'); err.status = res.status; throw err; }
+  return res.json();   // { status, phase, error, file, tokens }
+}
+/* Convenience: start + poll to completion. onPhase(phase) is called as it progresses. */
+async function runImageEdit({ fileId, quality, prompt, onPhase, signal }) {
+  const { jobId, tokens } = await startImageEdit({ fileId, quality, prompt });
+  if (typeof ACCOUNT !== 'undefined' && ACCOUNT && tokens) ACCOUNT.img_edit = tokens;
+  while (true) {
+    if (signal && signal.aborted) throw new Error('aborted');
+    const j = await pollImageJob(jobId);
+    if (typeof ACCOUNT !== 'undefined' && ACCOUNT && j.tokens) ACCOUNT.img_edit = j.tokens;
+    if (onPhase && j.phase) onPhase(j.phase);
+    if (j.status === 'done') {
+      if (j.file && typeof DB !== 'undefined' && DB && DB.files) {
+        const i = DB.files.findIndex(f => f.id === j.file.id);
+        if (i >= 0) DB.files[i] = j.file; else DB.files.push(j.file);
+      }
+      return j;
+    }
+    if (j.status === 'error') { throw new Error(j.error || 'image edit failed'); }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+}
+function imageTokens() { return apiJSON('/api/ai/image/tokens'); }
+
 /* ---- Mini Video Editor ---- */
 /* Render a project to a video in the vault (server ffmpeg). output 'save' adds a
    new file; 'replace' (with replaceId) overwrites a previous export. Returns the

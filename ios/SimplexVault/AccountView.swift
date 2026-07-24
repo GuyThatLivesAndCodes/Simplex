@@ -26,6 +26,18 @@ struct AccountView: View {
 
             storageSection
 
+            // AI image editing allowance
+            Section("AI") {
+                HStack {
+                    Label("AI image edits", systemImage: "wand.and.stars")
+                        .foregroundStyle(SimplexTheme.text)
+                    Spacer()
+                    Text(imgEditLabel)
+                        .font(SimplexTheme.mono(11)).foregroundStyle(SimplexTheme.subtle)
+                }
+            }
+            .listRowBackground(SimplexTheme.surface)
+
             // security
             Section("Security") {
                 Toggle(isOn: $appr.faceIDLock) {
@@ -80,6 +92,7 @@ struct AccountView: View {
         .background(SimplexTheme.bg)
         .navigationTitle("Account")
         .navigationBarTitleDisplayMode(.large)
+        .task { await store.refreshAccount() }
     }
 
     // storage meter split into Docs / Images / Media, like the reference
@@ -145,6 +158,11 @@ struct AccountView: View {
 
     private var themeLabel: String {
         AppearanceCatalog.themes.first { $0.id == appr.themeId }?.label ?? "Dark"
+    }
+    private var imgEditLabel: String {
+        let t = store.account?.img_edit ?? ImgEditTokens()
+        if t.isUnlimited { return "Unlimited" }
+        return "\(t.remaining ?? 0) of \(t.limit ?? 5) today"
     }
     private var initials: String {
         let name = store.account?.display ?? store.account?.username ?? "?"

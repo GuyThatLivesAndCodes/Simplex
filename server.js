@@ -421,6 +421,13 @@ try {
   // the server can show it back to a signed-in owner on request — while a stolen
   // disk + master key still reads nothing. Users never see it at enrollment.
   if (!have.has('key_rc_enc')) sys.exec('ALTER TABLE accounts ADD COLUMN key_rc_enc TEXT');
+  // ---- AI Image Editing daily allowance ----
+  // img_used  = image-edit tokens spent SO FAR today (Default edit = 1, Premium = 2).
+  // img_reset = the YYYY-MM-DD (server-local) that `img_used` is counted against; when
+  // the current date passes it, the counter lazily resets to 0 (see imgTokens()). Admins
+  // are unlimited and never touch these. Default limit lives in setting ai.img_daily_limit.
+  if (!have.has('img_used')) sys.exec('ALTER TABLE accounts ADD COLUMN img_used INTEGER NOT NULL DEFAULT 0');
+  if (!have.has('img_reset')) sys.exec('ALTER TABLE accounts ADD COLUMN img_reset TEXT');
 }
 
 /* ---------- login security: per-IP bans + self-serve signup queue ----------
@@ -939,6 +946,62 @@ function setSetting(key, value) { setSettingStmt.run({ k: key, v: value }); }
 function getSecret(key) { const v = getSetting(key); if (!v) return null; try { return vault.decText(v, SYS_KEYS); } catch (e) { return null; } }
 function setSecret(key, plain) { if (plain) setSetting(key, vault.encText(String(plain), SYS_KEYS)); else setSetting(key, ''); }
 
+/* ---------- AI Image Editing: daily token allowance ----------
+   Each account gets N image-edit tokens per day (default 5; admin-configurable via
+   the ai.img_daily_limit setting). A Default-quality edit costs 1, Premium costs 2.
+   Admins are unlimited. The counter resets at server-local midnight, lazily: the row
+   carries the date its `img_used` is counted against, and the first read on a new day
+   zeroes it. Everything below reads/writes the live SYSTEM db row (never a cached
+   copy) so concurrent jobs debit against the same authoritative count. */
+const IMG_EDIT_COST = { default: 1, premium: 2 };
+const DEFAULT_IMG_DAILY_LIMIT = 5;
+function imgDailyLimit() {
+  const n = parseInt(getSetting('ai.img_daily_limit') || '', 10);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_IMG_DAILY_LIMIT;
+}
+/* server-local calendar day as YYYY-MM-DD */
+function todayStamp(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+/* Roll the counter to today if it's stale, persisting the reset. Returns the fresh
+   { used, resetDay } for the account id. Cheap enough to call on every read. */
+function imgRollover(acctId) {
+  const row = sysStmt.getAcct.get(acctId);
+  if (!row) return { used: 0, resetDay: todayStamp() };
+  const today = todayStamp();
+  if (row.img_reset !== today) {
+    sys.prepare('UPDATE accounts SET img_used = 0, img_reset = ? WHERE id = ?').run(today, acctId);
+    return { used: 0, resetDay: today };
+  }
+  return { used: row.img_used || 0, resetDay: today };
+}
+/* The public token status for an account (what the clients display + gate on). */
+function imgTokens(account) {
+  if (account.is_admin) {
+    return { unlimited: true, limit: null, used: 0, remaining: null, resets: todayStamp() };
+  }
+  const limit = imgDailyLimit();
+  const { used } = imgRollover(account.id);
+  return { unlimited: false, limit, used, remaining: Math.max(0, limit - used), resets: todayStamp() };
+}
+/* Try to spend `cost` tokens atomically. Admins always succeed (no debit). Returns
+   true if debited (or unlimited), false if the day's allowance can't cover it. The
+   UPDATE's WHERE guards against a race (two jobs spending the last token at once). */
+function imgSpend(account, cost) {
+  if (account.is_admin) return true;
+  imgRollover(account.id);   // ensure today's row before we debit
+  const limit = imgDailyLimit();
+  const r = sys.prepare('UPDATE accounts SET img_used = img_used + @cost WHERE id = @id AND img_used + @cost <= @limit')
+    .run({ cost, id: account.id, limit });
+  return r.changes > 0;
+}
+/* Give tokens back (a job failed after debiting). Never goes below 0. Admins no-op. */
+function imgRefund(account, cost) {
+  if (account.is_admin) return;
+  sys.prepare('UPDATE accounts SET img_used = MAX(0, img_used - @cost) WHERE id = @id')
+    .run({ cost, id: account.id });
+}
+
 const sysStmt = {
   getAcct: sys.prepare('SELECT * FROM accounts WHERE id = ?'),
   getAcctByName: sys.prepare('SELECT * FROM accounts WHERE username = ? COLLATE NOCASE'),
@@ -1027,6 +1090,9 @@ function acctToApi(a) {
     // every client knows to raise the agreement before the next upload.
     tos_version: tosVersion(),
     tos_accepted: tosAccepted(a),
+    // AI Image Editing daily allowance ({ unlimited, limit, used, remaining, resets }).
+    // Drives the token display + which quality options a client may offer.
+    img_edit: imgTokens(a),
     prefs,
   };
 }
@@ -1059,6 +1125,9 @@ const UPDATE_COLUMNS = {
     'size = @size', 'date = @date',
     'artist = @artist', 'album = @album', 'hasCover = 1', 'coverExt = @coverExt',
     'kv = @kv',
+    // a content edit on a blob-backed row drops the blob (see PATCH handler):
+    // the edited body now lives in `content`, so hasBlob/hasPoster flip to 0.
+    'hasBlob = @hasBlob', 'hasPoster = @hasPoster',
   ]),
 };
 function buildSetClause(table, fields) {
@@ -4861,7 +4930,16 @@ app.patch('/api/files/:id', (req, res) => {
   if (b.content !== undefined) {
     set('content', b.content == null ? null : vault.encText(String(b.content), store.keys));
     set('fp', null);
-    if (!row.hasBlob && store.keys.v2) set('kv', 2);   // full rewrite of a content-backed doc = upgrade
+    // If this row was blob-backed (e.g. an uploaded text file, or one previously
+    // written via /replace), the edited body now lives in the `content` column —
+    // so drop the blob. Otherwise rowToApi still advertises a /raw url and the
+    // client reads the STALE blob on reopen, silently discarding the edit.
+    if (row.hasBlob) {
+      set('hasBlob', 0);
+      set('hasPoster', 0);
+      try { fs.unlinkSync(store.blobPath(row)); } catch (e) {}
+    }
+    if (store.keys.v2) set('kv', 2);   // full rewrite of the doc's bytes = upgrade
   }
   if (b.locked !== undefined) set('locked', b.locked ? 1 : 0);
   if (b.lockSpec !== undefined) set('lockSpec', b.lockSpec == null ? null : vault.encText(String(b.lockSpec), store.keys));
@@ -6360,12 +6438,17 @@ app.get('/api/ai/config', requireAdmin, (req, res) => {
     localEngine: localAI.engineAvailable(), modelsDir: localAI.getModelsDir(),
     serverModels: localAI.listServerModels().map(m => ({ name: m.name, file: m.file, size: m.size })),
     thermal: localAI.thermalState(),    // live temp + thresholds for the admin readout
+    imgDailyLimit: imgDailyLimit(),     // per-account AI Image Edit tokens/day (admins unlimited)
   });
 });
 app.put('/api/ai/config', requireAdmin, (req, res) => {
   const b = req.body || {};
   if (b.xaiKey !== undefined) setSecret('ai.xai_key', b.xaiKey.trim());
   if (b.workerUrl !== undefined) setSetting('ai.worker_url', String(b.workerUrl).trim().replace(/\/+$/, ''));
+  if (b.imgDailyLimit !== undefined) {
+    const n = parseInt(b.imgDailyLimit, 10);
+    if (Number.isFinite(n) && n >= 0 && n <= 1000) setSetting('ai.img_daily_limit', String(n));
+  }
   if (b.modelsDir !== undefined) {
     const dir = String(b.modelsDir || '').trim();
     setSetting('ai.models_dir', dir);
@@ -6386,6 +6469,7 @@ app.put('/api/ai/config', requireAdmin, (req, res) => {
     ok: true, xaiKeySet: !!c.xaiKey, workerUrl: c.workerUrl,
     localEngine: localAI.engineAvailable(), modelsDir: localAI.getModelsDir(),
     thermal: localAI.thermalState(),
+    imgDailyLimit: imgDailyLimit(),
   });
 });
 
@@ -6516,6 +6600,179 @@ app.post('/api/ai/chat', async (req, res) => {
     if (!closed) { try { res.end(); } catch (e) {} }
   }
 });
+
+/* ============================================================
+   AI IMAGE EDITING — xAI Grok Imagine (POST /api/ai/image/edit)
+   ------------------------------------------------------------
+   A user picks a vault image + a text prompt; xAI returns an edited image which
+   we save as a NEW file beside the original. Two qualities: 'default' uses
+   grok-imagine-image (1 token) and 'premium' uses grok-imagine-image-quality
+   (2 tokens). Tokens are the per-day allowance (see imgTokens/imgSpend).
+
+   IMPORTANT — jobs are DETACHED from the HTTP request. /edit debits the tokens,
+   kicks off runImageJob(), and returns a jobId immediately. The job then runs to
+   completion on the server EVEN IF the client disconnects: it calls xAI, downloads
+   the result, and saves it into the vault on its own. Clients learn the outcome by
+   polling /job/:id. On any failure the tokens are refunded. This is exactly the
+   "always finishes even if the device drops off" guarantee. */
+const XAI_IMG_MODEL = { default: 'grok-imagine-image', premium: 'grok-imagine-image-quality' };
+const IMG_MAX_SRC_BYTES = 20 * 1024 * 1024;      // xAI accepts source images up to 20 MiB
+const IMG_PROMPT_MAX = 1000;
+const IMG_JOB_TTL_MS = 30 * 60 * 1000;           // keep finished jobs pollable for 30 min
+const imgJobs = new Map();                        // jobId -> { status, accountId, ... }
+const _imgJobsByAcct = new Map();                 // accountId -> count of active jobs
+const IMG_MAX_PER_ACCT = 2;
+
+function newImgJob(accountId, meta) {
+  const id = 'img' + crypto.randomBytes(8).toString('hex');
+  imgJobs.set(id, { id, accountId, status: 'running', phase: 'starting', error: null, file: null, created: Date.now(), ...meta });
+  _imgJobsByAcct.set(accountId, (_imgJobsByAcct.get(accountId) || 0) + 1);
+  return id;
+}
+function imgJobDone(id, patch) {
+  const j = imgJobs.get(id); if (!j) return;
+  Object.assign(j, patch, { finished: Date.now() });
+  const n = (_imgJobsByAcct.get(j.accountId) || 1) - 1;
+  if (n <= 0) _imgJobsByAcct.delete(j.accountId); else _imgJobsByAcct.set(j.accountId, n);
+  // sweep old finished jobs so the map doesn't grow forever
+  const cutoff = Date.now() - IMG_JOB_TTL_MS;
+  for (const [k, v] of imgJobs) if (v.finished && v.finished < cutoff) imgJobs.delete(k);
+}
+function imgJobToApi(j) {
+  return { id: j.id, status: j.status, phase: j.phase, error: j.error,
+           file: j.file || null, quality: j.quality, cost: j.cost };
+}
+
+/* base64 data URI for a plaintext image file (source for the xAI edit). */
+async function fileToDataUri(plainPath, ext) {
+  const buf = await fsp.readFile(plainPath);
+  const mime = ext === 'png' ? 'image/png' : (ext === 'webp' ? 'image/webp' : 'image/jpeg');
+  return `data:${mime};base64,${buf.toString('base64')}`;
+}
+
+/* The detached worker. `account` is a plain snapshot; token bookkeeping goes through
+   the live SYSTEM row via imgSpend/imgRefund so it's authoritative regardless of it. */
+async function runImageJob(jobId, { account, store, row, quality, prompt, cost, srcExt }) {
+  const cfg = aiConfig();
+  const jobDir = path.join(TOOLS_DIR, 'img' + crypto.randomBytes(6).toString('hex'));
+  const cleanup = () => { try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch (e) {} };
+  const fail = (msg) => { imgRefund(account, cost); cleanup(); imgJobDone(jobId, { status: 'error', phase: 'error', error: msg }); };
+  try {
+    if (!cfg.xaiKey) return fail('xAI is not configured');
+    await fsp.mkdir(jobDir, { recursive: true });
+
+    // 1) decrypt the source image to a temp file, then encode as a data URI
+    { const j = imgJobs.get(jobId); if (j) j.phase = 'reading'; }
+    const srcPath = path.join(jobDir, 'src.' + srcExt);
+    await decryptBlobToFile(store.blobPath(row), store.keys, srcPath);
+    let srcSize = 0; try { srcSize = (await fsp.stat(srcPath)).size; } catch (e) {}
+    if (srcSize > IMG_MAX_SRC_BYTES) return fail('image is larger than 20 MB — xAI can\'t edit it');
+    const dataUri = await fileToDataUri(srcPath, srcExt);
+
+    // 2) call xAI Grok Imagine image-edit
+    imgJobs.get(jobId).phase = 'editing';
+    const r = await fetch('https://api.x.ai/v1/images/edits', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${cfg.xaiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: XAI_IMG_MODEL[quality],
+        prompt,
+        image: { type: 'image_url', url: dataUri },
+      }),
+      signal: AbortSignal.timeout(180000),
+    });
+    if (!r.ok) return fail(`xAI ${r.status}: ${(await r.text().catch(() => '')).slice(0, 200)}`);
+    const out = await r.json().catch(() => null);
+    const first = out && Array.isArray(out.data) && out.data[0];
+    if (!first) return fail('xAI returned no image');
+
+    // 3) fetch the edited image bytes (url) or decode inline base64 (b64_json)
+    imgJobs.get(jobId).phase = 'saving';
+    let outExt = 'png', outPath = path.join(jobDir, 'out.png');
+    if (first.b64_json) {
+      await fsp.writeFile(outPath, Buffer.from(first.b64_json, 'base64'));
+    } else if (first.url) {
+      const ir = await fetch(first.url, { signal: AbortSignal.timeout(120000) });
+      if (!ir.ok) return fail('could not download the edited image');
+      const ct = (ir.headers.get('content-type') || '').toLowerCase();
+      outExt = ct.includes('jpeg') || ct.includes('jpg') ? 'jpg' : ct.includes('webp') ? 'webp' : 'png';
+      outPath = path.join(jobDir, 'out.' + outExt);
+      await fsp.writeFile(outPath, Buffer.from(await ir.arrayBuffer()));
+    } else {
+      return fail('xAI returned an unusable image');
+    }
+    const outSize = (await fsp.stat(outPath)).size;
+
+    // 4) quota check, then encrypt + insert a new vault row beside the original
+    const quota = account.quota_bytes;
+    if (store.usedBytes() + outSize > quota) return fail('storage limit reached — free up space and try again');
+    const id = uid();
+    await vault.encryptBlob(outPath, store.blobPath({ id }), store.keys);
+    const base = (store.decName(row).replace(/\.[^.]+$/, '') || 'image') + ' (AI edit)';
+    const newName = dedupeName(base + '.' + outExt, store, row.parent ?? null);
+    store.insertRow({ id, name: newName, type: 'image', parent: row.parent ?? null,
+                      size: outSize, date: Date.now(), hasBlob: 1, storedExt: outExt });
+    store.bump();
+    invalidatePollCache(account.id);
+    cleanup();
+    imgJobDone(jobId, { status: 'done', phase: 'done', file: rowToApi(store.getById(id), store) });
+  } catch (e) {
+    fail((e && (e.name === 'TimeoutError' ? 'xAI timed out' : e.message)) || 'image edit failed');
+  }
+}
+
+/* Kick off an edit. Validates the image + quality + prompt + token budget, debits the
+   tokens, starts the detached job, and returns { jobId } right away. */
+app.post('/api/ai/image/edit', (req, res) => {
+  if (!requireAi(req, res)) return;
+  const b = req.body || {};
+  const store = req.store;
+  const row = store.getById(String(b.fileId || ''));
+  if (!row || row.type === 'folder') return res.status(404).json({ error: 'pick an image from your vault' });
+  if (row.type !== 'image') return res.status(400).json({ error: 'AI Edit only works on images' });
+  if (!row.hasBlob) return res.status(400).json({ error: 'this file has no image data' });
+  if (row.locked) return res.status(409).json({ error: 'unlock this image before editing it' });
+  // xAI only accepts PNG/JPEG source images.
+  const srcExt = String((store.decName(row).match(/\.([^.]+)$/) || [])[1] || row.storedExt || '').toLowerCase();
+  if (!['png', 'jpg', 'jpeg'].includes(srcExt)) {
+    return res.status(400).json({ error: 'AI Edit needs a PNG or JPEG image' });
+  }
+  if (legacyGate(req, res, row)) return;               // reads + rewrites bytes → Legacy rows upgrade first
+  if (!tosAccepted(req.account)) {
+    return res.status(451).json({ error: 'You must accept the Terms of Service before saving to your vault.', code: 'TOS', version: tosVersion() });
+  }
+  if (!aiConfig().xaiKey) return res.status(503).json({ error: 'AI image editing is not configured on this server' });
+
+  const quality = b.quality === 'premium' ? 'premium' : 'default';
+  const cost = IMG_EDIT_COST[quality];
+  const prompt = String(b.prompt || '').trim().slice(0, IMG_PROMPT_MAX);
+  if (!prompt) return res.status(400).json({ error: 'describe the edit you want' });
+
+  if ((_imgJobsByAcct.get(req.accountId) || 0) >= IMG_MAX_PER_ACCT) {
+    return res.status(429).json({ error: 'you already have an image edit running' });
+  }
+  // debit up-front (atomic); refunded by runImageJob on any failure
+  if (!imgSpend(req.account, cost)) {
+    const t = imgTokens(req.account);
+    return res.status(402).json({ error: `not enough image-edit tokens (${t.remaining} left today)`, code: 'IMG_TOKENS', tokens: t });
+  }
+
+  const jobId = newImgJob(req.accountId, { quality, cost });
+  // snapshot what the detached worker needs (it must not touch req after we respond)
+  const snap = { account: req.account, store, row, quality, prompt, cost, srcExt };
+  runImageJob(jobId, snap);   // fire-and-forget; runs to completion regardless of this response
+  res.json({ ok: true, jobId, quality, cost, tokens: imgTokens(req.account) });
+});
+
+/* Poll one image-edit job. Returns its status and, when done, the saved file. */
+app.get('/api/ai/image/job/:id', (req, res) => {
+  const j = imgJobs.get(req.params.id);
+  if (!j || j.accountId !== req.accountId) return res.status(404).json({ error: 'no such job' });
+  res.json({ ...imgJobToApi(j), tokens: imgTokens(req.account) });
+});
+
+/* Lightweight token-status endpoint (clients refresh the counter without a full /me). */
+app.get('/api/ai/image/tokens', (req, res) => res.json(imgTokens(req.account)));
 
 /* Local AI engine status — which models exist (server folder + this account's
    .gguf files) and which are currently resident in memory. Used by the Local tab. */

@@ -19,6 +19,7 @@ struct FolderView: View {
     @State private var renameText = ""
     @State private var moveTarget: FileItem?
     @State private var convertTarget: FileItem?
+    @State private var aiEditTarget: FileItem?
     // fullscreen media gallery: non-nil items = presented, starting at galleryIndex
     @State private var galleryItems: [FileItem]?
     @State private var galleryIndex = 0
@@ -57,6 +58,9 @@ struct FolderView: View {
         }
         .sheet(item: $convertTarget) { target in
             ConvertSheet(item: target)
+        }
+        .sheet(item: $aiEditTarget) { target in
+            AIEditSheet(item: target)
         }
         .fullScreenCover(isPresented: Binding(get: { galleryItems != nil },
                                               set: { if !$0 { galleryItems = nil } })) {
@@ -272,6 +276,9 @@ struct FolderView: View {
             Button { downloadAndShare(item) } label: { Label("Save / Share…", systemImage: "square.and.arrow.up") }
             if ConvertKit.canConvert(item) {
                 Button { convertTarget = item } label: { Label("Convert…", systemImage: "arrow.triangle.2.circlepath") }
+            }
+            if AIEditKit.canEdit(item, account: store.account) {
+                Button { aiEditTarget = item } label: { Label("AI Edit…", systemImage: "wand.and.stars") }
             }
         }
         Divider()
