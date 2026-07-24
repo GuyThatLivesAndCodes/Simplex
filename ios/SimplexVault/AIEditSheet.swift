@@ -65,6 +65,7 @@ struct AIEditSheet: View {
     @State private var savedFile: FileItem?
     @State private var showConfetti = false
     @State private var wasBackgrounded = false
+    @FocusState private var promptFocused: Bool
 
     private var tokens: ImgEditTokens { store.account?.img_edit ?? ImgEditTokens() }
     private var cost: Int { quality == "premium" ? 2 : 1 }
@@ -166,8 +167,10 @@ struct AIEditSheet: View {
             }
             VStack(alignment: .leading, spacing: 8) {
                 Text("DESCRIBE THE EDIT").font(SimplexTheme.mono(10)).foregroundStyle(SimplexTheme.subtle)
-                TextField("e.g. make it night-time with neon lighting", text: $prompt, axis: .vertical)
-                    .lineLimit(2...4)
+                TextField("e.g. make it night-time with neon lighting", text: $prompt)
+                    .submitLabel(.done)
+                    .onSubmit { promptFocused = false }
+                    .focused($promptFocused)
                     .padding(10)
                     .background(SimplexTheme.surface2, in: RoundedRectangle(cornerRadius: 10))
                     .foregroundStyle(SimplexTheme.text)
