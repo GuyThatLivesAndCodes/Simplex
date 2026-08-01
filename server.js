@@ -897,6 +897,99 @@ const musicSys = {
   jmAllJamIds: sys.prepare('SELECT DISTINCT jam_id FROM music_jam_members'),
 };
 
+/* ---------- Photos app: shared albums (system DB) ----------
+   Photos is a picture-only space built around ALBUMS you share with specific people
+   — the "one shared album for the whole family" case. It deliberately differs from
+   Music, which is one global library everyone sees: a photo belongs to an album, and
+   an album is visible only to its owner and the members invited to it.
+
+   Like Music, adding a vault image COPIES its bytes (decrypted from the owner's vault,
+   re-encrypted into a dedicated `__photos__` blob store — see `photosStore`). The copy
+   is independent of the source: deleting the original from the vault leaves the shared
+   photo untouched. Dedup is PER ALBUM (sha-256 of the plaintext), so adding the same
+   picture twice to one album reuses the single stored copy instead of duplicating it —
+   but two albums each keep their own copy, since deleting one album must never pull
+   photos out from under another.
+
+     photos_albums        — an album; `cover_photo_id` is the tile image.
+     photos_album_members — who an album is shared with, and at what role
+                            ('viewer' can look, 'contributor' can add/remove their own).
+     photos_items         — the photos themselves (metadata; bytes live in photosStore).
+     photos_comments      — per-photo comments, the "talk about this picture" layer. */
+sys.exec(`
+CREATE TABLE IF NOT EXISTS photos_albums (
+  id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, owner_name TEXT NOT NULL,
+  name TEXT NOT NULL, note TEXT, cover_photo_id TEXT,
+  created INTEGER NOT NULL, updated INTEGER NOT NULL );
+CREATE INDEX IF NOT EXISTS idx_photos_alb_owner ON photos_albums(owner_id);
+
+CREATE TABLE IF NOT EXISTS photos_album_members (
+  album_id TEXT NOT NULL, account_id TEXT NOT NULL, name TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'contributor', added INTEGER NOT NULL,
+  PRIMARY KEY (album_id, account_id) );
+CREATE INDEX IF NOT EXISTS idx_photos_am_acct ON photos_album_members(account_id);
+
+CREATE TABLE IF NOT EXISTS photos_items (
+  id TEXT PRIMARY KEY, album_id TEXT NOT NULL,
+  owner_id TEXT NOT NULL, owner_name TEXT NOT NULL,
+  caption TEXT, w INTEGER, h INTEGER,
+  size INTEGER NOT NULL, ext TEXT NOT NULL, hash TEXT NOT NULL,
+  taken INTEGER, pos INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL );
+CREATE INDEX IF NOT EXISTS idx_photos_item_album ON photos_items(album_id, pos, created);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_photos_item_hash ON photos_items(album_id, hash);
+
+CREATE TABLE IF NOT EXISTS photos_comments (
+  id TEXT PRIMARY KEY, photo_id TEXT NOT NULL,
+  author_id TEXT NOT NULL, author_name TEXT NOT NULL,
+  text TEXT NOT NULL, created INTEGER NOT NULL );
+CREATE INDEX IF NOT EXISTS idx_photos_cm_photo ON photos_comments(photo_id, created);
+`);
+const photosSys = {
+  albIns: sys.prepare(`INSERT INTO photos_albums (id,owner_id,owner_name,name,note,cover_photo_id,created,updated)
+                       VALUES (@id,@owner_id,@owner_name,@name,@note,NULL,@created,@updated)`),
+  albGet: sys.prepare('SELECT * FROM photos_albums WHERE id = ?'),
+  // albums you own or were invited to (admins additionally see all via albListAll)
+  albListMine: sys.prepare(`SELECT a.* FROM photos_albums a
+                            WHERE a.owner_id = @me
+                               OR EXISTS (SELECT 1 FROM photos_album_members m WHERE m.album_id = a.id AND m.account_id = @me)
+                            ORDER BY a.updated DESC`),
+  albListAll: sys.prepare('SELECT * FROM photos_albums ORDER BY updated DESC'),
+  albUpd: sys.prepare('UPDATE photos_albums SET name=@name, note=@note, updated=@updated WHERE id=@id'),
+  albSetCover: sys.prepare('UPDATE photos_albums SET cover_photo_id=@cover_photo_id, updated=@updated WHERE id=@id'),
+  albTouch: sys.prepare('UPDATE photos_albums SET updated=@updated WHERE id=@id'),
+  albDel: sys.prepare('DELETE FROM photos_albums WHERE id = ?'),
+
+  amIns: sys.prepare(`INSERT INTO photos_album_members (album_id,account_id,name,role,added)
+                      VALUES (@album_id,@account_id,@name,@role,@added)
+                      ON CONFLICT(album_id,account_id) DO UPDATE SET role=@role, name=@name`),
+  amGet: sys.prepare('SELECT * FROM photos_album_members WHERE album_id = ? AND account_id = ?'),
+  amList: sys.prepare('SELECT * FROM photos_album_members WHERE album_id = ? ORDER BY added'),
+  amDel: sys.prepare('DELETE FROM photos_album_members WHERE album_id = ? AND account_id = ?'),
+  amDelAll: sys.prepare('DELETE FROM photos_album_members WHERE album_id = ?'),
+
+  itemIns: sys.prepare(`INSERT INTO photos_items (id,album_id,owner_id,owner_name,caption,w,h,size,ext,hash,taken,pos,created)
+                        VALUES (@id,@album_id,@owner_id,@owner_name,@caption,@w,@h,@size,@ext,@hash,@taken,@pos,@created)`),
+  itemGet: sys.prepare('SELECT * FROM photos_items WHERE id = ?'),
+  itemByHash: sys.prepare('SELECT * FROM photos_items WHERE album_id = ? AND hash = ?'),
+  itemList: sys.prepare('SELECT * FROM photos_items WHERE album_id = ? ORDER BY pos, created DESC'),
+  itemCount: sys.prepare('SELECT COUNT(*) AS n FROM photos_items WHERE album_id = ?'),
+  itemFirst: sys.prepare('SELECT * FROM photos_items WHERE album_id = ? ORDER BY pos, created DESC LIMIT 1'),
+  itemIdsForAlbum: sys.prepare('SELECT id FROM photos_items WHERE album_id = ?'),
+  itemMaxPos: sys.prepare('SELECT COALESCE(MAX(pos), -1) AS m FROM photos_items WHERE album_id = ?'),
+  itemSetCaption: sys.prepare('UPDATE photos_items SET caption = @caption WHERE id = @id'),
+  itemSetPos: sys.prepare('UPDATE photos_items SET pos = @pos WHERE id = @id'),
+  itemDel: sys.prepare('DELETE FROM photos_items WHERE id = ?'),
+  itemDelAlbum: sys.prepare('DELETE FROM photos_items WHERE album_id = ?'),
+
+  cmIns: sys.prepare(`INSERT INTO photos_comments (id,photo_id,author_id,author_name,text,created)
+                      VALUES (@id,@photo_id,@author_id,@author_name,@text,@created)`),
+  cmGet: sys.prepare('SELECT * FROM photos_comments WHERE id = ?'),
+  cmList: sys.prepare('SELECT * FROM photos_comments WHERE photo_id = ? ORDER BY created'),
+  cmCountFor: sys.prepare('SELECT photo_id, COUNT(*) AS n FROM photos_comments WHERE photo_id IN (SELECT id FROM photos_items WHERE album_id = ?) GROUP BY photo_id'),
+  cmDel: sys.prepare('DELETE FROM photos_comments WHERE id = ?'),
+  cmDelForPhoto: sys.prepare('DELETE FROM photos_comments WHERE photo_id = ?'),
+};
+
 /* ---------- Bug Reports (system DB) ----------
    A single global inbox any part of the system can write to. Two sources feed it:
      - a signed-in member, via the Bug Reports app (source='user'); and
@@ -1704,6 +1797,13 @@ function dropStore(accountId) {
    keys can read. We use only its blobPath/coverPath/tmpDir/keys helpers; track metadata
    lives in the system DB (music_tracks). Created once, here, after openStore is defined. */
 const musicStore = openStore('__music__');
+
+/* Photos app blob store — same idea as musicStore: a dedicated pseudo-account whose
+   keyset encrypts every SHARED photo, so an album stays readable to everyone invited
+   to it without depending on the uploader's vault. Metadata lives in the system DB
+   (photos_items). Full-size bytes go in blobPath; the grid thumbnail is cached in the
+   store's coverSmPath slot (generated once with ffmpeg, encrypted at rest). */
+const photosStore = openStore('__photos__');
 
 /* row (DB shape) -> API shape: decrypt text, add urls, strip internals.
    includeContent=false (the default for LIST views) drops the heavy document body
@@ -8104,6 +8204,1038 @@ app.post('/api/music/jam/:id/control', requireAuth, (req, res) => {
 
   jamSaveState(jam.id, st);
   res.json(jamPayload(musicSys.jamGet.get(jam.id), st));
+});
+
+/* ============================================================
+   PHOTOS
+
+   A picture-only app built around SHARED ALBUMS. Where Music is one global library,
+   an album here is private by default and visible only to its owner plus the people
+   invited to it — so a family can keep one album everybody adds to, and nobody else
+   on the server sees it.
+
+   Adding a vault image COPIES its bytes into photosStore (re-encrypted with the
+   __photos__ keyset), exactly like the Music copy-on-add: the shared album never
+   depends on the uploader's vault, and deleting the original leaves the album intact.
+   See the photos_* tables + `photosStore` near the top of this file.
+
+   Roles: the OWNER manages the album (rename, invite, delete, set cover, remove any
+   photo). A 'contributor' adds photos and manages the ones they added. A 'viewer'
+   only looks and comments. Admins can see and manage everything.
+   ============================================================ */
+
+const PHOTO_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif', 'bmp', 'tif', 'tiff', 'exr', 'avif']);
+/* formats a browser can't (reliably) display itself — served as a rendered preview
+   instead of the original bytes, the same rule the vault viewer uses. */
+const PHOTO_RENDER_EXTS = new Set(['heic', 'heif', 'tif', 'tiff', 'exr']);
+const PHOTO_THUMB_W = 480;   // grid thumbnail width; the lightbox loads the full image
+
+function photoToApi(p, extra) {
+  if (!p) return null;
+  const out = {
+    id: p.id, albumId: p.album_id, type: 'image',
+    caption: p.caption || '', w: p.w || null, h: p.h || null,
+    size: p.size || 0, ext: p.ext || '',
+    ownerId: p.owner_id, ownerName: p.owner_name,
+    taken: p.taken || null, created: p.created,
+    url: `/api/photos/items/${p.id}/raw`,
+    thumbUrl: `/api/photos/items/${p.id}/raw?thumb=1`,
+  };
+  if (extra && extra.comments != null) out.comments = extra.comments;
+  return out;
+}
+function photosAlbumToApi(a, req, opts) {
+  const members = photosSys.amList.all(a.id).map(m => ({ id: m.account_id, name: m.name, role: m.role, added: m.added }));
+  const cover = a.cover_photo_id ? photosSys.itemGet.get(a.cover_photo_id) : null;
+  const coverPhoto = (cover && cover.album_id === a.id) ? cover : photosSys.itemFirst.get(a.id);
+  return {
+    id: a.id, name: a.name, note: a.note || '',
+    ownerId: a.owner_id, ownerName: a.owner_name,
+    created: a.created, updated: a.updated,
+    count: (opts && opts.count != null) ? opts.count : photosSys.itemCount.get(a.id).n,
+    members,
+    coverUrl: coverPhoto ? `/api/photos/items/${coverPhoto.id}/raw?thumb=1` : null,
+    role: photosRole(req, a),
+    canManage: photosCanManage(req, a),   // owner/admin: rename, invite, delete, set cover
+    canAdd: photosCanAdd(req, a),         // + contributors: add photos
+  };
+}
+/* the caller's role in an album: 'owner' | 'contributor' | 'viewer' | null (no access).
+   Admins get 'owner' powers without being listed as members. */
+function photosRole(req, a) {
+  if (!a) return null;
+  if (a.owner_id === req.accountId) return 'owner';
+  if (req.account && req.account.is_admin) return 'owner';
+  const m = photosSys.amGet.get(a.id, req.accountId);
+  return m ? (m.role === 'viewer' ? 'viewer' : 'contributor') : null;
+}
+function photosCanSee(req, a) { return photosRole(req, a) != null; }
+function photosCanManage(req, a) { return photosRole(req, a) === 'owner'; }
+function photosCanAdd(req, a) { const r = photosRole(req, a); return r === 'owner' || r === 'contributor'; }
+/* a photo you may delete: the album owner/admin, or the person who added it. */
+function photosCanDeleteItem(req, a, p) { return photosCanManage(req, a) || p.owner_id === req.accountId; }
+
+/* resolve an album the caller may see, else null (404 — we don't reveal existence). */
+function photosVisibleAlbum(req, id) {
+  const a = photosSys.albGet.get(String(id || ''));
+  return (a && photosCanSee(req, a)) ? a : null;
+}
+/* delete a photo's stored bytes + thumbnail + comments. Metadata row is the caller's job. */
+function photosPurgeItemFiles(id) {
+  try { fs.unlinkSync(photosStore.blobPath({ id })); } catch (e) {}
+  try { fs.unlinkSync(photosStore.coverSmPath({ id })); } catch (e) {}
+}
+
+/* ---- albums the caller can see ---- */
+app.get('/api/photos/albums', requireAuth, (req, res) => {
+  const rows = (req.account.is_admin ? photosSys.albListAll.all() : photosSys.albListMine.all({ me: req.accountId }));
+  res.json({ albums: rows.map(a => photosAlbumToApi(a, req)) });
+});
+
+/* ---- create an album (you're the owner; invite people after) ---- */
+app.post('/api/photos/albums', requireAuth, (req, res) => {
+  const b = req.body || {};
+  const name = clip(b.name, 120).trim();
+  if (!name) return res.status(400).json({ error: 'name required' });
+  const now = Date.now(), id = uid();
+  photosSys.albIns.run({
+    id, owner_id: req.accountId, owner_name: clip(req.account.display || req.account.username, 80),
+    name, note: clip(b.note, 500) || null, created: now, updated: now,
+  });
+  // invite anyone passed at creation time, so "make an album for the family" is one step
+  const invited = Array.isArray(b.memberIds) ? b.memberIds.slice(0, 100) : [];
+  for (const mid of invited) {
+    if (mid === req.accountId) continue;
+    const acct = sysStmt.getAcct.get(String(mid));
+    if (!acct) continue;
+    photosSys.amIns.run({
+      album_id: id, account_id: acct.id, name: clip(acct.display || acct.username, 80),
+      role: b.memberRole === 'viewer' ? 'viewer' : 'contributor', added: now,
+    });
+  }
+  res.json({ album: photosAlbumToApi(photosSys.albGet.get(id), req) });
+});
+
+/* ---- one album + its photos (in stored order) ---- */
+app.get('/api/photos/albums/:id', requireAuth, (req, res) => {
+  const a = photosVisibleAlbum(req, req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  const counts = new Map(photosSys.cmCountFor.all(a.id).map(r => [r.photo_id, r.n]));
+  const photos = photosSys.itemList.all(a.id).map(p => photoToApi(p, { comments: counts.get(p.id) || 0 }));
+  const out = photosAlbumToApi(a, req, { count: photos.length });
+  out.photos = photos;
+  out.totalSize = photos.reduce((s, p) => s + (p.size || 0), 0);
+  // who has contributed, for the album header ("Emma + 3 others")
+  const by = new Map();
+  for (const p of photos) by.set(p.ownerId, (by.get(p.ownerId) || 0) + 1);
+  out.contributors = [...by.entries()].map(([id2, n]) => {
+    const m = photos.find(p => p.ownerId === id2);
+    return { id: id2, name: m ? m.ownerName : 'Unknown', count: n };
+  }).sort((x, y) => y.count - x.count);
+  res.json(out);
+});
+
+/* ---- rename / re-note an album (owner or admin) ---- */
+app.patch('/api/photos/albums/:id', requireAuth, (req, res) => {
+  const a = photosSys.albGet.get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  if (!photosCanManage(req, a)) return res.status(403).json({ error: 'only the album owner can change this' });
+  const b = req.body || {};
+  const name = b.name !== undefined ? clip(b.name, 120).trim() : a.name;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  photosSys.albUpd.run({ id: a.id, name, note: b.note !== undefined ? (clip(b.note, 500) || null) : a.note, updated: Date.now() });
+  if (b.coverPhotoId !== undefined) {
+    const p = b.coverPhotoId ? photosSys.itemGet.get(String(b.coverPhotoId)) : null;
+    if (b.coverPhotoId && (!p || p.album_id !== a.id)) return res.status(400).json({ error: 'that photo is not in this album' });
+    photosSys.albSetCover.run({ id: a.id, cover_photo_id: p ? p.id : null, updated: Date.now() });
+  }
+  res.json({ album: photosAlbumToApi(photosSys.albGet.get(a.id), req) });
+});
+
+/* ---- delete an album AND every photo in it (owner or admin) ---- */
+app.delete('/api/photos/albums/:id', requireAuth, (req, res) => {
+  const a = photosSys.albGet.get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  if (!photosCanManage(req, a)) return res.status(403).json({ error: 'only the album owner can delete it' });
+  for (const row of photosSys.itemIdsForAlbum.all(a.id)) {
+    photosSys.cmDelForPhoto.run(row.id);
+    photosPurgeItemFiles(row.id);
+  }
+  photosSys.itemDelAlbum.run(a.id);
+  photosSys.amDelAll.run(a.id);
+  photosSys.albDel.run(a.id);
+  res.json({ ok: true });
+});
+
+/* ---- who the album is shared with (owner/admin sets the list) ----
+   Body { members: [{ id, role }] }. The owner is implicit and never listed. */
+app.put('/api/photos/albums/:id/members', requireAuth, (req, res) => {
+  const a = photosSys.albGet.get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  if (!photosCanManage(req, a)) return res.status(403).json({ error: 'only the album owner can share it' });
+  const list = Array.isArray((req.body || {}).members) ? (req.body || {}).members.slice(0, 200) : [];
+  const now = Date.now();
+  const keep = new Set();
+  for (const m of list) {
+    const acct = sysStmt.getAcct.get(String((m && m.id) || ''));
+    if (!acct || acct.id === a.owner_id) continue;
+    keep.add(acct.id);
+    photosSys.amIns.run({
+      album_id: a.id, account_id: acct.id, name: clip(acct.display || acct.username, 80),
+      role: (m && m.role === 'viewer') ? 'viewer' : 'contributor', added: now,
+    });
+  }
+  for (const cur of photosSys.amList.all(a.id)) if (!keep.has(cur.account_id)) photosSys.amDel.run(a.id, cur.account_id);
+  photosSys.albTouch.run({ id: a.id, updated: now });
+  res.json({ album: photosAlbumToApi(photosSys.albGet.get(a.id), req) });
+});
+
+/* ---- leave an album someone shared with you (not the owner — they delete instead) ---- */
+app.post('/api/photos/albums/:id/leave', requireAuth, (req, res) => {
+  const a = photosSys.albGet.get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  if (a.owner_id === req.accountId) return res.status(400).json({ error: "you own this album — delete it instead" });
+  photosSys.amDel.run(a.id, req.accountId);
+  res.json({ ok: true });
+});
+
+/* ---- members list (id + display name) so an owner can pick who to share with ----
+   Same shape/exposure as /api/music/members: display names only. */
+app.get('/api/photos/members', requireAuth, (req, res) => {
+  res.json({ members: sysStmt.listAccts.all().map(a => ({ id: a.id, name: a.display || a.username, isAdmin: !!a.is_admin })) });
+});
+
+/* ---- add a vault image to an album (the COPY flow) ----
+   Body { albumId, fileId }. Mirrors POST /api/music/tracks: decrypt+hash in one
+   streamed pass, dedup within the album, then re-encrypt into photosStore. */
+app.post('/api/photos/items', requireAuth, async (req, res) => {
+  const b = req.body || {};
+  const a = photosSys.albGet.get(String(b.albumId || ''));
+  if (!a || !photosCanSee(req, a)) return res.status(404).json({ error: 'album not found' });
+  if (!photosCanAdd(req, a)) return res.status(403).json({ error: 'you can only view this album' });
+
+  const store = req.store;
+  const row = store.getById(String(b.fileId || ''));
+  if (!row || row.trashed) return res.status(404).json({ error: 'file not found' });
+  if (row.type !== 'image') return res.status(400).json({ error: 'not an image' });
+  if (!row.hasBlob) return res.status(400).json({ error: 'file has no contents' });
+  // locked files carry a per-item passphrase key the backend doesn't hold — same
+  // exclusion as Music/the organizer.
+  if (row.locked) return res.status(400).json({ error: 'unlock this photo before adding it' });
+
+  const id = uid();
+  const tmp = path.join(photosStore.tmpDir, id + '.tmp');
+  try {
+    const hash = await decryptBlobToFileHashed(store.blobPath(row), store.keys, tmp);
+
+    // dedup WITHIN the album: the same picture added twice is one stored copy
+    const dup = photosSys.itemByHash.get(a.id, hash);
+    if (dup) { try { await fsp.unlink(tmp); } catch (e) {} return res.json({ duplicate: true, photo: photoToApi(dup) }); }
+
+    await vault.encryptBlob(tmp, photosStore.blobPath({ id }), photosStore.keys);
+
+    const name = store.decName(row);
+    const ext = (row.storedExt || path.extname(name).slice(1) || 'jpg').toLowerCase().replace(/^\./, '');
+    const now = Date.now();
+    photosSys.itemIns.run({
+      id, album_id: a.id,
+      owner_id: req.accountId, owner_name: clip(req.account.display || req.account.username, 80),
+      caption: clip(name.replace(/\.[^.]+$/, ''), 200) || null,
+      w: row.w != null ? Number(row.w) : null, h: row.h != null ? Number(row.h) : null,
+      size: row.size || 0, ext, hash,
+      taken: row.date != null ? Number(row.date) : null,
+      pos: photosSys.itemMaxPos.get(a.id).m + 1, created: now,
+    });
+    photosSys.albTouch.run({ id: a.id, updated: now });
+    // first photo in a fresh album becomes its cover
+    if (!a.cover_photo_id) photosSys.albSetCover.run({ id: a.id, cover_photo_id: id, updated: now });
+    res.json({ photo: photoToApi(photosSys.itemGet.get(id)) });
+  } catch (e) {
+    console.error('[simplex] photo add failed', e && (e.stack || e.message || e));
+    photosPurgeItemFiles(id);
+    res.status(500).json({ error: 'could not add this photo' });
+  } finally {
+    try { await fsp.unlink(tmp); } catch (e) {}
+  }
+});
+
+/* ---- grid thumbnails ----
+   The album grid loads every visible photo at once; full-size originals would be
+   megabytes each. `?thumb=1` serves a ~480px JPEG generated once with ffmpeg and
+   cached encrypted-at-rest (the store's coverSm slot), exactly like music covers /
+   video posters. Formats the browser can't decode (heic/tiff/exr) are ALWAYS served
+   through this path, since the original bytes would render as a broken image. */
+const _photoThumbInflight = new Map();   // photo id -> Promise (de-dupe concurrent requests)
+async function _generatePhotoThumb(p) {
+  if (!(await ffmpegAvailable())) return false;
+  const jobDir = path.join(TOOLS_DIR, 'ph' + crypto.randomBytes(6).toString('hex'));
+  const inP = path.join(jobDir, 'in.' + (String(p.ext || 'jpg').replace(/^\./, '') || 'jpg'));
+  const outP = path.join(jobDir, 'out.jpg');
+  try {
+    await fsp.mkdir(jobDir, { recursive: true });
+    await decryptBlobToFile(photosStore.blobPath({ id: p.id }), photosStore.keys, inP);
+    // downscale only (never upscale a small photo), keep aspect, even dims for jpeg
+    const args = ['-i', inP, '-frames:v', '1', '-vf', `scale='min(${PHOTO_THUMB_W},iw)':-2`, '-q:v', '5', '-y', outP];
+    const ok = await new Promise((resolve) => {
+      const child = spawn(FFMPEG, args, { windowsHide: true });
+      const timer = setTimeout(() => { try { killTree(child); } catch (e) {} resolve(false); }, 60_000);
+      child.on('error', () => { clearTimeout(timer); resolve(false); });
+      child.on('close', (code) => { clearTimeout(timer); resolve(code === 0); });
+    });
+    let stat = null; if (ok) { try { stat = await fsp.stat(outP); } catch (e) {} }
+    if (!stat || !stat.size) return false;
+    await vault.encryptBlob(outP, photosStore.coverSmPath({ id: p.id }), photosStore.keys);
+    return true;
+  } catch (e) {
+    console.warn('[simplex] photo thumbnail failed for', p.id, e && e.message);
+    return false;
+  } finally { try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch (e) {} }
+}
+
+/* ---- stream a photo (full size, or ?thumb=1) — any member of its album ---- */
+app.get('/api/photos/items/:id/raw', requireAuth, async (req, res) => {
+  const p = photosSys.itemGet.get(req.params.id);
+  if (!p) return res.status(404).end();
+  const a = photosSys.albGet.get(p.album_id);
+  if (!a || !photosCanSee(req, a)) return res.status(404).end();
+  // a photo's bytes never change after copy-on-add — let the browser keep them
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+
+  const wantThumb = req.query.thumb != null;
+  const mustRender = PHOTO_RENDER_EXTS.has(String(p.ext || '').toLowerCase());
+  if (wantThumb || mustRender) {
+    if (!fs.existsSync(photosStore.coverSmPath({ id: p.id }))) {
+      let job = _photoThumbInflight.get(p.id);
+      if (!job) {
+        // share the poster ffmpeg slots so total transcode pressure stays capped
+        // (queues, never rejects — an <img> can't retry a 503).
+        job = (async () => {
+          await _acquirePosterSlot();
+          try { return await _generatePhotoThumb(p); }
+          finally { _releasePosterSlot(); _photoThumbInflight.delete(p.id); }
+        })();
+        _photoThumbInflight.set(p.id, job);
+      }
+      await job;
+    }
+    if (res.writableEnded || res.destroyed) return;             // client navigated away
+    if (fs.existsSync(photosStore.coverSmPath({ id: p.id }))) {
+      return streamEncrypted(req, res, photosStore, { id: p.id, hasCoverSm: 1 }, 'coversm');
+    }
+    // ffmpeg missing/failed -> fall through to the original (degraded, not broken)
+  }
+  streamEncrypted(req, res, photosStore, { id: p.id, hasBlob: 1, storedExt: p.ext }, 'blob');
+});
+
+/* ---- caption a photo (whoever added it, or the album owner) ---- */
+app.patch('/api/photos/items/:id', requireAuth, (req, res) => {
+  const p = photosSys.itemGet.get(req.params.id);
+  if (!p) return res.status(404).json({ error: 'not found' });
+  const a = photosSys.albGet.get(p.album_id);
+  if (!a || !photosCanSee(req, a)) return res.status(404).json({ error: 'not found' });
+  if (!photosCanDeleteItem(req, a, p)) return res.status(403).json({ error: 'you can only edit photos you added' });
+  const b = req.body || {};
+  if (b.caption !== undefined) photosSys.itemSetCaption.run({ id: p.id, caption: clip(b.caption, 200) || null });
+  photosSys.albTouch.run({ id: a.id, updated: Date.now() });
+  res.json({ photo: photoToApi(photosSys.itemGet.get(p.id)) });
+});
+
+/* ---- remove a photo from its album (uploader, album owner, or admin) ---- */
+app.delete('/api/photos/items/:id', requireAuth, (req, res) => {
+  const p = photosSys.itemGet.get(req.params.id);
+  if (!p) return res.status(404).json({ error: 'not found' });
+  const a = photosSys.albGet.get(p.album_id);
+  if (!a || !photosCanSee(req, a)) return res.status(404).json({ error: 'not found' });
+  if (!photosCanDeleteItem(req, a, p)) return res.status(403).json({ error: 'only the person who added it or the album owner can remove it' });
+  photosSys.cmDelForPhoto.run(p.id);
+  photosSys.itemDel.run(p.id);
+  photosPurgeItemFiles(p.id);
+  // if it was the album cover, fall back to whatever is now first
+  if (a.cover_photo_id === p.id) {
+    const next = photosSys.itemFirst.get(a.id);
+    photosSys.albSetCover.run({ id: a.id, cover_photo_id: next ? next.id : null, updated: Date.now() });
+  } else photosSys.albTouch.run({ id: a.id, updated: Date.now() });
+  res.json({ ok: true });
+});
+
+/* ---- reorder an album (owner/contributors) — body { photoIds } in the new order ---- */
+app.put('/api/photos/albums/:id/order', requireAuth, (req, res) => {
+  const a = photosSys.albGet.get(req.params.id);
+  if (!a || !photosCanSee(req, a)) return res.status(404).json({ error: 'not found' });
+  if (!photosCanAdd(req, a)) return res.status(403).json({ error: 'you can only view this album' });
+  const ids = Array.isArray((req.body || {}).photoIds) ? (req.body || {}).photoIds : [];
+  const mine = new Set(photosSys.itemIdsForAlbum.all(a.id).map(r => r.id));
+  let pos = 0;
+  const apply = sys.transaction(() => {
+    for (const id of ids) if (mine.has(String(id))) photosSys.itemSetPos.run({ id: String(id), pos: pos++ });
+  });
+  apply();
+  photosSys.albTouch.run({ id: a.id, updated: Date.now() });
+  res.json({ ok: true });
+});
+
+/* ---- save a shared photo into YOUR vault (the reverse of copy-on-add) ----
+   Decrypts from the shared __photos__ store and re-encrypts into the caller's own
+   vault as a normal image. Quota-checked like any upload; the album copy is untouched. */
+app.post('/api/photos/items/:id/save', requireAuth, async (req, res) => {
+  const p = photosSys.itemGet.get(req.params.id);
+  if (!p) return res.status(404).json({ error: 'not found' });
+  const a = photosSys.albGet.get(p.album_id);
+  if (!a || !photosCanSee(req, a)) return res.status(404).json({ error: 'not found' });
+
+  const store = req.store, quota = req.account.quota_bytes;
+  if (store.usedBytes() + (p.size || 0) > quota) return limitError(res, store, quota);
+  const parent = normParent((req.body || {}).parent);
+  if (parent != null) {
+    const pf = store.getById(parent);
+    if (!pf || pf.type !== 'folder' || pf.trashed) return res.status(400).json({ error: 'destination folder not found' });
+  }
+  const id = uid();
+  const tmp = path.join(store.tmpDir, 'ps' + crypto.randomBytes(6).toString('hex') + '.tmp');
+  try {
+    await decryptBlobToFile(photosStore.blobPath({ id: p.id }), photosStore.keys, tmp);
+    const size = (await fsp.stat(tmp)).size;
+    await vault.encryptBlob(tmp, store.blobPath({ id }), store.keys);
+    const ext = String(p.ext || 'jpg').replace(/^\./, '').toLowerCase() || 'jpg';
+    const base = (p.caption || 'Photo').replace(/[\\/:*?"<>|]/g, '').slice(0, 180) || 'Photo';
+    store.insertRow({
+      id, name: `${base}.${ext}`, type: 'image', parent,
+      size, date: Date.now(),
+      w: p.w != null ? Number(p.w) : null, h: p.h != null ? Number(p.h) : null,
+      hasBlob: 1, storedExt: '.' + ext,
+    });
+    store.bump();
+    invalidatePollCache(req.accountId);
+    logAnalytics(store, 'upload', { kind: 'image' });
+    res.json({ file: rowToApi(store.getById(id), store) });
+  } catch (e) {
+    console.error('[simplex] photo save-to-vault failed', e && (e.stack || e.message || e));
+    try { await fsp.unlink(store.blobPath({ id })); } catch (_) {}
+    res.status(500).json({ error: 'could not save this photo' });
+  } finally { try { await fsp.unlink(tmp); } catch (e) {} }
+});
+
+/* ---- comments on a photo (anyone who can see the album) ---- */
+app.get('/api/photos/items/:id/comments', requireAuth, (req, res) => {
+  const p = photosSys.itemGet.get(req.params.id);
+  if (!p) return res.status(404).json({ error: 'not found' });
+  const a = photosSys.albGet.get(p.album_id);
+  if (!a || !photosCanSee(req, a)) return res.status(404).json({ error: 'not found' });
+  res.json({
+    comments: photosSys.cmList.all(p.id).map(c => ({
+      id: c.id, text: c.text, authorId: c.author_id, authorName: c.author_name, created: c.created,
+      canDelete: c.author_id === req.accountId || photosCanManage(req, a),
+    })),
+  });
+});
+app.post('/api/photos/items/:id/comments', requireAuth, (req, res) => {
+  const p = photosSys.itemGet.get(req.params.id);
+  if (!p) return res.status(404).json({ error: 'not found' });
+  const a = photosSys.albGet.get(p.album_id);
+  if (!a || !photosCanSee(req, a)) return res.status(404).json({ error: 'not found' });
+  const text = clip((req.body || {}).text, 1000).trim();
+  if (!text) return res.status(400).json({ error: 'say something first' });
+  const id = uid();
+  photosSys.cmIns.run({
+    id, photo_id: p.id, author_id: req.accountId,
+    author_name: clip(req.account.display || req.account.username, 80), text, created: Date.now(),
+  });
+  const c = photosSys.cmGet.get(id);
+  res.json({ comment: { id: c.id, text: c.text, authorId: c.author_id, authorName: c.author_name, created: c.created, canDelete: true } });
+});
+app.delete('/api/photos/comments/:id', requireAuth, (req, res) => {
+  const c = photosSys.cmGet.get(req.params.id);
+  if (!c) return res.status(404).json({ error: 'not found' });
+  const p = photosSys.itemGet.get(c.photo_id);
+  const a = p ? photosSys.albGet.get(p.album_id) : null;
+  if (c.author_id !== req.accountId && !(a && photosCanManage(req, a))) return res.status(403).json({ error: 'not yours to delete' });
+  photosSys.cmDel.run(c.id);
+  res.json({ ok: true });
+});
+
+/* ============================================================
+   CONNECT — private rooms with live calls (screen + camera + mic) and chat
+
+   The "Zoom in Simplex" app. A member creates a ROOM and gets a 5-character CODE
+   (A-Z 0-9, uppercase only — see connectCode()). The code is the ONLY way in:
+   rooms are never listed to anyone who isn't already a member, so sharing the code
+   is what grants access. Codes are unique among LIVE rooms and are released when
+   the room is deleted, so the 36^5 (~60M) space never runs out in practice.
+
+   HOW THE MEDIA WORKS — and why the server never sees it
+   -----------------------------------------------------
+   Audio/video are NOT proxied through this server. Browsers ship a full WebRTC
+   stack, so peers connect DIRECTLY to each other and the media rides over
+   DTLS-SRTP, whose keys are negotiated in the DTLS handshake between the two
+   browsers. That is what makes the call genuinely end-to-end encrypted: this
+   server relays only SIGNALING (SDP offers/answers + ICE candidates) and never
+   holds a key that could decrypt a frame of anyone's screen, camera, or voice.
+   It also means zero new npm dependencies — no SFU, no media library.
+
+   The room is a MESH: every participant connects to every other one. That is the
+   right shape for the small private rooms this is built for; see CONNECT_MAX_PEERS.
+
+   Signaling is a long-lived SSE stream per participant (GET /api/connect/rooms/
+   :id/events). Each participant has a MAILBOX in memory; posting a signal drops a
+   message into the target's mailbox and it is flushed down their stream. Nothing
+   about signaling is persisted — it is meaningless once a call is up.
+
+   IMPORTANT (socket reaper): server.on('connection') below destroys sockets idle
+   for SOCKET_IDLE_MS with no request in flight. An SSE stream is exactly that —
+   one request that then sits quiet — so connectSse() marks its socket `_sxBusy`
+   for the life of the stream and sends a comment heartbeat. Without both, calls
+   would silently drop at ~45s.
+
+   WHAT IS STORED
+   --------------
+     connect_rooms     — the room + its code, owner, and settings.
+     connect_members   — who has joined (via the code); survives leaving the call
+                         so a returning member keeps their history.
+     connect_messages  — the chat log.
+     connect_reactions — emoji reactions on a message (one row per person+emoji).
+
+   Chat lives in the SYSTEM db (like Music/Photos) because a room spans accounts.
+   Deleting the room deletes every message and reaction with it, as specified —
+   see the DELETE handler, which is one transaction.
+   ============================================================ */
+sys.exec(`
+CREATE TABLE IF NOT EXISTS connect_rooms (
+  id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE,
+  owner_id TEXT NOT NULL, owner_name TEXT NOT NULL,
+  name TEXT NOT NULL, topic TEXT,
+  locked INTEGER NOT NULL DEFAULT 0,
+  created INTEGER NOT NULL, updated INTEGER NOT NULL );
+CREATE INDEX IF NOT EXISTS idx_connect_room_owner ON connect_rooms(owner_id);
+
+CREATE TABLE IF NOT EXISTS connect_members (
+  room_id TEXT NOT NULL, account_id TEXT NOT NULL, name TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'member', joined INTEGER NOT NULL,
+  PRIMARY KEY (room_id, account_id) );
+CREATE INDEX IF NOT EXISTS idx_connect_mem_acct ON connect_members(account_id);
+
+CREATE TABLE IF NOT EXISTS connect_messages (
+  id TEXT PRIMARY KEY, room_id TEXT NOT NULL,
+  author_id TEXT NOT NULL, author_name TEXT NOT NULL,
+  text TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'chat',
+  reply_to TEXT, edited INTEGER, created INTEGER NOT NULL );
+CREATE INDEX IF NOT EXISTS idx_connect_msg_room ON connect_messages(room_id, created);
+
+CREATE TABLE IF NOT EXISTS connect_reactions (
+  message_id TEXT NOT NULL, account_id TEXT NOT NULL,
+  name TEXT NOT NULL, emoji TEXT NOT NULL, created INTEGER NOT NULL,
+  PRIMARY KEY (message_id, account_id, emoji) );
+CREATE INDEX IF NOT EXISTS idx_connect_rx_msg ON connect_reactions(message_id);
+`);
+const connectSys = {
+  roomIns: sys.prepare(`INSERT INTO connect_rooms (id,code,owner_id,owner_name,name,topic,locked,created,updated)
+                        VALUES (@id,@code,@owner_id,@owner_name,@name,@topic,0,@created,@updated)`),
+  roomGet: sys.prepare('SELECT * FROM connect_rooms WHERE id = ?'),
+  roomByCode: sys.prepare('SELECT * FROM connect_rooms WHERE code = ?'),
+  roomListMine: sys.prepare(`SELECT r.* FROM connect_rooms r
+                             WHERE r.owner_id = @me
+                                OR EXISTS (SELECT 1 FROM connect_members m WHERE m.room_id = r.id AND m.account_id = @me)
+                             ORDER BY r.updated DESC`),
+  roomUpd: sys.prepare('UPDATE connect_rooms SET name=@name, topic=@topic, updated=@updated WHERE id=@id'),
+  roomLock: sys.prepare('UPDATE connect_rooms SET locked=@locked, updated=@updated WHERE id=@id'),
+  roomTouch: sys.prepare('UPDATE connect_rooms SET updated=@updated WHERE id=@id'),
+  roomDel: sys.prepare('DELETE FROM connect_rooms WHERE id = ?'),
+
+  memIns: sys.prepare(`INSERT INTO connect_members (room_id,account_id,name,role,joined)
+                       VALUES (@room_id,@account_id,@name,@role,@joined)
+                       ON CONFLICT(room_id,account_id) DO UPDATE SET name=@name`),
+  memGet: sys.prepare('SELECT * FROM connect_members WHERE room_id = ? AND account_id = ?'),
+  memList: sys.prepare('SELECT * FROM connect_members WHERE room_id = ? ORDER BY joined'),
+  memDel: sys.prepare('DELETE FROM connect_members WHERE room_id = ? AND account_id = ?'),
+  memDelAll: sys.prepare('DELETE FROM connect_members WHERE room_id = ?'),
+
+  msgIns: sys.prepare(`INSERT INTO connect_messages (id,room_id,author_id,author_name,text,kind,reply_to,edited,created)
+                       VALUES (@id,@room_id,@author_id,@author_name,@text,@kind,@reply_to,NULL,@created)`),
+  msgGet: sys.prepare('SELECT * FROM connect_messages WHERE id = ?'),
+  // newest-first with a cap, reversed by the caller — keeps a long-lived room cheap
+  msgList: sys.prepare('SELECT * FROM connect_messages WHERE room_id = ? ORDER BY created DESC, id DESC LIMIT ?'),
+  msgSince: sys.prepare('SELECT * FROM connect_messages WHERE room_id = ? AND created > ? ORDER BY created, id LIMIT 500'),
+  msgEdit: sys.prepare('UPDATE connect_messages SET text=@text, edited=@edited WHERE id=@id'),
+  msgDel: sys.prepare('DELETE FROM connect_messages WHERE id = ?'),
+  msgDelRoom: sys.prepare('DELETE FROM connect_messages WHERE room_id = ?'),
+
+  rxIns: sys.prepare(`INSERT INTO connect_reactions (message_id,account_id,name,emoji,created)
+                      VALUES (@message_id,@account_id,@name,@emoji,@created)
+                      ON CONFLICT(message_id,account_id,emoji) DO NOTHING`),
+  rxDel: sys.prepare('DELETE FROM connect_reactions WHERE message_id = ? AND account_id = ? AND emoji = ?'),
+  rxForRoom: sys.prepare(`SELECT r.* FROM connect_reactions r
+                          JOIN connect_messages m ON m.id = r.message_id
+                          WHERE m.room_id = ? ORDER BY r.created`),
+  rxForMsg: sys.prepare('SELECT * FROM connect_reactions WHERE message_id = ? ORDER BY created'),
+  rxDelForMsg: sys.prepare('DELETE FROM connect_reactions WHERE message_id = ?'),
+  rxDelRoom: sys.prepare(`DELETE FROM connect_reactions WHERE message_id IN
+                          (SELECT id FROM connect_messages WHERE room_id = ?)`),
+};
+
+/* ---- room codes ----
+   5 chars from an UNAMBIGUOUS uppercase alphabet. O/0 and I/1 are excluded on
+   purpose: a code is meant to be read aloud and typed by hand, and those pairs are
+   the classic transcription errors. The spec asks for A-Z 0-9 uppercase, which this
+   is a strict subset of. Generated with crypto randomness (not Math.random) and
+   rejection-sampled so every code is uniform, then retried on collision. */
+const CONNECT_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';   // 32 chars, no O/0/I/1
+const CONNECT_CODE_LEN = 5;
+function connectCode() {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    let code = '';
+    const bytes = crypto.randomBytes(CONNECT_CODE_LEN * 2);
+    for (let i = 0; i < bytes.length && code.length < CONNECT_CODE_LEN; i++) {
+      // 256 is a multiple of 32, so a plain modulo is already uniform here
+      code += CONNECT_ALPHABET[bytes[i] % CONNECT_ALPHABET.length];
+    }
+    if (!connectSys.roomByCode.get(code)) return code;
+  }
+  throw new Error('could not allocate a room code');
+}
+/* Accept what a human typed: trim, uppercase, drop separators people add ("AB-C12").
+   Returns null unless the result is exactly 5 chars of the code alphabet. */
+function connectNormalizeCode(raw) {
+  const s = String(raw || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (s.length !== CONNECT_CODE_LEN) return null;
+  for (const ch of s) if (!CONNECT_ALPHABET.includes(ch)) return null;
+  return s;
+}
+
+const CONNECT_MAX_PEERS = 8;        // mesh gets expensive past this; enforced on join
+const CONNECT_MSG_MAX = 4000;       // chars per chat message
+const CONNECT_HISTORY = 300;        // messages returned on open
+const CONNECT_EMOJI_MAX = 16;       // bytes-ish cap for one reaction token
+
+/* ---- live presence + signaling mailboxes (in memory, never persisted) ----
+   LIVE: roomId -> Map(accountId -> peer). A "peer" is someone with an OPEN SSE
+   stream, i.e. actually in the call right now, as opposed to a room member who
+   merely has access. Each peer owns a mailbox (queued signals) and the res it
+   flushes to. Everything here is rebuilt from scratch on restart, which is
+   correct: after a restart there are no live calls to remember. */
+const CONNECT_LIVE = new Map();
+function connectRoomPeers(roomId) {
+  let m = CONNECT_LIVE.get(roomId);
+  if (!m) { m = new Map(); CONNECT_LIVE.set(roomId, m); }
+  return m;
+}
+function connectPeerList(roomId) {
+  return [...connectRoomPeers(roomId).values()].map(p => ({
+    id: p.accountId, name: p.name, peerId: p.peerId, joined: p.joined,
+    media: p.media, speaking: false,
+  }));
+}
+/* Push one event to a peer's SSE stream (or queue it if the stream is mid-write). */
+function connectSend(peer, event, data) {
+  if (!peer || !peer.res || peer.res.writableEnded) return false;
+  try {
+    peer.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    return true;
+  } catch (e) { return false; }
+}
+/* Fan an event out to everyone live in the room, optionally skipping one account. */
+function connectBroadcast(roomId, event, data, exceptAccountId) {
+  const peers = connectRoomPeers(roomId);
+  for (const [aid, p] of peers) {
+    if (exceptAccountId && aid === exceptAccountId) continue;
+    connectSend(p, event, data);
+  }
+}
+/* Drop a peer and tell the room. Safe to call twice (leaving + stream close race). */
+function connectDropPeer(roomId, accountId, reason) {
+  const peers = CONNECT_LIVE.get(roomId);
+  if (!peers) return;
+  const peer = peers.get(accountId);
+  if (!peer) return;
+  peers.delete(accountId);
+  try { if (peer.beat) clearInterval(peer.beat); } catch (e) {}
+  try { if (peer.res && !peer.res.writableEnded) peer.res.end(); } catch (e) {}
+  if (!peers.size) CONNECT_LIVE.delete(roomId);
+  connectBroadcast(roomId, 'peer-left', { id: accountId, peerId: peer.peerId, reason: reason || 'left' });
+}
+
+/* ---- access helpers ---- */
+function connectIsMember(req, room) {
+  if (!room) return false;
+  if (room.owner_id === req.accountId) return true;
+  return !!connectSys.memGet.get(room.id, req.accountId);
+}
+/* Owner (or an admin) — may rename, lock, kick, and delete the room. NB: unlike
+   Photos, admins do NOT get to browse rooms they were never given the code to;
+   they only get management power over a room they are already in. Rooms are
+   private by the user's explicit requirement. */
+function connectCanManage(req, room) {
+  return !!room && (room.owner_id === req.accountId || !!req.account.is_admin);
+}
+/* The room a caller is allowed to see, or null. */
+function connectVisibleRoom(req, id) {
+  const r = connectSys.roomGet.get(String(id || ''));
+  if (!r) return null;
+  return connectIsMember(req, r) ? r : null;
+}
+function connectRoomToApi(r, req, extra = {}) {
+  const members = connectSys.memList.all(r.id);
+  const live = connectRoomPeers(r.id);
+  return {
+    id: r.id, code: r.code, name: r.name, topic: r.topic || null,
+    ownerId: r.owner_id, ownerName: r.owner_name,
+    isOwner: r.owner_id === req.accountId, canManage: connectCanManage(req, r),
+    locked: !!r.locked, created: r.created, updated: r.updated,
+    members: members.map(m => ({ id: m.account_id, name: m.name, role: m.role, joined: m.joined })),
+    memberCount: members.length,
+    liveCount: live.size,
+    live: [...live.values()].map(p => ({ id: p.accountId, name: p.name })),
+    maxPeers: CONNECT_MAX_PEERS,
+    ...extra,
+  };
+}
+/* Shape a message + fold its reactions into [{ emoji, count, mine, names }]. */
+function connectMsgToApi(m, rx, meId) {
+  const groups = new Map();
+  for (const r of (rx || [])) {
+    if (r.message_id !== m.id) continue;
+    let g = groups.get(r.emoji);
+    // `by` carries every reactor's account id (not just the first 12 names) so a
+    // BROADCAST recipient — for whom meId is null — can still derive its own
+    // `mine` reliably on a heavily-reacted message. `names` stays capped because
+    // it is only ever used for the hover tooltip.
+    if (!g) { g = { emoji: r.emoji, count: 0, mine: false, names: [], by: [] }; groups.set(r.emoji, g); }
+    g.count++;
+    g.by.push(r.account_id);
+    if (r.account_id === meId) g.mine = true;
+    if (g.names.length < 12) g.names.push(r.name);
+  }
+  return {
+    id: m.id, roomId: m.room_id, authorId: m.author_id, authorName: m.author_name,
+    text: m.text, kind: m.kind || 'chat', replyTo: m.reply_to || null,
+    edited: m.edited || null, created: m.created,
+    mine: m.author_id === meId,
+    reactions: [...groups.values()],
+  };
+}
+
+/* ---- rooms you can get to ---- */
+app.get('/api/connect/rooms', requireAuth, (req, res) => {
+  const rows = connectSys.roomListMine.all({ me: req.accountId });
+  res.json({ rooms: rows.map(r => connectRoomToApi(r, req)), maxPeers: CONNECT_MAX_PEERS });
+});
+
+/* ---- create a room; the code is minted here and is the only way in ---- */
+app.post('/api/connect/rooms', requireAuth, (req, res) => {
+  const b = req.body || {};
+  const name = clip(b.name, 120).trim();
+  if (!name) return res.status(400).json({ error: 'name required' });
+  let code;
+  try { code = connectCode(); } catch (e) { return res.status(503).json({ error: 'could not allocate a room code, try again' }); }
+  const now = Date.now(), id = uid();
+  const me = clip(req.account.display || req.account.username, 80);
+  connectSys.roomIns.run({
+    id, code, owner_id: req.accountId, owner_name: me,
+    name, topic: clip(b.topic, 300) || null, created: now, updated: now,
+  });
+  // the owner is a member too, so one code path covers everyone in the room
+  connectSys.memIns.run({ room_id: id, account_id: req.accountId, name: me, role: 'owner', joined: now });
+  res.json({ room: connectRoomToApi(connectSys.roomGet.get(id), req) });
+});
+
+/* ---- join by code: the ONLY way to get into a room you weren't in ---- */
+app.post('/api/connect/join', requireAuth, (req, res) => {
+  const code = connectNormalizeCode((req.body || {}).code);
+  if (!code) return res.status(400).json({ error: 'enter a 5-character room code', code: 'BADCODE' });
+  const room = connectSys.roomByCode.get(code);
+  // Deliberately the same message + status for "no such room" and "locked-out":
+  // a differing response would turn this endpoint into a code oracle.
+  if (!room) return res.status(404).json({ error: 'no room with that code', code: 'NOROOM' });
+  const already = connectIsMember(req, room);
+  if (room.locked && !already) return res.status(403).json({ error: 'this room is locked', code: 'LOCKED' });
+  if (!already) {
+    const now = Date.now();
+    connectSys.memIns.run({
+      room_id: room.id, account_id: req.accountId,
+      name: clip(req.account.display || req.account.username, 80), role: 'member', joined: now,
+    });
+    connectSys.roomTouch.run({ id: room.id, updated: now });
+    connectBroadcast(room.id, 'member-joined', { id: req.accountId, name: clip(req.account.display || req.account.username, 80) });
+  }
+  res.json({ room: connectRoomToApi(connectSys.roomGet.get(room.id), req) });
+});
+
+/* ---- one room ---- */
+app.get('/api/connect/rooms/:id', requireAuth, (req, res) => {
+  const room = connectVisibleRoom(req, req.params.id);
+  if (!room) return res.status(404).json({ error: 'not found' });
+  res.json({ room: connectRoomToApi(room, req), peers: connectPeerList(room.id) });
+});
+
+/* ---- rename / re-topic (owner or admin) ---- */
+app.patch('/api/connect/rooms/:id', requireAuth, (req, res) => {
+  const room = connectSys.roomGet.get(req.params.id);
+  if (!room || !connectIsMember(req, room)) return res.status(404).json({ error: 'not found' });
+  if (!connectCanManage(req, room)) return res.status(403).json({ error: 'only the room owner can change this' });
+  const b = req.body || {}, now = Date.now();
+  if (b.locked !== undefined) connectSys.roomLock.run({ id: room.id, locked: b.locked ? 1 : 0, updated: now });
+  const name = b.name !== undefined ? clip(b.name, 120).trim() : room.name;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  connectSys.roomUpd.run({
+    id: room.id, name,
+    topic: b.topic !== undefined ? (clip(b.topic, 300) || null) : (room.topic || null),
+    updated: now,
+  });
+  const out = connectSys.roomGet.get(room.id);
+  connectBroadcast(room.id, 'room-updated', { room: { name: out.name, topic: out.topic, locked: !!out.locked } });
+  res.json({ room: connectRoomToApi(out, req) });
+});
+
+/* ---- delete the room: chat + reactions go with it, as specified ---- */
+app.delete('/api/connect/rooms/:id', requireAuth, (req, res) => {
+  const room = connectSys.roomGet.get(req.params.id);
+  if (!room || !connectIsMember(req, room)) return res.status(404).json({ error: 'not found' });
+  if (!connectCanManage(req, room)) return res.status(403).json({ error: 'only the room owner can delete it' });
+  // one transaction: no window where a message outlives its room
+  sys.transaction(() => {
+    connectSys.rxDelRoom.run(room.id);
+    connectSys.msgDelRoom.run(room.id);
+    connectSys.memDelAll.run(room.id);
+    connectSys.roomDel.run(room.id);
+  })();
+  // hang up everyone still in the call, then tear the presence map down
+  connectBroadcast(room.id, 'room-deleted', { id: room.id });
+  const peers = CONNECT_LIVE.get(room.id);
+  if (peers) {
+    for (const p of peers.values()) {
+      try { if (p.beat) clearInterval(p.beat); } catch (e) {}
+      try { if (p.res && !p.res.writableEnded) p.res.end(); } catch (e) {}
+    }
+    CONNECT_LIVE.delete(room.id);
+  }
+  res.json({ ok: true });
+});
+
+/* ---- leave a room for good (drops membership + your live peer) ---- */
+app.post('/api/connect/rooms/:id/leave', requireAuth, (req, res) => {
+  const room = connectSys.roomGet.get(req.params.id);
+  if (!room) return res.status(404).json({ error: 'not found' });
+  if (room.owner_id === req.accountId) return res.status(400).json({ error: 'the owner cannot leave; delete the room instead' });
+  connectSys.memDel.run(room.id, req.accountId);
+  connectDropPeer(room.id, req.accountId, 'left');
+  connectBroadcast(room.id, 'member-left', { id: req.accountId });
+  res.json({ ok: true });
+});
+
+/* ---- remove someone else (owner/admin) ---- */
+app.delete('/api/connect/rooms/:id/members/:accountId', requireAuth, (req, res) => {
+  const room = connectSys.roomGet.get(req.params.id);
+  if (!room || !connectIsMember(req, room)) return res.status(404).json({ error: 'not found' });
+  if (!connectCanManage(req, room)) return res.status(403).json({ error: 'only the room owner can remove people' });
+  const target = String(req.params.accountId || '');
+  if (target === room.owner_id) return res.status(400).json({ error: 'the owner cannot be removed' });
+  connectSys.memDel.run(room.id, target);
+  const peers = CONNECT_LIVE.get(room.id);
+  const p = peers && peers.get(target);
+  if (p) connectSend(p, 'kicked', { roomId: room.id });
+  connectDropPeer(room.id, target, 'removed');
+  connectBroadcast(room.id, 'member-left', { id: target });
+  res.json({ ok: true });
+});
+
+/* ============================================================
+   SIGNALING — the SSE stream + the relay
+   ============================================================ */
+
+/* Join the call: open the event stream. This is the connection every peer holds
+   for as long as they are in the room. */
+app.get('/api/connect/rooms/:id/events', requireAuth, (req, res) => {
+  const room = connectVisibleRoom(req, req.params.id);
+  if (!room) return res.status(404).json({ error: 'not found' });
+  const peers = connectRoomPeers(room.id);
+  // A second tab from the same account replaces the first: one peer per account
+  // keeps the mesh (and the peer-id bookkeeping on the client) unambiguous.
+  if (peers.has(req.accountId)) connectDropPeer(room.id, req.accountId, 'replaced');
+  if (peers.size >= CONNECT_MAX_PEERS) return res.status(409).json({ error: `this room is full (${CONNECT_MAX_PEERS} people)`, code: 'FULL' });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');   // don't let a proxy buffer the stream
+  res.flushHeaders && res.flushHeaders();
+
+  // Keep the idle-socket reaper off this connection: SSE is one request that then
+  // stays quiet, which is exactly what the reaper kills. See the note at the top.
+  try { if (res.socket) { res.socket._sxBusy = (res.socket._sxBusy || 0) + 1; res.socket.setKeepAlive(true); } } catch (e) {}
+
+  const now = Date.now();
+  const peer = {
+    accountId: req.accountId,
+    name: clip(req.account.display || req.account.username, 80),
+    peerId: 'p_' + crypto.randomBytes(8).toString('hex'),
+    joined: now, res, beat: null,
+    media: { mic: false, cam: false, screen: false },
+  };
+  peers.set(req.accountId, peer);
+
+  // Tell the newcomer who is already here. The client uses "polite peer" rules off
+  // this list: the ARRIVING peer creates the offers, so two peers never glare.
+  connectSend(peer, 'welcome', {
+    self: { id: peer.accountId, name: peer.name, peerId: peer.peerId },
+    peers: connectPeerList(room.id).filter(p => p.id !== req.accountId),
+    room: { id: room.id, name: room.name, code: room.code },
+  });
+  connectBroadcast(room.id, 'peer-joined', {
+    id: peer.accountId, name: peer.name, peerId: peer.peerId, media: peer.media,
+  }, req.accountId);
+
+  // Heartbeat: a comment line the EventSource parser ignores. Keeps proxies and
+  // the socket timer from treating a quiet call as a dead connection.
+  peer.beat = setInterval(() => {
+    if (res.writableEnded) return;
+    try { res.write(': ping\n\n'); } catch (e) {}
+  }, 15_000);
+
+  const close = () => {
+    try { if (res.socket) res.socket._sxBusy = Math.max(0, (res.socket._sxBusy || 1) - 1); } catch (e) {}
+    connectDropPeer(room.id, req.accountId, 'disconnected');
+  };
+  res.on('close', close);
+  res.on('error', close);
+});
+
+/* Relay one signal to one peer. Body { to, type, payload } where `type` is
+   'offer' | 'answer' | 'ice'. The payload is opaque to us — we forward the SDP or
+   ICE candidate verbatim and never inspect or store it. */
+app.post('/api/connect/rooms/:id/signal', requireAuth, (req, res) => {
+  const room = connectVisibleRoom(req, req.params.id);
+  if (!room) return res.status(404).json({ error: 'not found' });
+  const b = req.body || {};
+  const to = String(b.to || '');
+  const type = String(b.type || '');
+  if (!['offer', 'answer', 'ice'].includes(type)) return res.status(400).json({ error: 'bad signal type' });
+  const peers = connectRoomPeers(room.id);
+  const me = peers.get(req.accountId);
+  if (!me) return res.status(409).json({ error: 'you are not in this call', code: 'NOTLIVE' });
+  const target = peers.get(to);
+  if (!target) return res.status(404).json({ error: 'that peer is gone', code: 'NOPEER' });
+  const ok = connectSend(target, 'signal', {
+    from: req.accountId, fromPeerId: me.peerId, fromName: me.name,
+    type, payload: b.payload,
+  });
+  res.json({ ok });
+});
+
+/* Publish which tracks you are sending, so everyone's tiles render correctly
+   (muted mic, camera off, "is presenting") without inspecting the media. */
+app.post('/api/connect/rooms/:id/media', requireAuth, (req, res) => {
+  const room = connectVisibleRoom(req, req.params.id);
+  if (!room) return res.status(404).json({ error: 'not found' });
+  const peers = connectRoomPeers(room.id);
+  const me = peers.get(req.accountId);
+  if (!me) return res.status(409).json({ error: 'you are not in this call', code: 'NOTLIVE' });
+  const b = req.body || {};
+  me.media = {
+    mic: !!b.mic, cam: !!b.cam, screen: !!b.screen,
+    hand: !!b.hand,   // "raise hand" rides along with media state
+  };
+  connectBroadcast(room.id, 'peer-media', { id: req.accountId, media: me.media });
+  res.json({ ok: true });
+});
+
+/* Explicit hang-up. The stream closing does the same thing; this just makes
+   leaving instant instead of waiting for the socket to notice. */
+app.post('/api/connect/rooms/:id/hangup', requireAuth, (req, res) => {
+  const room = connectVisibleRoom(req, req.params.id);
+  if (!room) return res.status(404).json({ error: 'not found' });
+  connectDropPeer(room.id, req.accountId, 'left');
+  res.json({ ok: true });
+});
+
+/* ============================================================
+   CHAT — messages + reactions. Delivered live over the same SSE stream, with a
+   `since` poll as the fallback for anyone whose stream is reconnecting.
+   ============================================================ */
+
+app.get('/api/connect/rooms/:id/messages', requireAuth, (req, res) => {
+  const room = connectVisibleRoom(req, req.params.id);
+  if (!room) return res.status(404).json({ error: 'not found' });
+  const since = Number(req.query.since);
+  const rx = connectSys.rxForRoom.all(room.id);
+  if (Number.isFinite(since) && since > 0) {
+    const rows = connectSys.msgSince.all(room.id, since);
+    return res.json({ messages: rows.map(m => connectMsgToApi(m, rx, req.accountId)) });
+  }
+  // newest CONNECT_HISTORY, returned oldest-first for direct rendering
+  const rows = connectSys.msgList.all(room.id, CONNECT_HISTORY).reverse();
+  res.json({ messages: rows.map(m => connectMsgToApi(m, rx, req.accountId)) });
+});
+
+app.post('/api/connect/rooms/:id/messages', requireAuth, (req, res) => {
+  const room = connectVisibleRoom(req, req.params.id);
+  if (!room) return res.status(404).json({ error: 'not found' });
+  const b = req.body || {};
+  const text = clip(b.text, CONNECT_MSG_MAX).trim();
+  if (!text) return res.status(400).json({ error: 'message required' });
+  const now = Date.now(), id = uid();
+  // reply_to must point at a message in THIS room, or it's dropped
+  let replyTo = null;
+  if (b.replyTo) { const p = connectSys.msgGet.get(String(b.replyTo)); if (p && p.room_id === room.id) replyTo = p.id; }
+  connectSys.msgIns.run({
+    id, room_id: room.id, author_id: req.accountId,
+    author_name: clip(req.account.display || req.account.username, 80),
+    text, kind: 'chat', reply_to: replyTo, created: now,
+  });
+  connectSys.roomTouch.run({ id: room.id, updated: now });
+  const row = connectSys.msgGet.get(id);
+  // Broadcast with mine:false — each client flips `mine` by comparing authorId to
+  // its own account, so one payload is correct for every recipient.
+  connectBroadcast(room.id, 'message', { message: connectMsgToApi(row, [], null) });
+  res.json({ message: connectMsgToApi(row, [], req.accountId) });
+});
+
+app.patch('/api/connect/rooms/:id/messages/:msgId', requireAuth, (req, res) => {
+  const room = connectVisibleRoom(req, req.params.id);
+  if (!room) return res.status(404).json({ error: 'not found' });
+  const m = connectSys.msgGet.get(req.params.msgId);
+  if (!m || m.room_id !== room.id) return res.status(404).json({ error: 'not found' });
+  if (m.author_id !== req.accountId) return res.status(403).json({ error: 'not your message' });
+  const text = clip((req.body || {}).text, CONNECT_MSG_MAX).trim();
+  if (!text) return res.status(400).json({ error: 'message required' });
+  const now = Date.now();
+  connectSys.msgEdit.run({ id: m.id, text, edited: now });
+  const row = connectSys.msgGet.get(m.id);
+  connectBroadcast(room.id, 'message-edited', { message: connectMsgToApi(row, connectSys.rxForMsg.all(m.id), null) });
+  res.json({ message: connectMsgToApi(row, connectSys.rxForMsg.all(m.id), req.accountId) });
+});
+
+app.delete('/api/connect/rooms/:id/messages/:msgId', requireAuth, (req, res) => {
+  const room = connectVisibleRoom(req, req.params.id);
+  if (!room) return res.status(404).json({ error: 'not found' });
+  const m = connectSys.msgGet.get(req.params.msgId);
+  if (!m || m.room_id !== room.id) return res.status(404).json({ error: 'not found' });
+  // your own message, or anyone's if you run the room
+  if (m.author_id !== req.accountId && !connectCanManage(req, room)) return res.status(403).json({ error: 'not yours to delete' });
+  sys.transaction(() => { connectSys.rxDelForMsg.run(m.id); connectSys.msgDel.run(m.id); })();
+  connectBroadcast(room.id, 'message-deleted', { id: m.id });
+  res.json({ ok: true });
+});
+
+/* Toggle a reaction. One row per (message, person, emoji) so the same person
+   can add several different emoji but never double-count one. */
+app.post('/api/connect/rooms/:id/messages/:msgId/react', requireAuth, (req, res) => {
+  const room = connectVisibleRoom(req, req.params.id);
+  if (!room) return res.status(404).json({ error: 'not found' });
+  const m = connectSys.msgGet.get(req.params.msgId);
+  if (!m || m.room_id !== room.id) return res.status(404).json({ error: 'not found' });
+  const emoji = clip((req.body || {}).emoji, CONNECT_EMOJI_MAX).trim();
+  // Reject anything with whitespace/control chars: this is a single token, and
+  // keeping it short + opaque avoids a reaction being used as a second chat.
+  if (!emoji || /\s/.test(emoji)) return res.status(400).json({ error: 'emoji required' });
+  const now = Date.now();
+  const remove = (req.body || {}).remove === true;
+  if (remove) connectSys.rxDel.run(m.id, req.accountId, emoji);
+  else connectSys.rxIns.run({
+    message_id: m.id, account_id: req.accountId,
+    name: clip(req.account.display || req.account.username, 80), emoji, created: now,
+  });
+  const rx = connectSys.rxForMsg.all(m.id);
+  const payload = connectMsgToApi(connectSys.msgGet.get(m.id), rx, null);
+  connectBroadcast(room.id, 'message-reacted', { id: m.id, reactions: payload.reactions });
+  res.json({ message: connectMsgToApi(connectSys.msgGet.get(m.id), rx, req.accountId) });
 });
 
 /* ============================================================

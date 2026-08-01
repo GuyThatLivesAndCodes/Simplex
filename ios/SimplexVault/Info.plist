@@ -58,5 +58,19 @@
     <string>Choose photos and videos to upload to your vault.</string>
     <key>NSFaceIDUsageDescription</key>
     <string>Unlock your vault with Face ID when you return to the app.</string>
+    <!-- Connect: joining a room's call needs the mic, and the camera once you turn
+         it on. The call is peer-to-peer and end-to-end encrypted — the audio and
+         video never reach the Simplex server. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Talk to the other people in a Connect room. Your audio is sent directly to them, end-to-end encrypted.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Turn your camera on in a Connect room. Your video is sent directly to the other people, end-to-end encrypted.</string>
+    <!-- Keep the call alive when the screen locks or the app goes to the background
+         mid-call; without this the audio session is torn down and the call drops. -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+        <string>voip</string>
+    </array>
 </dict>
 </plist>

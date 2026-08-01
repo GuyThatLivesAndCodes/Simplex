@@ -322,6 +322,94 @@ actor API {
         return try JSONSerialization.jsonObject(with: data)
     }
 
+    // MARK: - Connect (private rooms: calls + chat)
+    //
+    // Rooms are reachable ONLY by their 5-character code — there is no endpoint that
+    // lists rooms you haven't joined. `joinRoom` is what converts a code into
+    // membership; everything else requires membership already.
+
+    func connectRooms() async throws -> [ConnectRoom] {
+        try decode(ConnectRoomsResponse.self, from: try await run(request("/api/connect/rooms"))).rooms
+    }
+
+    func createConnectRoom(name: String, topic: String? = nil) async throws -> ConnectRoom {
+        var body: [String: Any] = ["name": name]
+        if let topic, !topic.isEmpty { body["topic"] = topic }
+        return try decode(ConnectRoomResponse.self,
+                          from: try await run(request("/api/connect/rooms", method: "POST", json: body))).room
+    }
+
+    /// Join by code. Throws APIError with the server's message for a bad/locked code.
+    func joinConnectRoom(code: String) async throws -> ConnectRoom {
+        try decode(ConnectRoomResponse.self,
+                   from: try await run(request("/api/connect/join", method: "POST", json: ["code": code]))).room
+    }
+
+    func connectRoom(_ id: String) async throws -> ConnectRoom {
+        try decode(ConnectRoomResponse.self, from: try await run(request("/api/connect/rooms/\(id)"))).room
+    }
+
+    func updateConnectRoom(_ id: String, name: String, topic: String?, locked: Bool) async throws -> ConnectRoom {
+        var body: [String: Any] = ["name": name, "locked": locked]
+        body["topic"] = topic ?? ""
+        return try decode(ConnectRoomResponse.self,
+                          from: try await run(request("/api/connect/rooms/\(id)", method: "PATCH", json: body))).room
+    }
+
+    /// Deletes the room AND its whole chat history (server does it in one transaction).
+    func deleteConnectRoom(_ id: String) async throws {
+        _ = try await run(request("/api/connect/rooms/\(id)", method: "DELETE"))
+    }
+
+    func leaveConnectRoom(_ id: String) async throws {
+        _ = try await run(request("/api/connect/rooms/\(id)/leave", method: "POST"))
+    }
+
+    func removeConnectMember(room: String, account: String) async throws {
+        _ = try await run(request("/api/connect/rooms/\(room)/members/\(account)", method: "DELETE"))
+    }
+
+    // ---- chat ----
+
+    /// Full recent history when `since` is nil, or only what's new since a timestamp.
+    func connectMessages(room: String, since: Double? = nil) async throws -> [ConnectMessage] {
+        var path = "/api/connect/rooms/\(room)/messages"
+        if let since, since > 0 { path += "?since=\(Int(since))" }
+        return try decode(ConnectMessagesResponse.self, from: try await run(request(path))).messages
+    }
+
+    func sendConnectMessage(room: String, text: String, replyTo: String? = nil) async throws -> ConnectMessage {
+        var body: [String: Any] = ["text": text]
+        if let replyTo { body["replyTo"] = replyTo }
+        return try decode(ConnectMessageResponse.self,
+                          from: try await run(request("/api/connect/rooms/\(room)/messages", method: "POST", json: body))).message
+    }
+
+    func editConnectMessage(room: String, id: String, text: String) async throws -> ConnectMessage {
+        try decode(ConnectMessageResponse.self,
+                   from: try await run(request("/api/connect/rooms/\(room)/messages/\(id)",
+                                               method: "PATCH", json: ["text": text]))).message
+    }
+
+    func deleteConnectMessage(room: String, id: String) async throws {
+        _ = try await run(request("/api/connect/rooms/\(room)/messages/\(id)", method: "DELETE"))
+    }
+
+    /// Toggle one emoji on a message. `remove: true` takes your own reaction back.
+    func reactConnectMessage(room: String, id: String, emoji: String, remove: Bool) async throws -> ConnectMessage {
+        try decode(ConnectMessageResponse.self,
+                   from: try await run(request("/api/connect/rooms/\(room)/messages/\(id)/react",
+                                               method: "POST", json: ["emoji": emoji, "remove": remove]))).message
+    }
+
+    /// The in-app call page. The live call runs in a WKWebView pointed here because
+    /// WebRTC on iOS is only available inside a web view — see ConnectCallView.
+    /// `nonisolated` + `static` so a SwiftUI view body can build it synchronously:
+    /// `API` is an actor, so an instance method here would need `await`.
+    nonisolated static func connectCallURL(room: String) -> URL {
+        serverURL.appendingPathComponent("connect/room/\(room)")
+    }
+
     // MARK: - Terms of Service
 
     struct Tos: Decodable { let version: Int; let text: String }

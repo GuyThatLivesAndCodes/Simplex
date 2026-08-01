@@ -56,6 +56,8 @@ const LAZY_MODULES = {
   'apps-discord': ['/apps-discord.js'],          // Discord Bot admin panel
   'apps-trading': ['/apps-trading.js'],          // Trading app UI screen
   'apps-music': ['/apps-music.js'],              // Music library/playlist screen + Jam (Player/EQ stay core)
+  'apps-photos': ['/apps-photos.js'],            // Photos — shared albums (grid, lightbox, sharing)
+  'apps-connect': ['/apps-connect.js'],          // Connect — rooms, WebRTC calls, screen share + chat
 };
 function loadFeature(name) {
   const urls = LAZY_MODULES[name];
@@ -318,6 +320,32 @@ function musicReports() { return apiJSON('/api/music/reports'); }
 function musicReportsCount() { return apiJSON('/api/music/reports/count'); }
 function musicResolveReport(id) { return apiJSON('/api/music/reports/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'resolved' }) }); }
 function musicDismissReport(id) { return apiJSON('/api/music/reports/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'dismissed' }) }); }
+/* ---- Photos app (shared albums) ----
+   Albums live in the system DB and are private to their owner + invited members;
+   photos are copied (not proxied) into the Photos store on add, so an album is
+   independent of the uploader's vault. See [[photos-app]]. */
+function photosAlbums() { return apiJSON('/api/photos/albums'); }
+function photosAlbum(id) { return apiJSON('/api/photos/albums/' + id); }
+function photosCreateAlbum(name, note, memberIds) { return apiJSON('/api/photos/albums', _json({ name, note, memberIds })); }
+function photosUpdateAlbum(id, data) { return apiJSON('/api/photos/albums/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }); }
+function photosDeleteAlbum(id) { return apiJSON('/api/photos/albums/' + id, { method: 'DELETE' }); }
+function photosSetMembers(id, members) { return apiJSON('/api/photos/albums/' + id + '/members', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ members }) }); }
+function photosLeaveAlbum(id) { return apiJSON('/api/photos/albums/' + id + '/leave', { method: 'POST' }); }
+function photosMembers() { return apiJSON('/api/photos/members'); }
+function photosAddItem(albumId, fileId) { return apiJSON('/api/photos/items', _json({ albumId, fileId })); }
+function photosUpdateItem(id, data) { return apiJSON('/api/photos/items/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }); }
+function photosRemoveItem(id) { return apiJSON('/api/photos/items/' + id, { method: 'DELETE' }); }
+function photosReorder(albumId, photoIds) { return apiJSON('/api/photos/albums/' + albumId + '/order', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ photoIds }) }); }
+/* copy a shared photo into the caller's own vault (parent = destination folder id or null) */
+async function photosSaveToVault(id, parent) {
+  const data = await apiJSON('/api/photos/items/' + id + '/save', _json({ parent: parent ?? null }));
+  if (data.file && typeof DB !== 'undefined' && DB && DB.files) DB.files.push(data.file);
+  return data;
+}
+function photosComments(id) { return apiJSON('/api/photos/items/' + id + '/comments'); }
+function photosAddComment(id, text) { return apiJSON('/api/photos/items/' + id + '/comments', _json({ text })); }
+function photosDeleteComment(id) { return apiJSON('/api/photos/comments/' + id, { method: 'DELETE' }); }
+
 function musicJams() { return apiJSON('/api/music/jams'); }
 function jamCreate(queue, name) { return apiJSON('/api/music/jam', _json({ queue, name })); }
 function jamJoin(id) { return apiJSON('/api/music/jam/' + id + '/join', { method: 'POST' }); }

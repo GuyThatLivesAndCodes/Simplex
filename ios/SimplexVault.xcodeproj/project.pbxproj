@@ -36,6 +36,11 @@
 		7E38DC5A1A8A8DF55FA51E97 /* NeuralShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC0034CA6D3D5F938E11AB86 /* NeuralShell.swift */; };
 		63B67D2423FA76D72400A250 /* NeuralScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6454AADD714545BFA1EEB175 /* NeuralScreens.swift */; };
 		D0CEFC1F776C720E02AD6CF7 /* HabitStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D9F6393D6D320F1CB882BBB /* HabitStore.swift */; };
+		615082FC9C31CB1C560ADE9D /* ConnectShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD3FCB026E792AB0D99B80D9 /* ConnectShell.swift */; };
+		89EE0C2B1A0768E7DE78559B /* ConnectCallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9F759C02B87A9D657545FF2 /* ConnectCallView.swift */; };
+		7F70F1B2F76568D9DE5A3F31 /* ConnectScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = 181C1067C64942159590919B /* ConnectScreens.swift */; };
+		255089DCB5B71391AC0E12A6 /* ConnectStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CC7BC554AE50CB1D2A28B32 /* ConnectStore.swift */; };
+		AF7CA144925913A483E26C3F /* ConnectModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67EF460BF02A954C380A3409 /* ConnectModels.swift */; };
 		AE72946AE574918F6B1A5181 /* HabitTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBF23384152D364DE69F46D4 /* HabitTheme.swift */; };
 		F5E288ADDA5AAAB3F18047D8 /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 145FF7943920C5F0C6BF880D /* LoginView.swift */; };
 		71E3C458D995EA81A1D64CC7 /* MediaGallery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D8DDE2BC3F5C51F189EE01F /* MediaGallery.swift */; };
@@ -89,6 +94,11 @@
 		AC0034CA6D3D5F938E11AB86 /* NeuralShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeuralShell.swift; sourceTree = "<group>"; };
 		6454AADD714545BFA1EEB175 /* NeuralScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeuralScreens.swift; sourceTree = "<group>"; };
 		5D9F6393D6D320F1CB882BBB /* HabitStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitStore.swift; sourceTree = "<group>"; };
+		BD3FCB026E792AB0D99B80D9 /* ConnectShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectShell.swift; sourceTree = "<group>"; };
+		B9F759C02B87A9D657545FF2 /* ConnectCallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectCallView.swift; sourceTree = "<group>"; };
+		181C1067C64942159590919B /* ConnectScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectScreens.swift; sourceTree = "<group>"; };
+		0CC7BC554AE50CB1D2A28B32 /* ConnectStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectStore.swift; sourceTree = "<group>"; };
+		67EF460BF02A954C380A3409 /* ConnectModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectModels.swift; sourceTree = "<group>"; };
 		DBF23384152D364DE69F46D4 /* HabitTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HabitTheme.swift; sourceTree = "<group>"; };
 		145FF7943920C5F0C6BF880D /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
 		4D8DDE2BC3F5C51F189EE01F /* MediaGallery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaGallery.swift; sourceTree = "<group>"; };
@@ -161,6 +171,11 @@
 				AC0034CA6D3D5F938E11AB86 /* NeuralShell.swift */,
 				6454AADD714545BFA1EEB175 /* NeuralScreens.swift */,
 				5D9F6393D6D320F1CB882BBB /* HabitStore.swift */,
+				BD3FCB026E792AB0D99B80D9 /* ConnectShell.swift */,
+				B9F759C02B87A9D657545FF2 /* ConnectCallView.swift */,
+				181C1067C64942159590919B /* ConnectScreens.swift */,
+				0CC7BC554AE50CB1D2A28B32 /* ConnectStore.swift */,
+				67EF460BF02A954C380A3409 /* ConnectModels.swift */,
 				DBF23384152D364DE69F46D4 /* HabitTheme.swift */,
 				145FF7943920C5F0C6BF880D /* LoginView.swift */,
 				4D8DDE2BC3F5C51F189EE01F /* MediaGallery.swift */,
@@ -291,6 +306,11 @@
 				7E38DC5A1A8A8DF55FA51E97 /* NeuralShell.swift in Sources */,
 				63B67D2423FA76D72400A250 /* NeuralScreens.swift in Sources */,
 				D0CEFC1F776C720E02AD6CF7 /* HabitStore.swift in Sources */,
+				615082FC9C31CB1C560ADE9D /* ConnectShell.swift in Sources */,
+				89EE0C2B1A0768E7DE78559B /* ConnectCallView.swift in Sources */,
+				7F70F1B2F76568D9DE5A3F31 /* ConnectScreens.swift in Sources */,
+				255089DCB5B71391AC0E12A6 /* ConnectStore.swift in Sources */,
+				AF7CA144925913A483E26C3F /* ConnectModels.swift in Sources */,
 				AE72946AE574918F6B1A5181 /* HabitTheme.swift in Sources */,
 				F5E288ADDA5AAAB3F18047D8 /* LoginView.swift in Sources */,
 				71E3C458D995EA81A1D64CC7 /* MediaGallery.swift in Sources */,

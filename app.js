@@ -687,6 +687,8 @@ const APPS = [
   { id: 'analytics',  name: 'Analytics',  icon: 'chart',    tint: 'video',    status: 'ready', beta: true, desc: 'See how & when you use your workspace.' },
   { id: 'trading',    name: 'Trading',    icon: 'trend',    tint: 'audio',    status: 'ready', beta: true, desc: 'Let an always-learning AI trade — sandbox or live.' },
   { id: 'music',      name: 'Music',      icon: 'audio',    tint: 'audio',    status: 'ready', beta: true, desc: 'A shared library, playlists & listening together.' },
+  { id: 'photos',     name: 'Photos',     icon: 'image',    tint: 'image',    status: 'ready', beta: true, desc: 'Shared photo albums — invite people, everyone adds.' },
+  { id: 'connect',    name: 'Connect',    icon: 'window',   tint: 'video',    status: 'ready', beta: true, desc: 'Private rooms — call, share your screen & chat.' },
   { id: 'bugs',       name: 'Bug Reports',icon: 'bug',      tint: 'video',    status: 'ready', desc: 'Report a bug — admins read & triage them here.' },
   { id: 'visual',     name: 'Simplex Visual', icon: 'cube', tint: 'image',    status: 'ready', beta: true, desc: 'A 2D visual game engine — place actors on a canvas, build levels.' },
   { id: 'discord',    name: 'Discord Bot',icon: 'discord',  tint: 'audio',    status: 'ready', beta: true, adminOnly: true, desc: 'A voice assistant that lives in your Discord server.' },
@@ -844,6 +846,8 @@ async function openApp(id) {
   else if (id === 'analytics') { await openLazyApp(app, id, 'apps-misc', 'analyticsHTML', 'wireAnalytics'); }
   else if (id === 'trading') { await openLazyApp(app, id, 'apps-trading', 'tradingHTML', 'wireTrading'); }
   else if (id === 'music') { await openLazyApp(app, id, 'apps-music', 'musicHTML', 'wireMusic'); }
+  else if (id === 'photos') { await openLazyApp(app, id, 'apps-photos', 'photosHTML', 'wirePhotos'); }
+  else if (id === 'connect') { await openLazyApp(app, id, 'apps-connect', 'connectHTML', 'wireConnect'); }
   else if (id === 'bugs') { await openLazyApp(app, id, 'apps-misc', 'bugsHTML', 'wireBugs'); }
   else if (id === 'visual') { await openLazyApp(app, id, 'apps-visual', 'visualHTML', 'wireVisual'); }
   else if (id === 'discord') { await openLazyApp(app, id, 'apps-discord', 'discordHTML', 'wireDiscord'); }
@@ -889,6 +893,12 @@ function pathFor() {
     return '/database/' + (DB_PATH[v] || v);
   }
   if (currentApp === 'tools') return (_toolView && _toolView !== 'grid') ? '/tools/' + _toolView : '/tools';
+  // an open album is a real, shareable URL (/photos/album/<id>); bare /photos is the
+  // album list. NB: distinct from /database/photos, the vault's image category.
+  if (currentApp === 'photos') return (typeof PH !== 'undefined' && PH.openAlbum) ? '/photos/album/' + PH.openAlbum.id : '/photos';
+  // an open room is a real URL (/connect/room/<id>) — but note the CODE is what
+  // grants access, never the link: opening this path without membership 404s.
+  if (currentApp === 'connect') return (typeof CN !== 'undefined' && CN.room) ? '/connect/room/' + CN.room.id : '/connect';
   if (currentApp === 'whatsnew') return '/whats-new';
   return '/' + currentApp;   // ai, code, notes, settings, connectors, neural
 }
@@ -915,6 +925,8 @@ async function route(pathname) {
     else if (top === 'tools') { await openApp('tools'); if (seg[1] && TOOLS.find(t => t.id === seg[1])) openTool(seg[1]); }
     else if (top === 'whats-new') { try { await ensureSession(); } catch (e) { if (e && e.code === 'AUTH') return relock(); } openWhatsNew(); }
     else if (top === 'music') { await openApp('music'); if (seg[1] === 'playlist' && seg[2]) musicOpenPlaylist(seg[2]); }
+    else if (top === 'photos') { await openApp('photos'); if (seg[1] === 'album' && seg[2]) photosOpenAlbum(seg[2]); }
+    else if (top === 'connect') { await openApp('connect'); if (seg[1] === 'room' && seg[2]) connectOpenRoom(seg[2]); }
     else if (['ai', 'code', 'notes', 'settings', 'connectors', 'neural', 'analytics', 'trading', 'bugs', 'visual', 'discord'].includes(top)) await openApp(top);
     else goDashboard();
   } catch (e) { console.error('route failed', e); }
@@ -1072,6 +1084,41 @@ function openWhatsNew() {
    (see wnTagFor / wnRelTime) — never hardcoded. To ship an update, prepend one
    object here; the banner, footer, numbering, dates and paging all follow. */
 const WHATS_NEW = [
+  {
+    date: '2026-08-01',
+    title: 'Connect — private rooms for calls, screen sharing & chat',
+    dek: `A new app: make a room, get a <strong>5-character code</strong>, and whoever you give it to can join. Camera, microphone and <strong>screen sharing</strong>, with a chat running alongside. The call is <strong>end-to-end encrypted</strong> — your video and voice go straight to the other people and never touch the server.`,
+    items: [
+      {
+        icon: 'window', tint: 'video',
+        head: 'A room is a code',
+        badge: { text: 'New', cls: 'new' },
+        body: `Create a room and you get a code like <code>ABC23</code> — five characters, letters and numbers. That code is the <strong>only</strong> way in: rooms are never listed to anyone who hasn't joined, so sharing the code is how you invite someone. Tap a code anywhere to copy it. The owner can <strong>lock</strong> a room to stop the code letting anyone else in.`,
+      },
+      {
+        icon: 'video', tint: 'video',
+        head: 'Camera, mic and your screen',
+        badge: { text: 'New', cls: 'new' },
+        body: `Join with just your microphone, or turn the <strong>camera</strong> on too. <strong>Share your screen</strong> at full resolution for a demo or some pair programming. Double-click anyone's tile to blow it up to speaker view, raise a hand when you don't want to cut in, and pick which mic and camera to use mid-call without dropping the connection.`,
+      },
+      {
+        icon: 'lock', tint: 'video',
+        head: 'The call never touches the server',
+        badge: { text: 'Private', cls: 'new' },
+        body: `Audio and video travel <strong>directly between the people in the room</strong>, encrypted end to end. Simplex relays only the initial handshake and never holds a key that could decrypt a single frame of your screen, camera or voice. Audio is sent as <strong>64 kbps stereo</strong>. Because everyone connects to everyone, a room holds up to <strong>8 people</strong>.`,
+      },
+      {
+        icon: 'note', tint: 'video',
+        head: 'Chat, with reactions',
+        body: `A chat runs beside the call. <strong>Reply</strong> to a specific message, add <strong>emoji reactions</strong>, and edit or delete your own. Everything is scoped to the room — and <strong>deleting the room erases its whole chat and every reaction with it</strong>, for everyone.`,
+      },
+      {
+        icon: 'user', tint: 'video',
+        head: 'On your phone too',
+        body: `Connect is in the iOS app as its own system: the room list, joining by code, and the full chat are native, and tapping <strong>Join</strong> drops you into the call with the speaker and Bluetooth wired up.`,
+      },
+    ],
+  },
   {
     date: '2026-07-23',
     title: 'Neural, reborn — train your own language model from the ground up',
@@ -6119,6 +6166,46 @@ async function musicOpenPlaylist(id) {
     toast(e.message || 'Could not open playlist', 'close');
   }
 }
+/* PHOTOS screen extracted to apps-photos.js (lazy via openLazyApp). Only the state
+   object + the two router-touched helpers stay here in core, since route() can ask
+   for an album before the lazy module has loaded. See [[photos-app]]. */
+const PH = {
+  albums: [],        // albums visible to me (owned + shared with me)
+  openAlbum: null,   // the full album (with .photos) when one is open
+  lightIdx: 0,       // index of the photo showing in the lightbox
+};
+function phOnPhotos() { return currentApp === 'photos'; }
+/* open an album by id, loading the Photos app + its lazy module first if needed.
+   quiet=true skips the URL sync (used when refreshing an already-open album). */
+async function photosOpenAlbum(id, quiet) {
+  if (!phOnPhotos()) { await openApp('photos'); }
+  try { await loadFeature('apps-photos'); } catch (e) {}
+  if (typeof photosOpenAlbumImpl !== 'function') return;
+  return photosOpenAlbumImpl(id, quiet);
+}
+
+/* CONNECT screen extracted to apps-connect.js (lazy via openLazyApp). Same split as
+   Photos: only the state object + the router-touched helpers live in core, since
+   route() can ask for a room before the lazy module has loaded. The live-call
+   fields (peers/local/es/…) are initialised by cnResetState() in that module.
+   See [[connect-app]]. */
+const CN = {
+  rooms: [],       // rooms I own or have joined
+  room: null,      // the room being viewed
+  inCall: false,   // am I actually in the call (SSE stream open)?
+  peers: new Map(),
+  messages: [],
+};
+function cnOnConnect() { return currentApp === 'connect'; }
+/* open a room by id, loading the Connect app + its lazy module first if needed.
+   quiet=true skips reloading chat (used when refreshing an already-open room). */
+async function connectOpenRoom(id, quiet) {
+  if (!cnOnConnect()) { await openApp('connect'); }
+  try { await loadFeature('apps-connect'); } catch (e) {}
+  if (typeof connectOpenRoomImpl !== 'function') return;
+  return connectOpenRoomImpl(id, quiet);
+}
+
 /* ============================================================
    TAGS — create/manage tags, attach to files/folders, browse by tag.
    The dictionary (TAGS) + per-file id-arrays live server-side; helpers in data.js.
@@ -7934,6 +8021,11 @@ function tosModal(text) {
 }
 
 async function handleFiles(fileList) {
+  // Copy the incoming list up front: callers may hand us a live FileList that gets
+  // emptied while we await below (see onPickedFiles). Copying first also means an
+  // empty batch is caught here instead of silently doing nothing.
+  const files = [...(fileList || [])];
+  if (!files.length) { toast('No files were selected', 'close'); return; }
   // Legal gate: the FIRST upload after the current Terms of Service version must be
   // preceded by acceptance. Show the agreement and only proceed once accepted; if
   // the user declines, the upload is abandoned (they can re-trigger it after).
@@ -7942,7 +8034,6 @@ async function handleFiles(fileList) {
     if (!ok) return;
   }
   const baseParent = state.view === 'browse' ? state.folder : null;
-  const files = [...fileList];
   let added = 0, limitHit = false, foldersMade = 0;
   const failures = [];           // {file, err} — surfaced in one "Uh oh!" modal after the batch
   let projected = usedBytes();   // running total incl. files added in this batch
@@ -8083,8 +8174,14 @@ function probeDuration(url, type) {
     el.onerror = rej; setTimeout(rej, 1500);   // short: never let one file stall the upload queue
   });
 }
-document.getElementById('uploader').addEventListener('change', e => { if (e.target.files.length) handleFiles(e.target.files); e.target.value = ''; });
-document.getElementById('folderUploader').addEventListener('change', e => { if (e.target.files.length) handleFiles(e.target.files); e.target.value = ''; });
+/* NB: snapshot the FileList into an array BEFORE clearing the input. `e.target.files`
+   is a *live* list owned by the element, and handleFiles is async — it suspends on the
+   ToS await before it can copy, so `e.target.value = ''` would empty the list out from
+   under it and the batch would silently upload nothing. (This is what broke picking
+   photos on mobile: the picker's confirm appeared to do nothing at all.) */
+const onPickedFiles = e => { const files = [...e.target.files]; e.target.value = ''; if (files.length) handleFiles(files); };
+document.getElementById('uploader').addEventListener('change', onPickedFiles);
+document.getElementById('folderUploader').addEventListener('change', onPickedFiles);
 /* Upload button opens a small menu: files or a whole folder */
 document.getElementById('uploadBtn').onclick = (e) => {
   e.stopPropagation();

@@ -14,6 +14,9 @@ struct AppShell: View {
     // Owned HERE too so training keeps running across system switches and models don't
     // reload (mirrors the habitStore decision).
     @StateObject private var neuralStore = NeuralStore()
+    // Owned here for the same reason: switching away from Connect and back must not
+    // drop the loaded room list (and, while a room is open, its chat).
+    @StateObject private var connectStore = ConnectStore()
 
     var body: some View {
         Group {
@@ -24,6 +27,8 @@ struct AppShell: View {
                 HabitShell()
             case .neural:
                 NeuralShell()
+            case .connect:
+                ConnectShell()
             }
         }
         // Every system follows the app's chosen appearance (dark/light + accent), so the
@@ -32,6 +37,7 @@ struct AppShell: View {
         .tint(appr.accent)
         .environmentObject(habitStore)
         .environmentObject(neuralStore)
+        .environmentObject(connectStore)
         .sheet(isPresented: $router.showSwitcher) { SystemSwitcher() }
     }
 }

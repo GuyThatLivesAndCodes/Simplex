@@ -7,7 +7,7 @@ import SwiftUI
 @MainActor
 final class SystemRouter: ObservableObject {
     enum System: String, CaseIterable, Identifiable {
-        case database, habit, neural
+        case database, habit, neural, connect
         var id: String { rawValue }
 
         var title: String {
@@ -15,6 +15,7 @@ final class SystemRouter: ObservableObject {
             case .database: return "Database"
             case .habit:    return "Habit"
             case .neural:   return "Neural"
+            case .connect:  return "Connect"
             }
         }
         var subtitle: String {
@@ -22,6 +23,7 @@ final class SystemRouter: ObservableObject {
             case .database: return "Your encrypted vault"
             case .habit:    return "Small things, done daily"
             case .neural:   return "Train your own language model"
+            case .connect:  return "Private rooms, calls & chat"
             }
         }
         var icon: String {
@@ -29,6 +31,7 @@ final class SystemRouter: ObservableObject {
             case .database: return "folder.fill"
             case .habit:    return "checkmark.seal.fill"
             case .neural:   return "brain"
+            case .connect:  return "video.bubble.fill"
             }
         }
         /// The accent used on the switcher tile for this system.
@@ -37,6 +40,7 @@ final class SystemRouter: ObservableObject {
             case .database: return SimplexTheme.accent
             case .habit:    return HabitTheme.terracotta
             case .neural:   return SimplexTheme.accent
+            case .connect:  return SimplexTheme.accent
             }
         }
     }
