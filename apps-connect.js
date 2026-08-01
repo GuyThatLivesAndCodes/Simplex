@@ -256,6 +256,12 @@ function cnRoomHTML() {
   </div>`;
 }
 
+/* Can this page capture at all? False on a plain-http origin, where the browser
+   removes navigator.mediaDevices outright (localhost is treated as secure). */
+function cnCanCapture() {
+  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+}
+
 /* the video grid (or the "you're not in the call yet" panel) */
 function cnStageHTML() {
   if (!CN.inCall) {
@@ -265,6 +271,10 @@ function cnStageHTML() {
         ${svg('window', 34, 1.4)}
         <h3>${live ? `${live} ${live === 1 ? 'person is' : 'people are'} in the call` : 'Nobody is in the call yet'}</h3>
         <p>Your camera, screen and voice go straight to the other people in the room — encrypted end to end. Simplex relays only the handshake.</p>
+        ${cnCanCapture() ? '' : `<div class="cn-prejoin-warn">${svg('info', 14)}
+          <span>This page is on <b>http</b>, so your browser blocks the mic and camera. Open Simplex over <b>https</b> to join the call.</span>
+        </div>`}
+        <p class="cn-prejoin-note">Your browser will ask for permission — choose <b>Allow</b> to join.</p>
         <div class="cn-prejoin-acts">
           <button class="btn primary" id="cnJoinCall">${svg('play', 15)} Join with mic</button>
           <button class="btn ghost" id="cnJoinCallCam">${svg('video', 15)} Join with mic + camera</button>
@@ -399,11 +409,39 @@ function cnAttachStreams() {
     // While presenting, your own tile previews the SCREEN; otherwise the camera.
     const want = CN.media.screen && CN.screen ? CN.screen : CN.local;
     if (want && self.srcObject !== want) self.srcObject = want;
+    cnTrackTileRatio(self);
   }
   for (const p of CN.peers.values()) {
     const el = document.querySelector(`[data-video="${CSS.escape(p.id)}"]`);
     if (el && p.stream && el.srcObject !== p.stream) el.srcObject = p.stream;
+    if (el) cnTrackTileRatio(el);
   }
+}
+
+/* Tiles are a fixed 16:9 by default. Once a <video> actually has frames, adopt the
+   STREAM's own ratio so a 4:3 webcam or a tall phone screen-share isn't letterboxed
+   into a 16:9 hole. Also flags .has-video so the tile stops being a plain avatar
+   box. Runs on loadedmetadata AND on resize, because a screen-share's dimensions
+   change when the presenter switches window. */
+function cnTrackTileRatio(video) {
+  if (!video || video._cnRatioWired) return;
+  video._cnRatioWired = true;
+  const apply = () => {
+    const tile = video.closest('.cn-tile');
+    if (!tile) return;
+    const w = video.videoWidth, h = video.videoHeight;
+    if (w > 0 && h > 0) {
+      tile.style.setProperty('--tile-ar', `${w} / ${h}`);
+      tile.classList.add('has-video');
+    } else {
+      tile.style.removeProperty('--tile-ar');
+      tile.classList.remove('has-video');
+    }
+  };
+  video.addEventListener('loadedmetadata', apply);
+  video.addEventListener('resize', apply);
+  video.addEventListener('emptied', apply);
+  apply();
 }
 
 async function cnBackToLobby() {
@@ -444,22 +482,117 @@ async function connectOpenRoomImpl(id, quiet) {
    ============================================================ */
 async function cnJoinCall({ cam }) {
   if (CN.inCall) return;
+
+  // Browsers only expose mediaDevices on a SECURE ORIGIN (https, or localhost). Over
+  // plain http on a LAN IP the whole API is missing, so getUserMedia would throw a
+  // bare TypeError and look like a mysterious permission failure. Catch it here and
+  // say what's actually wrong, since the fix is "use the https address".
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    cnInsecureOriginModal();
+    return;
+  }
+
+  // Show WHY the browser is about to prompt. Chrome/Safari put the permission bubble
+  // in a corner of the chrome where it's easy to miss (or dismiss by clicking away),
+  // and a dismissed prompt looks identical to "nothing happened".
+  const hint = cnPermHint(cam);
+  let stream = null;
   try {
-    CN.local = await navigator.mediaDevices.getUserMedia({
+    stream = await navigator.mediaDevices.getUserMedia({
       audio: cnAudioConstraints(),
       video: cam ? cnVideoConstraints() : false,
     });
   } catch (e) {
-    // The most common real-world failure: no permission, or no device at all.
-    toast(cnMediaError(e), 'info');
+    hint.remove();
+    // Asking for the camera when only a mic exists fails the WHOLE request, so retry
+    // audio-only rather than leaving them stuck outside the call.
+    if (cam && (e && (e.name === 'NotFoundError' || e.name === 'OverconstrainedError'))) {
+      toast('No camera found — joining with just your mic', 'info');
+      return cnJoinCall({ cam: false });
+    }
+    cnPermissionHelpModal(e, cam);
     return;
   }
+  hint.remove();
+
+  CN.local = stream;
   CN.media.mic = true;
-  CN.media.cam = !!cam;
+  CN.media.cam = !!cam && stream.getVideoTracks().length > 0;
   CN.inCall = true;
   cnRenderStage();
   cnOpenSignaling();
   cnStartLevelMeter();
+}
+
+/* A small banner shown WHILE the browser's own permission prompt is up, so the user
+   knows what they're being asked and that they must click Allow. Removed as soon as
+   the request settles either way. */
+function cnPermHint(cam) {
+  const el = document.createElement('div');
+  el.className = 'cn-perm-hint';
+  el.innerHTML = `${svg('info', 16)}<div>
+    <b>Allow ${cam ? 'microphone and camera' : 'microphone'} access</b>
+    <span>Your browser is asking now — choose <b>Allow</b> to join the call.</span>
+  </div>`;
+  document.body.appendChild(el);
+  return el;
+}
+
+/* getUserMedia failed. Explain the specific cause and how to undo it — a blocked
+   permission is sticky per-site, so "try again" alone never works. */
+function cnPermissionHelpModal(e, cam) {
+  const name = (e && e.name) || '';
+  const what = cam ? 'microphone and camera' : 'microphone';
+  let title = 'Could not start your ' + what;
+  let body = '';
+
+  if (name === 'NotAllowedError' || name === 'SecurityError') {
+    title = `${cam ? 'Microphone/camera' : 'Microphone'} access is blocked`;
+    body = `<p>Your browser blocked access, or the prompt was dismissed. Because the choice is remembered for this site, you need to clear it before trying again:</p>
+      <ol class="cn-help-steps">
+        <li>Click the <b>padlock</b> (or the camera/mic icon) in the address bar.</li>
+        <li>Set <b>Microphone</b>${cam ? ' and <b>Camera</b>' : ''} to <b>Allow</b>.</li>
+        <li>Reload the page and press Join again.</li>
+      </ol>
+      <p class="dim">On iPhone/iPad: Settings → Safari → Camera &amp; Microphone → Allow.</p>`;
+  } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+    title = 'No ' + what + ' found';
+    body = `<p>Your device didn't report ${cam ? 'a microphone or camera' : 'a microphone'}. Plug one in (or connect your headset) and press Join again.</p>`;
+  } else if (name === 'NotReadableError' || name === 'AbortError') {
+    title = 'Your ' + what + ' is busy';
+    body = `<p>Another app is using it — Zoom, Teams, Discord and OBS are the usual culprits. Close that app, then press Join again.</p>`;
+  } else {
+    body = `<p>${esc((e && e.message) || 'Unknown error')}</p>
+      <p class="dim">If this keeps happening, try another browser — Chrome, Edge, Firefox and Safari all support calls.</p>`;
+  }
+
+  cnHelpModal(title, body);
+}
+
+/* The page isn't on a secure origin, so the browser hides the capture API entirely.
+   No amount of permission-granting fixes this — they have to use https. */
+function cnInsecureOriginModal() {
+  const httpsUrl = 'https://' + location.host + location.pathname;
+  cnHelpModal('This page isn\'t secure, so calls are blocked', `
+    <p>Browsers only allow microphone and camera access over <b>https</b>. This page was opened over plain <b>http</b> (<code>${esc(location.origin)}</code>), so the browser hides those features completely — this isn't a Simplex permission you can grant.</p>
+    <p><b>Open Simplex over https instead</b>, then press Join again.</p>
+    <p class="dim">If you're on the local network, use the https address rather than the raw IP. <code>localhost</code> also counts as secure for testing on the same machine.</p>
+    <p><a href="${esc(httpsUrl)}" class="cn-help-link">Try ${esc(httpsUrl)}</a></p>`);
+}
+
+/* Shared help modal built on the app's existing .modal-bg / .modal markup. */
+function cnHelpModal(title, bodyHTML) {
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal cn-help">
+    <h3>${esc(title)}</h3>
+    <div class="cn-help-body">${bodyHTML}</div>
+    <div class="acts"><button class="btn primary" data-ok>Got it</button></div>
+  </div>`;
+  document.body.appendChild(bg);
+  const close = () => bg.remove();
+  bg.querySelector('[data-ok]').onclick = close;
+  bg.onclick = (e) => { if (e.target === bg) close(); };
 }
 
 /* 64 kbps stereo Opus is the target; these hints tell the browser to give us
@@ -774,13 +907,18 @@ async function cnToggleCam() {
     for (const t of CN.local.getVideoTracks()) { t.stop(); CN.local.removeTrack(t); cnDropTrack(t); }
     CN.media.cam = false;
   } else {
+    const hint = cnPermHint(true);
     try {
       const s = await navigator.mediaDevices.getUserMedia({ video: cnVideoConstraints() });
       const track = s.getVideoTracks()[0];
       CN.local.addTrack(track);
       cnAddTrackToPeers(track, CN.local);
       CN.media.cam = true;
-    } catch (e) { toast(cnMediaError(e), 'info'); return; }
+    } catch (e) {
+      // turning the camera on mid-call has its own prompt, so explain it the same way
+      cnPermissionHelpModal(e, true);
+      return;
+    } finally { hint.remove(); }
   }
   cnPublishMedia();
   cnRenderStage();
@@ -892,53 +1030,121 @@ async function cnLeaveCall(opts = {}) {
 
 /* ---- device picker ------------------------------------------------------- */
 async function cnDevicePicker() {
+  if (!cnCanCapture()) { cnInsecureOriginModal(); return; }
   let list = [];
   try { list = await navigator.mediaDevices.enumerateDevices(); } catch (e) {}
   CN.devices.mics = list.filter(d => d.kind === 'audioinput');
   CN.devices.cams = list.filter(d => d.kind === 'videoinput');
-  const opt = (d, sel) => `<option value="${esc(d.deviceId)}" ${sel === d.deviceId ? 'selected' : ''}>${esc(d.label || 'Device')}</option>`;
+  // Labels are EMPTY until the site has been granted access at least once — a
+  // list of "Device / Device / Device" is useless, so say why and offer to fix it.
+  const unlabeled = [...CN.devices.mics, ...CN.devices.cams].some(d => !d.label);
+
+  const opt = (d, sel, i) => `<option value="${esc(d.deviceId)}" ${sel === d.deviceId ? 'selected' : ''}>${esc(d.label || `Device ${i + 1}`)}</option>`;
   const html = `<div class="cn-devs">
     <label class="cn-dev-row"><span>Microphone</span>
-      <select id="cnMicSel">${CN.devices.mics.map(d => opt(d, CN.devices.micId)).join('') || '<option>No microphone</option>'}</select>
+      <select id="cnMicSel">${CN.devices.mics.map((d, i) => opt(d, CN.devices.micId, i)).join('') || '<option value="">No microphone found</option>'}</select>
     </label>
     <label class="cn-dev-row"><span>Camera</span>
-      <select id="cnCamSel">${CN.devices.cams.map(d => opt(d, CN.devices.camId)).join('') || '<option>No camera</option>'}</select>
+      <select id="cnCamSel">${CN.devices.cams.map((d, i) => opt(d, CN.devices.camId, i)).join('') || '<option value="">No camera found</option>'}</select>
     </label>
-    <p class="cn-dev-note">Audio is sent as 64 kbps stereo Opus. Video adapts to your connection.</p>
+    ${unlabeled ? `<p class="cn-dev-note">Your browser hides device names until you've allowed access once. Choosing a camera below will ask for permission.</p>` : ''}
+    <p class="cn-dev-note">Changes apply straight away — the call keeps running. Audio is sent as 64 kbps stereo Opus.</p>
   </div>`;
-  const ok = await cnModal({ title: 'Devices', bodyHTML: html, okText: 'Use these' });
-  if (!ok) return;
-  const ms = document.getElementById('cnMicSel');
-  const cs = document.getElementById('cnCamSel');
-  const newMic = ms && ms.value, newCam = cs && cs.value;
-  const micChanged = newMic && newMic !== CN.devices.micId;
-  const camChanged = newCam && newCam !== CN.devices.camId;
-  CN.devices.micId = newMic || CN.devices.micId;
-  CN.devices.camId = newCam || CN.devices.camId;
-  if (!CN.inCall) return;
+  // Read the selects INSIDE onAccept — the modal is removed before the promise
+  // resolves, so reading them afterwards would always come back empty.
+  const picked = await cnModal({
+    title: 'Devices', bodyHTML: html, okText: 'Use these',
+    onAccept: (root) => ({
+      mic: (root.querySelector('#cnMicSel') || {}).value || null,
+      cam: (root.querySelector('#cnCamSel') || {}).value || null,
+    }),
+  });
+  if (!picked) return;
+
+  const newMic = picked.mic || null;
+  const newCam = picked.cam || null;
+  const micChanged = !!newMic && newMic !== CN.devices.micId;
+  const camChanged = !!newCam && newCam !== CN.devices.camId;
+  const prevMic = CN.devices.micId, prevCam = CN.devices.camId;
+  if (newMic) CN.devices.micId = newMic;
+  if (newCam) CN.devices.camId = newCam;
+  if (!CN.inCall) return;   // not live yet: the choice is used on join
+
   // Swap the live tracks in place so the call doesn't drop.
-  if (micChanged) await cnSwapTrack('audio');
-  if (camChanged && CN.media.cam) await cnSwapTrack('video');
+  if (micChanged) {
+    if (!await cnSwapTrack('audio')) CN.devices.micId = prevMic;   // revert on failure
+  }
+  if (camChanged) {
+    if (CN.media.cam) {
+      // camera already running: hot-swap it
+      if (await cnSwapTrack('video')) toast('Camera switched', 'check');
+      else CN.devices.camId = prevCam;
+    } else {
+      // Camera is OFF. Picking a different camera clearly means "use that one",
+      // so turn it on rather than silently doing nothing until they toggle it.
+      await cnToggleCam();
+    }
+  }
+  cnRenderStage();
 }
 
 /* Replace one live track everywhere (replaceTrack needs no renegotiation). */
 async function cnSwapTrack(kind) {
+  if (!cnCanCapture()) { cnInsecureOriginModal(); return false; }
+  // Selecting a device the browser hasn't granted yet triggers a FRESH permission
+  // prompt (each camera is its own grant), so show the same hint as on join —
+  // otherwise the switch looks like it silently did nothing.
+  const hint = cnPermHint(kind === 'video');
+  let fresh = null;
   try {
     const s = await navigator.mediaDevices.getUserMedia(
       kind === 'audio' ? { audio: cnAudioConstraints() } : { video: cnVideoConstraints() });
-    const fresh = kind === 'audio' ? s.getAudioTracks()[0] : s.getVideoTracks()[0];
-    if (!fresh) return;
-    const old = kind === 'audio' ? CN.local.getAudioTracks()[0] : CN.local.getVideoTracks()[0];
-    for (const peer of CN.peers.values()) {
-      if (!peer.pc) continue;
-      const sender = peer.pc.getSenders().find(x => x.track && x.track.kind === kind);
-      if (sender) { try { await sender.replaceTrack(fresh); } catch (e) {} }
+    fresh = kind === 'audio' ? s.getAudioTracks()[0] : s.getVideoTracks()[0];
+    if (!fresh) { s.getTracks().forEach(t => t.stop()); return false; }
+  } catch (e) {
+    hint.remove();
+    // A device can vanish between listing and selecting (unplugged), and an exact
+    // deviceId that no longer resolves throws OverconstrainedError. Fall back to
+    // the system default rather than leaving them with no camera at all.
+    if (e && (e.name === 'OverconstrainedError' || e.name === 'NotFoundError')) {
+      if (kind === 'audio') CN.devices.micId = null; else CN.devices.camId = null;
+      toast('That device is unavailable — using the default instead', 'info');
+      return cnSwapTrack(kind);
     }
-    if (old) { old.stop(); CN.local.removeTrack(old); }
-    CN.local.addTrack(fresh);
-    if (kind === 'audio') fresh.enabled = CN.media.mic;
-    cnAttachStreams();
-  } catch (e) { toast(cnMediaError(e), 'info'); }
+    cnPermissionHelpModal(e, kind === 'video');
+    return false;
+  }
+  hint.remove();
+
+  // Swap into every peer connection first (replaceTrack needs no renegotiation),
+  // then update the local stream.
+  for (const peer of CN.peers.values()) {
+    if (!peer.pc) continue;
+    const sender = peer.pc.getSenders().find(x => x.track && x.track.kind === kind);
+    if (sender) { try { await sender.replaceTrack(fresh); } catch (e) {} }
+  }
+  const old = kind === 'audio' ? CN.local.getAudioTracks()[0] : CN.local.getVideoTracks()[0];
+  if (old) { old.stop(); CN.local.removeTrack(old); }
+  CN.local.addTrack(fresh);
+  if (kind === 'audio') fresh.enabled = CN.media.mic;
+
+  // Force the local preview to re-bind. cnAttachStreams() only assigns srcObject
+  // when the OBJECT changed, and CN.local is the same MediaStream instance — so
+  // without this the tile keeps painting the old camera's last frame.
+  cnRefreshSelfPreview();
+  return true;
+}
+
+/* Re-point the self tile at the local stream, even when the MediaStream object is
+   unchanged (swapping a track mutates it in place). */
+function cnRefreshSelfPreview() {
+  const el = document.getElementById('cnSelfVideo');
+  if (!el) return;
+  const want = CN.media.screen && CN.screen ? CN.screen : CN.local;
+  el.srcObject = null;
+  el.srcObject = want || null;
+  if (want) { const p = el.play(); if (p && p.catch) p.catch(() => {}); }
+  cnTrackTileRatio(el);
 }
 
 /* ---- speaking indicator --------------------------------------------------
@@ -1272,6 +1478,11 @@ async function cnRoomSettings() {
       } catch (e) { toast("Couldn't delete the room", 'info'); }
       return true;
     },
+    onAccept: (root) => ({
+      name: (root.querySelector('#cnSetName') || {}).value || '',
+      topic: (root.querySelector('#cnSetTopic') || {}).value || '',
+      locked: !!(root.querySelector('#cnSetLock') || {}).checked,
+    }),
     onMount: (root) => {
       root.querySelectorAll('[data-kick]').forEach(b => {
         b.onclick = async () => {
@@ -1286,9 +1497,8 @@ async function cnRoomSettings() {
     },
   });
   if (!ok) return;
-  const name = (document.getElementById('cnSetName') || {}).value;
-  const topic = (document.getElementById('cnSetTopic') || {}).value;
-  const locked = !!(document.getElementById('cnSetLock') || {}).checked;
+  // captured by onAccept while the modal was still mounted (see cnModal)
+  const { name, topic, locked } = ok;
   try {
     const d = await cnApi('/api/connect/rooms/' + encodeURIComponent(r.id), {
       method: 'PATCH', body: { name, topic, locked },
@@ -1332,7 +1542,7 @@ function cnPrompt({ title, label, value = '', placeholder = '', okText = 'OK', h
 /* Modal with custom body markup. `onMount` gets the modal element so callers can
    wire controls inside it; `extra` adds a third (usually destructive) button
    whose handler returning true closes the modal. */
-function cnModal({ title, bodyHTML, okText = 'Save', extraText = '', onExtra = null, onMount = null }) {
+function cnModal({ title, bodyHTML, okText = 'Save', extraText = '', onExtra = null, onMount = null, onAccept = null }) {
   return new Promise(resolve => {
     const bg = document.createElement('div'); bg.className = 'modal-bg';
     bg.innerHTML = `<div class="modal cn-modal">
@@ -1347,7 +1557,18 @@ function cnModal({ title, bodyHTML, okText = 'Save', extraText = '', onExtra = n
     </div>`;
     document.body.appendChild(bg);
     let settled = false;
-    const done = (v) => { if (settled) return; settled = true; bg.remove(); resolve(v); };
+    // IMPORTANT: `onAccept` runs while the modal is still in the DOM and its return
+    // value is what the promise resolves to. Callers that need to READ their own
+    // form controls must use it — reading them after the promise resolves fails,
+    // because the modal (and its inputs) are already removed by then.
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      let out = v;
+      if (v === true && onAccept) { try { out = onAccept(bg.querySelector('.modal')); } catch (e) { out = v; } }
+      bg.remove();
+      resolve(out);
+    };
     bg.querySelector('[data-cancel]').onclick = () => done(false);
     bg.querySelector('[data-ok]').onclick = () => done(true);
     bg.onclick = e => { if (e.target === bg) done(false); };

@@ -19,11 +19,33 @@ struct ConnectRoom: Identifiable, Codable, Equatable {
     var locked: Bool
     let created: Double
     var updated: Double
-    var members: [ConnectMember]
-    var memberCount: Int
-    var liveCount: Int
-    var live: [ConnectLivePeer]
+    // Tolerant defaults: the room list and the single-room payload don't carry
+    // identical field sets, and a missing key must never fail the decode.
+    var members: [ConnectMember] = []
+    var memberCount: Int = 0
+    var liveCount: Int = 0
+    var live: [ConnectLivePeer] = []
     var maxPeers: Int?
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        code = try c.decodeIfPresent(String.self, forKey: .code) ?? ""
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Room"
+        topic = try c.decodeIfPresent(String.self, forKey: .topic)
+        ownerId = try c.decodeIfPresent(String.self, forKey: .ownerId) ?? ""
+        ownerName = try c.decodeIfPresent(String.self, forKey: .ownerName) ?? ""
+        isOwner = try c.decodeIfPresent(Bool.self, forKey: .isOwner) ?? false
+        canManage = try c.decodeIfPresent(Bool.self, forKey: .canManage) ?? false
+        locked = try c.decodeIfPresent(Bool.self, forKey: .locked) ?? false
+        created = try c.decodeIfPresent(Double.self, forKey: .created) ?? 0
+        updated = try c.decodeIfPresent(Double.self, forKey: .updated) ?? 0
+        members = try c.decodeIfPresent([ConnectMember].self, forKey: .members) ?? []
+        memberCount = try c.decodeIfPresent(Int.self, forKey: .memberCount) ?? members.count
+        liveCount = try c.decodeIfPresent(Int.self, forKey: .liveCount) ?? 0
+        live = try c.decodeIfPresent([ConnectLivePeer].self, forKey: .live) ?? []
+        maxPeers = try c.decodeIfPresent(Int.self, forKey: .maxPeers)
+    }
 
     /// The code split for display, so it can be shown letter-spaced and read aloud.
     var codeCharacters: [String] { code.map { String($0) } }
@@ -61,12 +83,29 @@ struct ConnectMessage: Identifiable, Codable, Equatable {
     let authorId: String
     let authorName: String
     var text: String
-    let kind: String
-    let replyTo: String?
+    // Defaulted below in init(from:) — a broadcast payload omits/zeroes some of
+    // these, and a missing key must never fail the whole decode.
+    var kind: String = "chat"
+    var replyTo: String?
     var edited: Double?
     let created: Double
-    var mine: Bool
-    var reactions: [ConnectReaction]
+    var mine: Bool = false
+    var reactions: [ConnectReaction] = []
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        roomId = try c.decodeIfPresent(String.self, forKey: .roomId) ?? ""
+        authorId = try c.decode(String.self, forKey: .authorId)
+        authorName = try c.decodeIfPresent(String.self, forKey: .authorName) ?? "Someone"
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? "chat"
+        replyTo = try c.decodeIfPresent(String.self, forKey: .replyTo)
+        edited = try c.decodeIfPresent(Double.self, forKey: .edited)
+        created = try c.decodeIfPresent(Double.self, forKey: .created) ?? 0
+        mine = try c.decodeIfPresent(Bool.self, forKey: .mine) ?? false
+        reactions = try c.decodeIfPresent([ConnectReaction].self, forKey: .reactions) ?? []
+    }
 
     var createdDate: Date { Date(timeIntervalSince1970: created / 1000) }
     var wasEdited: Bool { edited != nil }

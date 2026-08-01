@@ -4660,10 +4660,25 @@ img.mu-cover.lazy { background: var(--card); }
    hardcoded bar height here pushed the control bar (and its Leave button) off the
    bottom of the screen. min-height:0 lets the inner grid shrink instead of
    overflowing. */
-.cn-room { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-/* the room screen manages its own scrolling; only the lobby scrolls the page */
-.cn-app:has(.cn-room) { overflow: hidden; padding-bottom: 0; }
-.cn-app > #cnBody:has(.cn-room) { height: 100%; padding-top: 0; }
+.cn-room { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+/* When a room is open the app becomes a FLEX COLUMN and the room is the growing
+   child. This replaced a height:100% chain, which double-counted #cnBody's own
+   padding (and the .cn-head above it) and so ran past the bottom of the screen.
+   Flex needs no arithmetic: whatever the header costs, the room takes the rest.
+   The room manages its own scrolling; only the lobby scrolls the page. */
+.cn-app:has(.cn-room) { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 0; }
+/* Inside a room the app-level header (title + blurb + New/Join/Refresh) is dead
+   weight — it costs ~160px, most of a phone's stage, and the room has its own
+   header with Rooms/code/settings. Hide it while a room is open. */
+.cn-app:has(.cn-room) > .cn-head { display: none; }
+.cn-app > #cnBody:has(.cn-room) {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+  padding-top: 0;
+  /* the BUMPER: the room shouldn't sit flush against the bottom edge of the
+     window. Safe-area aware so it clears the iPhone home indicator too. */
+  padding-bottom: calc(14px + var(--safe-bottom));
+  width: 100%; box-sizing: border-box;
+}
 .cn-room-head { display: flex; align-items: center; gap: 12px; padding: 10px 4px 12px; flex-wrap: wrap; }
 .cn-room-id { min-width: 0; }
 .cn-room-name { font-weight: 700; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -4682,19 +4697,60 @@ img.mu-cover.lazy { background: var(--card); }
 .cn-prejoin-card h3 { margin: 0; font-size: 16px; }
 .cn-prejoin-card p { margin: 0 0 8px; font-size: 12.5px; color: var(--ink-dim); line-height: 1.6; }
 .cn-prejoin-acts { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.cn-prejoin-note { font-size: 11.5px; color: var(--ink-ghost); margin: 0 0 4px !important; }
+/* shown when the origin can't capture at all (plain http) */
+.cn-prejoin-warn { display: flex; align-items: flex-start; gap: 8px; text-align: left; font-size: 12px; line-height: 1.5;
+                   padding: 9px 11px; margin-bottom: 4px; border-radius: 9px;
+                   color: var(--ink-dim); background: color-mix(in oklch, var(--err, oklch(0.65 0.19 25)) 12%, transparent);
+                   border: 1px solid color-mix(in oklch, var(--err, oklch(0.65 0.19 25)) 35%, transparent); }
+.cn-prejoin-warn svg { flex-shrink: 0; margin-top: 1px; color: var(--err, oklch(0.65 0.19 25)); }
+
+/* the "your browser is asking now" banner, shown while the native prompt is up */
+.cn-perm-hint { position: fixed; top: calc(14px + var(--safe-top)); left: 50%; transform: translateX(-50%);
+                z-index: 120; display: flex; align-items: flex-start; gap: 10px; max-width: min(420px, calc(100vw - 28px));
+                padding: 12px 15px; border-radius: 12px; background: var(--card);
+                border: 1px solid color-mix(in oklch, var(--vid) 45%, var(--line));
+                box-shadow: 0 10px 34px rgba(0,0,0,0.45); animation: sx-rise 0.22s var(--ease) both; }
+.cn-perm-hint svg { flex-shrink: 0; margin-top: 1px; color: var(--vid); }
+.cn-perm-hint div { display: flex; flex-direction: column; gap: 3px; }
+.cn-perm-hint b { font-size: 13px; }
+.cn-perm-hint span { font-size: 12px; color: var(--ink-dim); line-height: 1.45; }
+
+/* the permission / insecure-origin help modal */
+.cn-help { max-width: 480px; }
+.cn-help-body { font-size: 13px; line-height: 1.6; color: var(--ink-dim); margin: 6px 0 14px; }
+.cn-help-body p { margin: 0 0 10px; }
+.cn-help-body code { font-family: var(--mono); font-size: 12px; padding: 1px 5px; border-radius: 4px;
+                     background: var(--bg); color: var(--ink); word-break: break-all; }
+.cn-help-steps { margin: 0 0 10px; padding-left: 20px; display: flex; flex-direction: column; gap: 5px; }
+.cn-help-link { color: var(--vid); text-decoration: underline; word-break: break-all; }
 
 /* video grid — column count follows the participant count */
-.cn-grid { display: grid; gap: 8px; padding: 8px; height: 100%; grid-auto-rows: 1fr; }
-.cn-grid.n1 { grid-template-columns: 1fr; }
-.cn-grid.n2 { grid-template-columns: repeat(2, 1fr); }
-.cn-grid.n3, .cn-grid.n4 { grid-template-columns: repeat(2, 1fr); }
-.cn-grid.n5, .cn-grid.n6, .cn-grid.n7, .cn-grid.n8, .cn-grid.n9 { grid-template-columns: repeat(3, 1fr); }
+/* Tiles keep a FIXED 16:9 shape and are centred in the stage, rather than being
+   stretched to fill whatever height is left (which produced very tall, narrow
+   boxes around a small avatar). `grid-auto-rows: auto` + aspect-ratio on the tile
+   means the row height follows the tile's own shape, and the grid is centred in
+   the leftover space. A tile only DEPARTS from 16:9 when it carries real video —
+   see .cn-tile.has-video below, which adopts the stream's own ratio. */
+.cn-grid { display: grid; gap: 10px; padding: 10px; height: 100%; align-content: center; justify-content: center;
+           grid-auto-rows: auto; overflow: auto; }
+.cn-grid.n1 { grid-template-columns: minmax(0, min(720px, 100%)); }
+.cn-grid.n2 { grid-template-columns: repeat(2, minmax(0, min(460px, 100%))); }
+.cn-grid.n3, .cn-grid.n4 { grid-template-columns: repeat(2, minmax(0, min(400px, 100%))); }
+.cn-grid.n5, .cn-grid.n6, .cn-grid.n7, .cn-grid.n8, .cn-grid.n9 { grid-template-columns: repeat(3, minmax(0, min(320px, 100%))); }
 /* speaker view: the pinned tile fills the stage; the rest are hidden */
-.cn-grid.pinned { grid-template-columns: 1fr; }
+.cn-grid.pinned { grid-template-columns: minmax(0, 100%); align-content: stretch; }
+.cn-grid.pinned .cn-tile { aspect-ratio: auto; height: 100%; }
 .cn-grid.pinned .cn-tile.thumb { display: none; }
 
 .cn-tile { position: relative; background: var(--bg); border: 1px solid var(--line-soft); border-radius: 10px; overflow: hidden;
-           min-height: 0; display: flex; align-items: center; justify-content: center; transition: border-color 0.14s; }
+           min-height: 0; display: flex; align-items: center; justify-content: center; transition: border-color 0.14s;
+           /* the fixed shape: every tile is 16:9 until it actually carries video */
+           aspect-ratio: 16 / 9; width: 100%; }
+/* A tile showing a real stream adopts THAT stream's ratio (set inline from the
+   track's dimensions), so a 4:3 webcam or a tall phone screen-share isn't cropped
+   or letterboxed into a 16:9 hole. */
+.cn-tile.has-video { aspect-ratio: var(--tile-ar, 16 / 9); }
 .cn-tile.speaking { border-color: var(--vid); box-shadow: 0 0 0 2px color-mix(in oklch, var(--vid) 35%, transparent); }
 .cn-tile video { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; }
 .cn-tile video.off { display: none; }
@@ -4810,7 +4866,9 @@ img.mu-cover.lazy { background: var(--card); }
 
 /* ---- narrow screens: chat becomes a bottom sheet, controls compress ---- */
 @media (max-width: 900px) {
-  .cn-room { height: calc(var(--app-h) - 54px); }
+  /* NB: no height override here — the flex column above already sizes the room to
+     whatever space is left. A calc() against --app-h used to over-run the viewport
+     because it couldn't know the header's real height. */
   .cn-room.chat-open .cn-room-body { grid-template-columns: 1fr; grid-template-rows: 1fr 46%; }
   .cn-grid.n3, .cn-grid.n4, .cn-grid.n5, .cn-grid.n6, .cn-grid.n7, .cn-grid.n8, .cn-grid.n9 { grid-template-columns: repeat(2, 1fr); }
   /* Icons only, and the bar must stay ONE row: six controls at ~44px still exceed

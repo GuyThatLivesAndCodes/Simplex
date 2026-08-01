@@ -73,7 +73,18 @@ struct ConnectCallView: View {
 
     /// Ask up-front so the web view doesn't hit a silent denial mid-negotiation.
     /// Camera is requested too (people usually enable it during the call).
+    ///
+    /// NB: `requestAccess` only prompts on the FIRST ask. Once denied it returns false
+    /// immediately with no UI, which is why a previously-denied user would otherwise
+    /// see nothing happen at all — hence the explicit status check and the alert
+    /// pointing at Settings, which is the only place that decision can be reversed.
     private func requestMediaPermissions() async {
+        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        if micStatus == .denied || micStatus == .restricted {
+            permissionDenied = true
+            configureAudioSession()
+            return
+        }
         let mic = await AVCaptureDevice.requestAccess(for: .audio)
         _ = await AVCaptureDevice.requestAccess(for: .video)
         if !mic { permissionDenied = true }

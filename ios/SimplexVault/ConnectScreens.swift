@@ -261,6 +261,7 @@ struct ConnectRoomView: View {
     @State private var showSettings = false
     @State private var editing: ConnectMessage?
     @State private var editText = ""
+    @State private var showEdit = false
     @State private var reactingTo: ConnectMessage?
 
     private var current: ConnectRoom { connect.openRoom ?? room }
@@ -288,12 +289,16 @@ struct ConnectRoomView: View {
         .fullScreenCover(isPresented: $showCall) { ConnectCallView(room: current) }
         .sheet(isPresented: $showSettings) { ConnectRoomSettingsSheet().environmentObject(connect) }
         .sheet(item: $reactingTo) { msg in ConnectReactionPicker(message: msg).environmentObject(connect) }
-        .alert("Edit message", isPresented: Binding(
-            get: { editing != nil }, set: { if !$0 { editing = nil } })) {
+        // `alert(item:)`-style presentation via a dedicated flag. An inline
+        // Binding(get:set:) inside the ViewBuilder trips up type inference here.
+        .alert("Edit message", isPresented: $showEdit) {
             TextField("Message", text: $editText)
             Button("Cancel", role: .cancel) { editing = nil }
             Button("Save") {
-                if let m = editing { Task { await connect.edit(m, text: editText) } }
+                if let m = editing {
+                    let text = editText
+                    Task { await connect.edit(m, text: text) }
+                }
                 editing = nil
             }
         }
@@ -334,7 +339,7 @@ struct ConnectRoomView: View {
                             canManage: current.canManage,
                             onReply: { connect.replyingTo = msg },
                             onReact: { reactingTo = msg },
-                            onEdit: { editText = msg.text; editing = msg },
+                            onEdit: { editText = msg.text; editing = msg; showEdit = true },
                             onDelete: { Task { await connect.delete(msg) } },
                             onToggleReaction: { emoji in Task { await connect.toggleReaction(msg, emoji: emoji) } }
                         )
