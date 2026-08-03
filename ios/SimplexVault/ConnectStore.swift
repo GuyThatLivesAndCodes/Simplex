@@ -20,6 +20,8 @@ final class ConnectStore: ObservableObject {
     /// Set when a join fails, so the join sheet can show it inline rather than as a toast.
     @Published var joinError: String?
     @Published var replyingTo: ConnectMessage?
+    /// Name of the file currently being sent, so the chat can show a placeholder.
+    @Published var uploading: String?
 
     /// The account id of the signed-in user, needed to recompute `mine` on reactions.
     var myAccountId: String?
@@ -109,10 +111,11 @@ final class ConnectStore: ObservableObject {
         lastMessageAt = 0
     }
 
-    func updateRoom(name: String, topic: String?, locked: Bool) async {
+    func updateRoom(name: String, topic: String?, locked: Bool, permanent: Bool? = nil) async {
         guard let room = openRoom else { return }
         do {
-            let updated = try await API.shared.updateConnectRoom(room.id, name: name, topic: topic, locked: locked)
+            let updated = try await API.shared.updateConnectRoom(room.id, name: name, topic: topic,
+                                                                 locked: locked, permanent: permanent)
             openRoom = updated
             if let i = rooms.firstIndex(where: { $0.id == updated.id }) { rooms[i] = updated }
         } catch let e as APIError { error = e.message }
@@ -201,6 +204,32 @@ final class ConnectStore: ObservableObject {
                 room: room.id, id: message.id, emoji: emoji, remove: mineAlready)
             upsert(updated)
         } catch let e as APIError { error = e.message }
+        catch { self.error = error.localizedDescription }
+    }
+
+    // MARK: - attachments
+
+    /// Upload from the device. These bytes exist only on the server for this room,
+    /// so they are destroyed with it — the UI warns before calling this.
+    func uploadFile(_ url: URL) async {
+        guard let room = openRoom else { return }
+        uploading = url.lastPathComponent
+        defer { uploading = nil }
+        // a security-scoped URL from the document picker must be opened first
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do { upsert(try await API.shared.uploadConnectFile(room: room.id, fileURL: url)) }
+        catch let e as APIError { error = e.message }
+        catch { self.error = error.localizedDescription }
+    }
+
+    /// Share a file already in the caller's vault (server copies it).
+    func shareVaultFile(_ fileId: String) async {
+        guard let room = openRoom else { return }
+        uploading = "file from your vault"
+        defer { uploading = nil }
+        do { upsert(try await API.shared.shareVaultFileToConnect(room: room.id, fileId: fileId)) }
+        catch let e as APIError { error = e.message }
         catch { self.error = error.localizedDescription }
     }
 

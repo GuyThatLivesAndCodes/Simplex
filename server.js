@@ -8725,7 +8725,28 @@ CREATE TABLE IF NOT EXISTS connect_reactions (
   name TEXT NOT NULL, emoji TEXT NOT NULL, created INTEGER NOT NULL,
   PRIMARY KEY (message_id, account_id, emoji) );
 CREATE INDEX IF NOT EXISTS idx_connect_rx_msg ON connect_reactions(message_id);
+
+-- Files shared into a room's chat. The source column records where the bytes
+-- came from:
+--   'device' - uploaded straight from the sender's phone/PC. These live ONLY
+--              here, so they are destroyed with the room (the user is told).
+--   'vault'  - COPIED out of the sender's vault, exactly like Music/Photos. The
+--              original stays in their vault untouched; the copy dies with the room.
+-- Either way the bytes sit in connectStore and go when the room goes.
+CREATE TABLE IF NOT EXISTS connect_files (
+  id TEXT PRIMARY KEY, room_id TEXT NOT NULL, message_id TEXT,
+  owner_id TEXT NOT NULL, owner_name TEXT NOT NULL,
+  name TEXT NOT NULL, ext TEXT NOT NULL, mime TEXT,
+  size INTEGER NOT NULL, kind TEXT NOT NULL DEFAULT 'file',
+  w INTEGER, h INTEGER, source TEXT NOT NULL DEFAULT 'device',
+  created INTEGER NOT NULL );
+CREATE INDEX IF NOT EXISTS idx_connect_file_room ON connect_files(room_id, created);
+CREATE INDEX IF NOT EXISTS idx_connect_file_msg ON connect_files(message_id);
 `);
+/* `permanent` rooms survive being emptied; everything else is swept when the last
+   person leaves. Added by migration so existing rooms keep working (they default
+   to 0 = disposable, which matches the new expectation). */
+try { sys.exec('ALTER TABLE connect_rooms ADD COLUMN permanent INTEGER NOT NULL DEFAULT 0'); } catch (e) {}
 const connectSys = {
   roomIns: sys.prepare(`INSERT INTO connect_rooms (id,code,owner_id,owner_name,name,topic,locked,created,updated)
                         VALUES (@id,@code,@owner_id,@owner_name,@name,@topic,0,@created,@updated)`),
@@ -8769,7 +8790,29 @@ const connectSys = {
   rxDelForMsg: sys.prepare('DELETE FROM connect_reactions WHERE message_id = ?'),
   rxDelRoom: sys.prepare(`DELETE FROM connect_reactions WHERE message_id IN
                           (SELECT id FROM connect_messages WHERE room_id = ?)`),
+
+  roomSetPermanent: sys.prepare('UPDATE connect_rooms SET permanent=@permanent, updated=@updated WHERE id=@id'),
+  roomListAll: sys.prepare('SELECT * FROM connect_rooms'),
+  memCount: sys.prepare('SELECT COUNT(*) AS n FROM connect_members WHERE room_id = ?'),
+
+  fileIns: sys.prepare(`INSERT INTO connect_files (id,room_id,message_id,owner_id,owner_name,name,ext,mime,size,kind,w,h,source,created)
+                        VALUES (@id,@room_id,@message_id,@owner_id,@owner_name,@name,@ext,@mime,@size,@kind,@w,@h,@source,@created)`),
+  fileGet: sys.prepare('SELECT * FROM connect_files WHERE id = ?'),
+  fileForMsg: sys.prepare('SELECT * FROM connect_files WHERE message_id = ? ORDER BY created'),
+  fileForRoom: sys.prepare('SELECT * FROM connect_files WHERE room_id = ? ORDER BY created'),
+  fileIdsForRoom: sys.prepare('SELECT id FROM connect_files WHERE room_id = ?'),
+  fileDel: sys.prepare('DELETE FROM connect_files WHERE id = ?'),
+  fileDelRoom: sys.prepare('DELETE FROM connect_files WHERE room_id = ?'),
 };
+
+/* The Connect app's blob store. Same synthetic-store trick as Music/Photos: a
+   dedicated `vault/accounts/__connect__/` encrypted with the always-held
+   keyring('__connect__') keyset, so a chat attachment is readable by everyone in
+   the room without depending on the sender's per-user keys.
+   NB: chat FILES are encrypted at rest here, but they are not end-to-end
+   encrypted the way the CALL is — the server necessarily handles these bytes to
+   fan them out. The UI says so when you attach one. */
+const connectStore = openStore('__connect__');
 
 /* ---- room codes ----
    5 chars from an UNAMBIGUOUS uppercase alphabet. O/0 and I/1 are excluded on
@@ -8850,6 +8893,77 @@ function connectDropPeer(roomId, accountId, reason) {
   try { if (peer.res && !peer.res.writableEnded) peer.res.end(); } catch (e) {}
   if (!peers.size) CONNECT_LIVE.delete(roomId);
   connectBroadcast(roomId, 'peer-left', { id: accountId, peerId: peer.peerId, reason: reason || 'left' });
+  // last one out: a disposable room starts its countdown (see connectScheduleSweep)
+  if (!peers.size && reason !== 'replaced') connectScheduleSweep(roomId, 'everyone left the call');
+}
+
+/* ---- teardown ----
+   ONE place that destroys a room, so every path (owner deletes it, last person
+   leaves, boot-time sweep) erases exactly the same things: chat, reactions,
+   memberships, attachment rows AND the attachment bytes on disk. */
+function connectPurgeFileBytes(id) {
+  try { fs.unlinkSync(connectStore.blobPath({ id })); } catch (e) {}
+  try { fs.unlinkSync(connectStore.coverSmPath({ id })); } catch (e) {}
+}
+function connectDestroyRoom(roomId, reason) {
+  const fileIds = connectSys.fileIdsForRoom.all(roomId).map(r => r.id);
+  sys.transaction(() => {
+    connectSys.fileDelRoom.run(roomId);
+    connectSys.rxDelRoom.run(roomId);
+    connectSys.msgDelRoom.run(roomId);
+    connectSys.memDelAll.run(roomId);
+    connectSys.roomDel.run(roomId);
+  })();
+  // bytes come out AFTER the rows, so a crash mid-way leaves orphaned blobs
+  // (harmless, swept on boot) rather than rows pointing at missing files.
+  for (const fid of fileIds) connectPurgeFileBytes(fid);
+
+  connectBroadcast(roomId, 'room-deleted', { id: roomId, reason: reason || 'deleted' });
+  const peers = CONNECT_LIVE.get(roomId);
+  if (peers) {
+    for (const p of peers.values()) {
+      try { if (p.beat) clearInterval(p.beat); } catch (e) {}
+      try { if (p.res && !p.res.writableEnded) p.res.end(); } catch (e) {}
+    }
+    CONNECT_LIVE.delete(roomId);
+  }
+  if (fileIds.length) console.log(`[simplex] connect room ${roomId} destroyed (${reason}) — ${fileIds.length} attachment(s) removed`);
+}
+
+/* A disposable room dies once the CALL empties out — that's what "users leave the
+   room" means in practice, since the owner is always a member and so membership
+   never reaches zero on its own.
+
+   Why the grace period: a reload, a dropped Wi-Fi moment, or a phone locking all
+   close the SSE stream, and destroying the room instantly would mean a refresh
+   wipes the chat. So the sweep is SCHEDULED when the last peer leaves and is
+   cancelled the moment anyone comes back. A room that was never joined at all is
+   also swept, so creating a room and wandering off doesn't leave litter.
+
+   Permanent rooms are never swept. */
+const CONNECT_EMPTY_GRACE_MS = Number(process.env.SX_CONNECT_GRACE_MS) || 120_000;   // 2 min
+const CONNECT_SWEEP_TIMERS = new Map();   // roomId -> timeout
+
+function connectCancelSweep(roomId) {
+  const t = CONNECT_SWEEP_TIMERS.get(roomId);
+  if (t) { clearTimeout(t); CONNECT_SWEEP_TIMERS.delete(roomId); }
+}
+/* Schedule the sweep for a room whose call just emptied. Safe to call repeatedly. */
+function connectScheduleSweep(roomId, reason) {
+  const room = connectSys.roomGet.get(roomId);
+  if (!room || room.permanent) return;
+  connectCancelSweep(roomId);
+  const t = setTimeout(() => {
+    CONNECT_SWEEP_TIMERS.delete(roomId);
+    const r = connectSys.roomGet.get(roomId);
+    if (!r || r.permanent) return;                       // deleted or made permanent meanwhile
+    const peers = CONNECT_LIVE.get(roomId);
+    if (peers && peers.size > 0) return;                 // someone came back
+    connectDestroyRoom(roomId, reason || 'everyone left');
+  }, CONNECT_EMPTY_GRACE_MS);
+  // don't hold the process open just for a room sweep
+  if (t.unref) t.unref();
+  CONNECT_SWEEP_TIMERS.set(roomId, t);
 }
 
 /* ---- access helpers ---- */
@@ -8878,7 +8992,8 @@ function connectRoomToApi(r, req, extra = {}) {
     id: r.id, code: r.code, name: r.name, topic: r.topic || null,
     ownerId: r.owner_id, ownerName: r.owner_name,
     isOwner: r.owner_id === req.accountId, canManage: connectCanManage(req, r),
-    locked: !!r.locked, created: r.created, updated: r.updated,
+    locked: !!r.locked, permanent: !!r.permanent,
+    created: r.created, updated: r.updated,
     members: members.map(m => ({ id: m.account_id, name: m.name, role: m.role, joined: m.joined })),
     memberCount: members.length,
     liveCount: live.size,
@@ -8903,14 +9018,50 @@ function connectMsgToApi(m, rx, meId) {
     if (r.account_id === meId) g.mine = true;
     if (g.names.length < 12) g.names.push(r.name);
   }
+  // a 'file' message carries its attachment(s) inline so the client can render
+  // them without a second round-trip
+  let files = null;
+  if ((m.kind || 'chat') === 'file') {
+    files = connectSys.fileForMsg.all(m.id).map(connectFileToApi);
+  }
   return {
     id: m.id, roomId: m.room_id, authorId: m.author_id, authorName: m.author_name,
     text: m.text, kind: m.kind || 'chat', replyTo: m.reply_to || null,
     edited: m.edited || null, created: m.created,
     mine: m.author_id === meId,
     reactions: [...groups.values()],
+    files,
   };
 }
+
+/* Boot sweep. A restart ends every call, so on the way up each disposable room is
+   by definition empty. Rather than deleting them instantly (a planned restart
+   shouldn't destroy a room people are about to rejoin), give them the same grace
+   period a normal emptying gets. Also removes attachment blobs whose row vanished
+   in a crash mid-teardown. */
+function connectBootSweep() {
+  let scheduled = 0;
+  for (const room of connectSys.roomListAll.all()) {
+    if (room.permanent) continue;
+    connectScheduleSweep(room.id, 'server restarted and nobody rejoined');
+    scheduled++;
+  }
+  // orphaned blobs: files on disk with no row pointing at them
+  try {
+    const live = new Set(sys.prepare('SELECT id FROM connect_files').all().map(r => r.id));
+    const dir = connectStore.filesDir;
+    if (dir && fs.existsSync(dir)) {
+      let orphans = 0;
+      for (const f of fs.readdirSync(dir)) {
+        const id = f.replace(/\.[^.]*$/, '');
+        if (!live.has(id)) { try { fs.unlinkSync(path.join(dir, f)); orphans++; } catch (e) {} }
+      }
+      if (orphans) console.log(`[simplex] connect: removed ${orphans} orphaned attachment blob(s)`);
+    }
+  } catch (e) {}
+  if (scheduled) console.log(`[simplex] connect: ${scheduled} temporary room(s) will be swept unless someone rejoins within ${Math.round(CONNECT_EMPTY_GRACE_MS / 1000)}s`);
+}
+setTimeout(connectBootSweep, 5_000).unref();
 
 /* ---- rooms you can get to ---- */
 app.get('/api/connect/rooms', requireAuth, (req, res) => {
@@ -8972,6 +9123,13 @@ app.patch('/api/connect/rooms/:id', requireAuth, (req, res) => {
   if (!connectCanManage(req, room)) return res.status(403).json({ error: 'only the room owner can change this' });
   const b = req.body || {}, now = Date.now();
   if (b.locked !== undefined) connectSys.roomLock.run({ id: room.id, locked: b.locked ? 1 : 0, updated: now });
+  // Only the OWNER decides permanence (not an admin passing through): it governs
+  // whether their room survives being emptied.
+  if (b.permanent !== undefined && room.owner_id === req.accountId) {
+    connectSys.roomSetPermanent.run({ id: room.id, permanent: b.permanent ? 1 : 0, updated: now });
+    if (b.permanent) connectCancelSweep(room.id);              // no longer disposable
+    else if (!(CONNECT_LIVE.get(room.id) || new Map()).size) connectScheduleSweep(room.id, 'made temporary while empty');
+  }
   const name = b.name !== undefined ? clip(b.name, 120).trim() : room.name;
   if (!name) return res.status(400).json({ error: 'name required' });
   connectSys.roomUpd.run({
@@ -8989,23 +9147,8 @@ app.delete('/api/connect/rooms/:id', requireAuth, (req, res) => {
   const room = connectSys.roomGet.get(req.params.id);
   if (!room || !connectIsMember(req, room)) return res.status(404).json({ error: 'not found' });
   if (!connectCanManage(req, room)) return res.status(403).json({ error: 'only the room owner can delete it' });
-  // one transaction: no window where a message outlives its room
-  sys.transaction(() => {
-    connectSys.rxDelRoom.run(room.id);
-    connectSys.msgDelRoom.run(room.id);
-    connectSys.memDelAll.run(room.id);
-    connectSys.roomDel.run(room.id);
-  })();
-  // hang up everyone still in the call, then tear the presence map down
-  connectBroadcast(room.id, 'room-deleted', { id: room.id });
-  const peers = CONNECT_LIVE.get(room.id);
-  if (peers) {
-    for (const p of peers.values()) {
-      try { if (p.beat) clearInterval(p.beat); } catch (e) {}
-      try { if (p.res && !p.res.writableEnded) p.res.end(); } catch (e) {}
-    }
-    CONNECT_LIVE.delete(room.id);
-  }
+  connectCancelSweep(room.id);
+  connectDestroyRoom(room.id, 'deleted by owner');   // chat, reactions + attachment bytes
   res.json({ ok: true });
 });
 
@@ -9060,6 +9203,8 @@ app.get('/api/connect/rooms/:id/events', requireAuth, (req, res) => {
   // Keep the idle-socket reaper off this connection: SSE is one request that then
   // stays quiet, which is exactly what the reaper kills. See the note at the top.
   try { if (res.socket) { res.socket._sxBusy = (res.socket._sxBusy || 0) + 1; res.socket.setKeepAlive(true); } } catch (e) {}
+
+  connectCancelSweep(room.id);   // someone's here — call off any pending teardown
 
   const now = Date.now();
   const peer = {
@@ -9236,6 +9381,163 @@ app.post('/api/connect/rooms/:id/messages/:msgId/react', requireAuth, (req, res)
   const payload = connectMsgToApi(connectSys.msgGet.get(m.id), rx, null);
   connectBroadcast(room.id, 'message-reacted', { id: m.id, reactions: payload.reactions });
   res.json({ message: connectMsgToApi(connectSys.msgGet.get(m.id), rx, req.accountId) });
+});
+
+/* ============================================================
+   CHAT ATTACHMENTS
+
+   Two ways to put a file in the chat:
+     · from your DEVICE  — POST /api/connect/rooms/:id/files (multipart). The bytes
+                           exist only in connectStore, so they are destroyed with
+                           the room. The client says so before sending.
+     · from your VAULT   — POST /api/connect/rooms/:id/files/vault { fileId }. The
+                           bytes are COPIED (same as Music/Photos), so your original
+                           is untouched and deleting the room only removes the copy.
+
+   Either way the attachment is posted as a chat message so it appears live for
+   everyone, and dies with the room (see connectDestroyRoom).
+   ============================================================ */
+const CONNECT_FILE_MAX = Number(process.env.SX_CONNECT_FILE_MAX) || 256 * 1024 * 1024;   // 256MB per file
+
+/* Shape a stored attachment row for the API. */
+function connectFileToApi(f) {
+  if (!f) return null;
+  return {
+    id: f.id, name: f.name, ext: f.ext, mime: f.mime || null,
+    size: f.size, kind: f.kind, w: f.w || null, h: f.h || null,
+    source: f.source, ownerId: f.owner_id, ownerName: f.owner_name,
+    created: f.created,
+    url: `/api/connect/files/${f.id}/raw`,
+    // device uploads live ONLY on our server; surfaced so the UI can say so
+    temporary: f.source === 'device',
+  };
+}
+
+/* Post the message that carries an attachment, and fan it out live. */
+function connectAttachMessage(req, room, fileRow, caption) {
+  const now = Date.now(), msgId = uid();
+  connectSys.msgIns.run({
+    id: msgId, room_id: room.id, author_id: req.accountId,
+    author_name: clip(req.account.display || req.account.username, 80),
+    text: clip(caption, CONNECT_MSG_MAX).trim() || '', kind: 'file',
+    reply_to: null, created: now,
+  });
+  sys.prepare('UPDATE connect_files SET message_id = ? WHERE id = ?').run(msgId, fileRow.id);
+  connectSys.roomTouch.run({ id: room.id, updated: now });
+  const row = connectSys.msgGet.get(msgId);
+  connectBroadcast(room.id, 'message', { message: connectMsgToApi(row, [], null) });
+  return connectMsgToApi(row, [], req.accountId);
+}
+
+/* ---- upload straight from the device ---- */
+app.post('/api/connect/rooms/:id/files', requireAuth, upload.single('file'), async (req, res) => {
+  const room = connectVisibleRoom(req, req.params.id);
+  if (!room) { if (req.file) { try { await fsp.unlink(req.file.path); } catch (e) {} } return res.status(404).json({ error: 'not found' }); }
+  if (!req.file) return res.status(400).json({ error: 'no file' });
+
+  const tmp = req.file.path;
+  try {
+    const size = req.file.size || 0;
+    if (size > CONNECT_FILE_MAX) {
+      try { await fsp.unlink(tmp); } catch (e) {}
+      return res.status(413).json({ error: `files in chat are capped at ${Math.round(CONNECT_FILE_MAX / 1e6)}MB`, code: 'TOOBIG' });
+    }
+    const id = uid();
+    const name = clip(req.file.originalname || 'file', 200);
+    const ext = (path.extname(name).slice(1) || '').toLowerCase();
+    await vault.encryptBlob(tmp, connectStore.blobPath({ id }), connectStore.keys);
+    try { await fsp.unlink(tmp); } catch (e) {}
+
+    connectSys.fileIns.run({
+      id, room_id: room.id, message_id: null,
+      owner_id: req.accountId, owner_name: clip(req.account.display || req.account.username, 80),
+      name, ext, mime: clip(req.file.mimetype, 120) || null,
+      size, kind: typeForExt(ext), w: null, h: null,
+      source: 'device', created: Date.now(),
+    });
+    const message = connectAttachMessage(req, room, connectSys.fileGet.get(id), req.body && req.body.caption);
+    res.json({ message, file: connectFileToApi(connectSys.fileGet.get(id)) });
+  } catch (e) {
+    try { await fsp.unlink(tmp); } catch (_) {}
+    console.error('[simplex] connect upload failed', e && (e.stack || e.message || e));
+    res.status(500).json({ error: 'could not upload that file' });
+  }
+});
+
+/* ---- attach a file out of your own vault (copy-on-add) ---- */
+app.post('/api/connect/rooms/:id/files/vault', requireAuth, async (req, res) => {
+  const room = connectVisibleRoom(req, req.params.id);
+  if (!room) return res.status(404).json({ error: 'not found' });
+  const store = req.store;
+  const row = store.getById(String((req.body || {}).fileId || ''));
+  if (!row || row.trashed) return res.status(404).json({ error: 'file not found' });
+  if (row.folder) return res.status(400).json({ error: 'folders cannot be shared into chat' });
+  if (!row.hasBlob) return res.status(400).json({ error: 'that file has no contents' });
+  // locked files carry a passphrase key the backend doesn't hold — same exclusion
+  // as Music/Photos.
+  if (row.locked) return res.status(400).json({ error: 'unlock this file before sharing it' });
+  if ((row.size || 0) > CONNECT_FILE_MAX) return res.status(413).json({ error: `files in chat are capped at ${Math.round(CONNECT_FILE_MAX / 1e6)}MB`, code: 'TOOBIG' });
+
+  const id = uid();
+  const tmp = path.join(connectStore.tmpDir, id + '.tmp');
+  try {
+    await decryptBlobToFileHashed(store.blobPath(row), store.keys, tmp);
+    await vault.encryptBlob(tmp, connectStore.blobPath({ id }), connectStore.keys);
+    try { await fsp.unlink(tmp); } catch (e) {}
+
+    const name = store.decName(row);
+    const ext = (row.storedExt || path.extname(name).slice(1) || '').toLowerCase().replace(/^\./, '');
+    connectSys.fileIns.run({
+      id, room_id: room.id, message_id: null,
+      owner_id: req.accountId, owner_name: clip(req.account.display || req.account.username, 80),
+      name: clip(name, 200), ext, mime: null,
+      size: row.size || 0, kind: row.type || typeForExt(ext),
+      w: row.w != null ? Number(row.w) : null, h: row.h != null ? Number(row.h) : null,
+      source: 'vault', created: Date.now(),
+    });
+    const message = connectAttachMessage(req, room, connectSys.fileGet.get(id), (req.body || {}).caption);
+    res.json({ message, file: connectFileToApi(connectSys.fileGet.get(id)) });
+  } catch (e) {
+    try { await fsp.unlink(tmp); } catch (_) {}
+    connectPurgeFileBytes(id);
+    console.error('[simplex] connect vault attach failed', e && (e.stack || e.message || e));
+    res.status(500).json({ error: 'could not share that file' });
+  }
+});
+
+/* ---- stream an attachment back (members of the room only) ---- */
+app.get('/api/connect/files/:id/raw', requireAuth, (req, res) => {
+  const f = connectSys.fileGet.get(req.params.id);
+  if (!f) return res.status(404).end();
+  const room = connectSys.roomGet.get(f.room_id);
+  if (!room || !connectIsMember(req, room)) return res.status(404).end();
+  // an attachment's bytes never change once posted
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  if (req.query.download != null) {
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(f.name)}`);
+  }
+  // hasBlob is REQUIRED: _streamEncryptedImpl gates on it (`present`) and 404s
+  // without it. Vault rows carry the column; a connect_files row doesn't, so it
+  // has to be supplied here — omitting it made every attachment 404 even though
+  // the encrypted bytes were sitting on disk.
+  return streamEncrypted(req, res, connectStore, { id: f.id, size: f.size, storedExt: f.ext, hasBlob: 1 }, 'blob');
+});
+
+/* ---- remove one attachment (sender, or whoever runs the room) ---- */
+app.delete('/api/connect/files/:id', requireAuth, (req, res) => {
+  const f = connectSys.fileGet.get(req.params.id);
+  if (!f) return res.status(404).json({ error: 'not found' });
+  const room = connectSys.roomGet.get(f.room_id);
+  if (!room || !connectIsMember(req, room)) return res.status(404).json({ error: 'not found' });
+  if (f.owner_id !== req.accountId && !connectCanManage(req, room)) return res.status(403).json({ error: 'not yours to delete' });
+  const msgId = f.message_id;
+  sys.transaction(() => {
+    connectSys.fileDel.run(f.id);
+    if (msgId) { connectSys.rxDelForMsg.run(msgId); connectSys.msgDel.run(msgId); }
+  })();
+  connectPurgeFileBytes(f.id);
+  if (msgId) connectBroadcast(room.id, 'message-deleted', { id: msgId });
+  res.json({ ok: true });
 });
 
 /* ============================================================

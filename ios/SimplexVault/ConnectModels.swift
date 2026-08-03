@@ -17,6 +17,9 @@ struct ConnectRoom: Identifiable, Codable, Equatable {
     var isOwner: Bool
     var canManage: Bool
     var locked: Bool
+    /// A temporary room is deleted (with its chat and files) once everyone leaves
+    /// the call. The owner can pin it open by turning this on.
+    var permanent: Bool = false
     let created: Double
     var updated: Double
     // Tolerant defaults: the room list and the single-room payload don't carry
@@ -38,6 +41,7 @@ struct ConnectRoom: Identifiable, Codable, Equatable {
         isOwner = try c.decodeIfPresent(Bool.self, forKey: .isOwner) ?? false
         canManage = try c.decodeIfPresent(Bool.self, forKey: .canManage) ?? false
         locked = try c.decodeIfPresent(Bool.self, forKey: .locked) ?? false
+        permanent = try c.decodeIfPresent(Bool.self, forKey: .permanent) ?? false
         created = try c.decodeIfPresent(Double.self, forKey: .created) ?? 0
         updated = try c.decodeIfPresent(Double.self, forKey: .updated) ?? 0
         members = try c.decodeIfPresent([ConnectMember].self, forKey: .members) ?? []
@@ -91,6 +95,8 @@ struct ConnectMessage: Identifiable, Codable, Equatable {
     let created: Double
     var mine: Bool = false
     var reactions: [ConnectReaction] = []
+    /// Files attached to this message (only present when kind == "file").
+    var files: [ConnectFile]? = nil
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -105,6 +111,7 @@ struct ConnectMessage: Identifiable, Codable, Equatable {
         created = try c.decodeIfPresent(Double.self, forKey: .created) ?? 0
         mine = try c.decodeIfPresent(Bool.self, forKey: .mine) ?? false
         reactions = try c.decodeIfPresent([ConnectReaction].self, forKey: .reactions) ?? []
+        files = try c.decodeIfPresent([ConnectFile].self, forKey: .files)
     }
 
     var createdDate: Date { Date(timeIntervalSince1970: created / 1000) }
@@ -123,6 +130,45 @@ struct ConnectReaction: Codable, Equatable, Identifiable {
 
     var id: String { emoji }
     var tooltip: String { names.joined(separator: ", ") }
+}
+
+// MARK: - attachments
+
+/// A file shared into a room's chat.
+///
+/// `source` says where the bytes came from, and it matters: a "device" upload
+/// exists ONLY on the server for this room, so it is destroyed when the room is —
+/// `temporary` surfaces that so the UI can warn. A "vault" file was COPIED out of
+/// the sender's vault, so their original is never at risk.
+struct ConnectFile: Identifiable, Codable, Equatable {
+    let id: String
+    let name: String
+    let ext: String
+    var mime: String?
+    let size: Int
+    /// "image" | "video" | "audio" | "document" | … (mirrors the vault's types)
+    let kind: String
+    var w: Int?
+    var h: Int?
+    /// "device" or "vault"
+    let source: String
+    let ownerId: String
+    let ownerName: String
+    let created: Double
+    /// Server-relative path; resolve against the API base to fetch.
+    let url: String
+    /// True for device uploads — the ones that die with the room.
+    var temporary: Bool = false
+
+    var isImage: Bool { kind == "image" }
+    var absoluteURL: URL { API.serverURL.appendingPathComponent(url.hasPrefix("/") ? String(url.dropFirst()) : url) }
+
+    var sizeText: String {
+        let units = ["B", "KB", "MB", "GB"]
+        var v = Double(size), i = 0
+        while v >= 1024, i < units.count - 1 { v /= 1024; i += 1 }
+        return String(format: i == 0 ? "%.0f %@" : "%.1f %@", v, units[i])
+    }
 }
 
 // MARK: - API response envelopes

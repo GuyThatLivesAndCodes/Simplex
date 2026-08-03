@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers   // .item, for the device file picker
 
 /// The CONNECT system's screens: the room list, joining by code, the room itself
 /// (chat + a button into the call), and the room settings.
@@ -263,6 +264,9 @@ struct ConnectRoomView: View {
     @State private var editText = ""
     @State private var showEdit = false
     @State private var reactingTo: ConnectMessage?
+    @State private var showAttachOptions = false
+    @State private var showFileImporter = false
+    @State private var showVaultPicker = false
 
     private var current: ConnectRoom { connect.openRoom ?? room }
 
@@ -289,6 +293,24 @@ struct ConnectRoomView: View {
         .fullScreenCover(isPresented: $showCall) { ConnectCallView(room: current) }
         .sheet(isPresented: $showSettings) { ConnectRoomSettingsSheet().environmentObject(connect) }
         .sheet(item: $reactingTo) { msg in ConnectReactionPicker(message: msg).environmentObject(connect) }
+        // Sharing a file: the device path is called out because those bytes live
+        // only in this room and go when it does.
+        .confirmationDialog("Share a file", isPresented: $showAttachOptions, titleVisibility: .visible) {
+            Button("From this device") { showFileImporter = true }
+            Button("From my Database") { showVaultPicker = true }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Files shared here are deleted when the room is deleted. A file from this device lives only in this room — sharing from your Database copies it, so your original stays safe in your vault.")
+        }
+        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+            switch result {
+            case .success(let urls): Task { for u in urls { await connect.uploadFile(u) } }
+            case .failure: break   // the user cancelled, or the picker failed — nothing to say
+            }
+        }
+        .sheet(isPresented: $showVaultPicker) {
+            ConnectVaultPicker { fileId in Task { await connect.shareVaultFile(fileId) } }
+        }
         // `alert(item:)`-style presentation via a dedicated flag. An inline
         // Binding(get:set:) inside the ViewBuilder trips up type inference here.
         .alert("Edit message", isPresented: $showEdit) {
@@ -345,6 +367,13 @@ struct ConnectRoomView: View {
                         )
                         .id(msg.id)
                     }
+                    if let sending = connect.uploading {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Sending \(sending)…").font(.caption).foregroundStyle(SimplexTheme.subtle)
+                        }
+                        .padding(.top, 2)
+                    }
                 }
                 .padding(14)
             }
@@ -372,6 +401,11 @@ struct ConnectRoomView: View {
 
     private var composer: some View {
         HStack(spacing: 10) {
+            Button { showAttachOptions = true } label: {
+                Image(systemName: "plus.circle").font(.system(size: 22))
+                    .foregroundStyle(SimplexTheme.subtle)
+            }
+            .accessibilityLabel("Share a file")
             TextField("Message the room…", text: $draft, axis: .vertical)
                 .lineLimit(1...5)
                 .padding(.horizontal, 12).padding(.vertical, 8)
@@ -426,8 +460,13 @@ struct ConnectMessageRow: View {
                     Rectangle().fill(SimplexTheme.accent.opacity(0.5)).frame(width: 2)
                 }
             }
-            Text(message.text).font(.subheadline).foregroundStyle(SimplexTheme.text)
-                .textSelection(.enabled)
+            if !message.text.isEmpty {
+                Text(message.text).font(.subheadline).foregroundStyle(SimplexTheme.text)
+                    .textSelection(.enabled)
+            }
+            if let files = message.files, !files.isEmpty {
+                ForEach(files) { ConnectFileView(file: $0) }
+            }
             if !message.reactions.isEmpty {
                 HStack(spacing: 5) {
                     ForEach(message.reactions) { r in
@@ -457,6 +496,74 @@ struct ConnectMessageRow: View {
             if message.mine || canManage {
                 Button(role: .destructive) { onDelete() } label: { Label("Delete", systemImage: "trash") }
             }
+        }
+    }
+}
+
+// MARK: - one attachment
+
+/// Renders a shared file: images preview inline, everything else is a tappable row.
+/// A "temporary" chip marks device uploads — the ones that vanish with the room.
+struct ConnectFileView: View {
+    let file: ConnectFile
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        Button { openURL(file.absoluteURL) } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                if file.isImage {
+                    AsyncImage(url: file.absoluteURL) { phase in
+                        switch phase {
+                        case .success(let img):
+                            img.resizable().scaledToFill()
+                        case .failure:
+                            Image(systemName: "photo").font(.title2).foregroundStyle(SimplexTheme.subtle)
+                                .frame(maxWidth: .infinity, minHeight: 120)
+                        default:
+                            ProgressView().frame(maxWidth: .infinity, minHeight: 120)
+                        }
+                    }
+                    .frame(maxWidth: 260, maxHeight: 200)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                } else {
+                    HStack(spacing: 9) {
+                        Image(systemName: icon).font(.system(size: 17)).foregroundStyle(SimplexTheme.accent)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(file.name).font(.caption.weight(.semibold)).lineLimit(1)
+                            Text(file.sizeText).font(.caption2).foregroundStyle(SimplexTheme.subtle)
+                        }
+                        Spacer(minLength: 4)
+                        Image(systemName: "arrow.down.circle").font(.caption).foregroundStyle(SimplexTheme.subtle)
+                    }
+                    .padding(10)
+                    .background(SimplexTheme.surface2, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                HStack(spacing: 5) {
+                    if file.isImage {
+                        Text("\(file.name) · \(file.sizeText)").font(.caption2).foregroundStyle(SimplexTheme.subtle)
+                    }
+                    if file.temporary {
+                        Text("TEMPORARY")
+                            .font(.system(size: 8, weight: .bold)).tracking(0.4)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(SimplexTheme.accent.opacity(0.18), in: Capsule())
+                            .foregroundStyle(SimplexTheme.accent)
+                    }
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .help(file.temporary ? "Uploaded from a device — deleted when this room is deleted" : "")
+    }
+
+    private var icon: String {
+        switch file.kind {
+        case "video":    return "film"
+        case "audio":    return "waveform"
+        case "document": return "doc.text"
+        case "model3d":  return "cube"
+        default:         return "doc"
         }
     }
 }
@@ -496,6 +603,91 @@ struct ConnectReactionPicker: View {
     }
 }
 
+// MARK: - vault picker
+
+/// Pick a file out of the signed-in account's own vault to share into the chat.
+/// The server COPIES it, so the original is never at risk — the footer says so.
+struct ConnectVaultPicker: View {
+    let onPick: (String) -> Void
+    // NB: no @EnvironmentObject here on purpose — this sheet is presented without
+    // one being injected, and an unsatisfied @EnvironmentObject crashes at runtime.
+    @Environment(\.dismiss) private var dismiss
+    @State private var items: [FileItem] = []
+    @State private var loading = true
+    @State private var search = ""
+
+    private var filtered: [FileItem] {
+        // folders aren't shareable; trashed files shouldn't resurface here
+        let base = items
+            .filter { $0.type != "folder" && !($0.trashed ?? false) }
+            .sorted { $0.date > $1.date }
+        guard !search.isEmpty else { return base }
+        return base.filter { $0.name.localizedCaseInsensitiveContains(search) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if loading {
+                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if filtered.isEmpty {
+                    Text(items.isEmpty ? "Nothing in your vault to share yet." : "No files match that search.")
+                        .font(.footnote).foregroundStyle(SimplexTheme.subtle)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List(filtered) { f in
+                        Button {
+                            onPick(f.id)
+                            dismiss()
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: icon(for: f.type)).foregroundStyle(SimplexTheme.subtle)
+                                Text(f.name).lineLimit(1)
+                                Spacer()
+                                Text(sizeText(f.size)).font(.caption2).foregroundStyle(SimplexTheme.subtle)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .searchable(text: $search, prompt: "Search your vault")
+            .navigationTitle("Share from Database")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            .safeAreaInset(edge: .bottom) {
+                Text("Sharing copies the file into this room — your original stays in your vault. The copy is deleted with the room.")
+                    .font(.caption2).foregroundStyle(SimplexTheme.subtle)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20).padding(.vertical, 10)
+                    .frame(maxWidth: .infinity)
+                    .background(.ultraThinMaterial)
+            }
+            .task {
+                items = (try? await API.shared.listFiles()) ?? []
+                loading = false
+            }
+        }
+    }
+
+    private func icon(for type: String) -> String {
+        switch type {
+        case "image":    return "photo"
+        case "video":    return "film"
+        case "audio":    return "waveform"
+        case "document": return "doc.text"
+        default:         return "doc"
+        }
+    }
+    private func sizeText(_ n: Int) -> String {
+        let units = ["B", "KB", "MB", "GB"]
+        var v = Double(n), i = 0
+        while v >= 1024, i < units.count - 1 { v /= 1024; i += 1 }
+        return String(format: i == 0 ? "%.0f %@" : "%.1f %@", v, units[i])
+    }
+}
+
 // MARK: - room settings
 
 struct ConnectRoomSettingsSheet: View {
@@ -504,6 +696,7 @@ struct ConnectRoomSettingsSheet: View {
     @State private var name = ""
     @State private var topic = ""
     @State private var locked = false
+    @State private var permanent = false
     @State private var confirmDelete = false
     @State private var confirmLeave = false
 
@@ -513,7 +706,12 @@ struct ConnectRoomSettingsSheet: View {
         NavigationStack {
             Form {
                 if let room {
-                    Section("Code") {
+                    // NB: `Section(header: Text(…))`, not `Section("…")`. With a
+                    // trailing `footer:` in the same Form the compiler resolves the
+                    // string overload against the content closure and fails
+                    // ("cannot convert String to () -> Content"). The explicit
+                    // header: form is unambiguous, so all sections here use it.
+                    Section(header: Text("Code")) {
                         HStack {
                             ConnectCodeChip(code: room.code, large: true)
                             Spacer()
@@ -523,15 +721,28 @@ struct ConnectRoomSettingsSheet: View {
                         }
                     }
                     if room.canManage {
-                        Section("Room") {
+                        // header: AND footer: both as labelled arguments. Mixing a
+                        // labelled header with a trailing `footer:` closure is the
+                        // same overload ambiguity in a different shape.
+                        Section(
+                            header: Text("Room"),
+                            footer: Text("Locking stops the code from letting new people in.")
+                        ) {
                             TextField("Name", text: $name)
                             TextField("Topic", text: $topic)
                             Toggle("Locked", isOn: $locked)
-                        } footer: {
-                            Text("Locking stops the code from letting new people in.")
                         }
                     }
-                    Section("People (\(room.members.count))") {
+                    if room.isOwner {
+                        Section {
+                            Toggle("Keep this room permanently", isOn: $permanent)
+                        } footer: {
+                            Text(permanent
+                                 ? "This room stays put when everyone leaves."
+                                 : "Temporary: once everyone leaves the call, this room, its chat and any files shared in it are deleted automatically.")
+                        }
+                    }
+                    Section(header: Text("People (\(room.members.count))")) {
                         ForEach(room.members) { m in
                             HStack {
                                 Text(m.name)
@@ -569,7 +780,9 @@ struct ConnectRoomSettingsSheet: View {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Save") {
                             Task {
-                                await connect.updateRoom(name: name, topic: topic.isEmpty ? nil : topic, locked: locked)
+                                await connect.updateRoom(name: name, topic: topic.isEmpty ? nil : topic,
+                                                         locked: locked,
+                                                         permanent: room?.isOwner == true ? permanent : nil)
                                 dismiss()
                             }
                         }
@@ -581,6 +794,7 @@ struct ConnectRoomSettingsSheet: View {
                 name = room?.name ?? ""
                 topic = room?.topic ?? ""
                 locked = room?.locked ?? false
+                permanent = room?.permanent ?? false
             }
             .confirmationDialog("Delete this room?", isPresented: $confirmDelete, titleVisibility: .visible) {
                 Button("Delete room", role: .destructive) {

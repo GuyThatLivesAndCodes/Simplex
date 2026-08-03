@@ -4611,6 +4611,11 @@ img.mu-cover.lazy { background: var(--card); }
    ============================================================ */
 .cn-app { height: 100%; overflow-y: auto; padding-bottom: 24px; }
 .cn-app > .cn-head, .cn-app > #cnBody { max-width: 1100px; margin-left: auto; margin-right: auto; }
+/* ...but a room is not a reading surface. The 1100px cap above is right for the
+   lobby (cards want a comfortable measure) and wrong for a call, where it left
+   the stage and chat squeezed into the middle half of a wide monitor. Once a
+   room is open the body goes edge to edge. */
+.cn-app > #cnBody:has(.cn-room) { max-width: none; }
 .cn-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; flex-wrap: wrap; padding: 28px 26px 0; }
 .cn-title { font-size: 20px; font-weight: 700; display: flex; align-items: center; gap: 10px; margin: 0; }
 .cn-title svg { color: var(--vid); }
@@ -4677,6 +4682,9 @@ img.mu-cover.lazy { background: var(--card); }
   /* the BUMPER: the room shouldn't sit flush against the bottom edge of the
      window. Safe-area aware so it clears the iPhone home indicator too. */
   padding-bottom: calc(14px + var(--safe-bottom));
+  /* Now that the room is full-bleed (max-width:none above) the side padding is
+     what keeps it off the window edge — and off a notch in landscape. */
+  padding-left: max(20px, var(--safe-left)); padding-right: max(20px, var(--safe-right));
   width: 100%; box-sizing: border-box;
 }
 .cn-room-head { display: flex; align-items: center; gap: 12px; padding: 10px 4px 12px; flex-wrap: wrap; }
@@ -4685,8 +4693,11 @@ img.mu-cover.lazy { background: var(--card); }
 .cn-room-topic { font-size: 12px; color: var(--ink-faint); }
 .cn-room-head .spacer { flex: 1; }
 
+/* The chat rail is sized in `clamp` rather than a fixed 320px: on a 2560px
+   monitor a 320px rail is a sliver next to the stage, and on a 1280px laptop a
+   400px rail eats the video. 22vw between those bounds tracks the window. */
 .cn-room-body { flex: 1; display: grid; grid-template-columns: 1fr 0; gap: 0; min-height: 0; transition: grid-template-columns 0.18s var(--ease); }
-.cn-room.chat-open .cn-room-body { grid-template-columns: 1fr 320px; gap: 14px; }
+.cn-room.chat-open .cn-room-body { grid-template-columns: minmax(0, 1fr) clamp(300px, 22vw, 420px); gap: 14px; }
 .cn-stage-wrap { display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: 10px; }
 .cn-stage { flex: 1; min-height: 0; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 
@@ -4734,14 +4745,52 @@ img.mu-cover.lazy { background: var(--card); }
    see .cn-tile.has-video below, which adopts the stream's own ratio. */
 .cn-grid { display: grid; gap: 10px; padding: 10px; height: 100%; align-content: center; justify-content: center;
            grid-auto-rows: auto; overflow: auto; }
-.cn-grid.n1 { grid-template-columns: minmax(0, min(720px, 100%)); }
-.cn-grid.n2 { grid-template-columns: repeat(2, minmax(0, min(460px, 100%))); }
-.cn-grid.n3, .cn-grid.n4 { grid-template-columns: repeat(2, minmax(0, min(400px, 100%))); }
-.cn-grid.n5, .cn-grid.n6, .cn-grid.n7, .cn-grid.n8, .cn-grid.n9 { grid-template-columns: repeat(3, minmax(0, min(320px, 100%))); }
-/* speaker view: the pinned tile fills the stage; the rest are hidden */
-.cn-grid.pinned { grid-template-columns: minmax(0, 100%); align-content: stretch; }
-.cn-grid.pinned .cn-tile { aspect-ratio: auto; height: 100%; }
-.cn-grid.pinned .cn-tile.thumb { display: none; }
+/* The per-count caps below scale with the stage instead of being fixed pixels.
+   They used to top out at 720/460/400/320px, which on a wide monitor left a big
+   empty margin around a small huddle of tiles. `min(<cap>, 100%)` still stops a
+   lone tile from becoming absurdly large, but the caps are now generous enough
+   that the grid actually uses the room it's been given. */
+.cn-grid.n1 { grid-template-columns: minmax(0, min(1100px, 100%)); }
+.cn-grid.n2 { grid-template-columns: repeat(2, minmax(0, min(700px, 100%))); }
+.cn-grid.n3, .cn-grid.n4 { grid-template-columns: repeat(2, minmax(0, min(620px, 100%))); }
+.cn-grid.n5, .cn-grid.n6 { grid-template-columns: repeat(3, minmax(0, min(480px, 100%))); }
+.cn-grid.n7, .cn-grid.n8, .cn-grid.n9 { grid-template-columns: repeat(3, minmax(0, min(420px, 100%))); }
+/* 10+ participants: stop hand-writing counts and let the grid fit what it can. */
+.cn-grid.nmany { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); width: 100%; }
+
+/* ---- FOCUS VIEW (the Discord model) ----
+   One tile takes the whole stage and the others shrink to a filmstrip along the
+   bottom — rather than Zoom's "hide everyone else" speaker view. You keep seeing
+   who's in the room while you watch one person, and the strip doubles as the way
+   back out (click another tile to move focus, click the focused one to release). */
+.cn-grid.focused {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  align-content: stretch; justify-content: stretch;
+  gap: 8px; width: 100%;
+}
+.cn-grid.focused .cn-tile.focus {
+  grid-row: 1; grid-column: 1;
+  aspect-ratio: auto; height: 100%; width: 100%; min-height: 0;
+}
+/* Everyone else lands in a horizontally-scrolling strip in row 2. The strip is a
+   flex row inside the grid cell so tiles keep their own aspect ratio. */
+.cn-grid.focused .cn-strip {
+  grid-row: 2; grid-column: 1;
+  display: flex; gap: 8px; overflow-x: auto; overflow-y: hidden;
+  padding: 2px 2px 4px; scrollbar-width: thin;
+}
+.cn-grid.focused .cn-strip .cn-tile {
+  flex: 0 0 auto; width: clamp(120px, 15vw, 200px); height: auto; aspect-ratio: 16 / 9;
+}
+/* In the strip the video crops to fill rather than letterboxing — a thumbnail
+   with black bars on both sides is mostly black. */
+.cn-grid.focused .cn-strip .cn-tile video { object-fit: cover; }
+.cn-grid.focused .cn-strip .cn-tile-bar { font-size: 10px; padding: 4px 6px; }
+.cn-grid.focused .cn-strip .cn-avatar { width: 40px; height: 40px; font-size: 14px; }
+
+/* Tiles are clickable (focus) and right-clickable (per-user menu), so say so. */
+.cn-tile { cursor: pointer; }
 
 .cn-tile { position: relative; background: var(--bg); border: 1px solid var(--line-soft); border-radius: 10px; overflow: hidden;
            min-height: 0; display: flex; align-items: center; justify-content: center; transition: border-color 0.14s;
@@ -4883,3 +4932,285 @@ img.mu-cover.lazy { background: var(--card); }
   .cn-head { padding: 20px 16px 0; }
   #cnBody { padding: 16px 16px 0; }
 }
+
+/* ---- Connect: quality pickers ---- */
+.cn-qual-head { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+                color: var(--ink-faint); margin: 16px 0 8px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
+.cn-qual-note { display: block; font-size: 11px; font-style: normal; color: var(--ink-ghost); margin-top: 4px; }
+
+/* ---- Connect: attach button + upload placeholder ---- */
+.cn-attach { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+             width: 34px; height: 34px; border-radius: 9px; cursor: pointer;
+             background: var(--bg); border: 1px solid var(--line); color: var(--ink-dim);
+             transition: color 0.12s, border-color 0.12s; }
+.cn-attach:hover { color: var(--vid); border-color: color-mix(in oklch, var(--vid) 50%, var(--line)); }
+
+.cn-uploading { display: flex; align-items: center; gap: 8px; padding: 7px 8px; font-size: 12px;
+                color: var(--ink-faint); }
+.cn-up-spin { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0;
+              border: 2px solid color-mix(in oklch, var(--vid) 30%, transparent); border-top-color: var(--vid);
+              animation: cn-spin 0.7s linear infinite; }
+@keyframes cn-spin { to { transform: rotate(360deg); } }
+
+/* ---- Connect: the "share a file" chooser ---- */
+.cn-attach-menu { display: flex; flex-direction: column; gap: 8px; }
+.cn-attach-opt { display: flex; align-items: center; gap: 12px; text-align: left; width: 100%;
+                 padding: 12px 13px; border-radius: 11px; cursor: pointer;
+                 background: var(--bg); border: 1px solid var(--line); color: var(--ink);
+                 transition: border-color 0.12s, transform 0.12s var(--ease); }
+.cn-attach-opt:hover { border-color: color-mix(in oklch, var(--vid) 55%, var(--line)); transform: translateY(-1px); }
+.cn-attach-opt svg { flex-shrink: 0; color: var(--vid); }
+.cn-attach-opt div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cn-attach-opt b { font-size: 13.5px; font-weight: 650; }
+.cn-attach-opt span { font-size: 11.5px; color: var(--ink-faint); }
+
+.cn-attach-warn { display: flex; align-items: flex-start; gap: 8px; margin: 4px 0 0;
+                  font-size: 11.5px; line-height: 1.55; color: var(--ink-dim);
+                  padding: 10px 11px; border-radius: 9px;
+                  background: color-mix(in oklch, var(--acc) 9%, transparent);
+                  border: 1px solid color-mix(in oklch, var(--acc) 28%, transparent); }
+.cn-attach-warn svg { flex-shrink: 0; margin-top: 2px; color: var(--acc); }
+
+/* ---- Connect: vault picker ---- */
+.cn-vault-pick { display: flex; flex-direction: column; gap: 10px; }
+.cn-vault-pick input { padding: 9px 11px; font: inherit; font-size: 13px; color: var(--ink);
+                       background: var(--bg); border: 1px solid var(--line); border-radius: 9px; }
+.cn-vault-pick input:focus { outline: none; border-color: color-mix(in oklch, var(--vid) 55%, var(--line)); }
+.cn-vault-list { display: flex; flex-direction: column; gap: 3px; max-height: 320px; overflow-y: auto; }
+.cn-vault-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+                padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13px;
+                background: none; border: 1px solid transparent; color: var(--ink); }
+.cn-vault-row:hover { background: var(--bg); border-color: var(--line); }
+.cn-vault-row svg { flex-shrink: 0; color: var(--ink-faint); }
+.cn-vault-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cn-vault-size { flex-shrink: 0; font-size: 11px; color: var(--ink-ghost); }
+
+/* ---- Connect: attachments inside a message ---- */
+.cn-msg-files { display: flex; flex-direction: column; gap: 6px; margin-top: 5px; }
+.cn-file-cap { display: block; font-size: 10.5px; color: var(--ink-ghost); margin-top: 3px; }
+.cn-file-temp { display: inline-block; font-size: 9.5px; font-weight: 650; letter-spacing: 0.04em;
+                text-transform: uppercase; padding: 1px 5px; border-radius: 20px; margin-left: 4px;
+                color: var(--acc); background: color-mix(in oklch, var(--acc) 16%, transparent); }
+
+.cn-file-img { display: block; text-decoration: none; }
+.cn-file-img img { display: block; max-width: 100%; max-height: 260px; border-radius: 9px;
+                   border: 1px solid var(--line-soft); object-fit: cover; }
+.cn-file-vid video, .cn-file-aud audio { display: block; width: 100%; max-height: 260px; border-radius: 9px; }
+.cn-file-aud audio { height: 38px; }
+
+.cn-file-row { display: flex; align-items: center; gap: 9px; padding: 9px 11px; border-radius: 9px;
+               text-decoration: none; color: var(--ink); background: var(--bg);
+               border: 1px solid var(--line); transition: border-color 0.12s; }
+.cn-file-row:hover { border-color: color-mix(in oklch, var(--vid) 50%, var(--line)); }
+.cn-file-row > svg:first-child { flex-shrink: 0; color: var(--vid); }
+.cn-file-row > svg:last-child { flex-shrink: 0; color: var(--ink-faint); }
+.cn-file-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.cn-file-meta b { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cn-file-meta > span { font-size: 10.5px; color: var(--ink-ghost); }
+
+/* ============================================================
+   Connect: screen shares as their own tiles
+   ============================================================ */
+/* A share tile is visually distinct from a person â€” a warmer border and no
+   mirroring â€” so a busy grid reads at a glance. */
+.cn-tile.screen { border-color: color-mix(in oklch, var(--acc) 40%, var(--line-soft)); }
+.cn-tile.screen video, .cn-tile.screen canvas { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; }
+.cn-tile.screen.self video { transform: none; }   /* never mirror a screen */
+
+/* the CLOSED state: a dim 1fps still with the open affordance over it */
+.cn-tile.screen.closed .cn-scr-preview { filter: saturate(0.55) brightness(0.5); }
+.cn-scr-overlay { position: absolute; inset: 0; display: flex; flex-direction: column;
+                  align-items: center; justify-content: center; gap: 7px; }
+.cn-scr-open { display: inline-flex; align-items: center; gap: 7px; padding: 8px 15px; border-radius: 9px;
+               font-size: 12.5px; font-weight: 600; cursor: pointer; color: #fff;
+               background: color-mix(in oklch, var(--acc) 82%, black); border: 1px solid transparent;
+               box-shadow: 0 6px 18px oklch(0 0 0 / 0.35); }
+.cn-scr-open:hover { background: var(--acc); }
+.cn-scr-hint { font-size: 10.5px; color: rgba(255,255,255,0.72); text-shadow: 0 1px 3px rgba(0,0,0,0.7); }
+.cn-live-tag { font-size: 9px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+               padding: 1px 5px; border-radius: 20px; background: var(--acc); color: #fff; }
+.cn-vol-badge { font-size: 9.5px; font-weight: 650; padding: 1px 5px; border-radius: 20px;
+                background: rgba(255,255,255,0.18); }
+
+/* ============================================================
+   Connect: right-click context menus
+   ============================================================ */
+.cn-menu { position: fixed; z-index: 6000; min-width: 212px; padding: 5px;
+           background: var(--card); border: 1px solid var(--line); border-radius: 11px;
+           box-shadow: 0 18px 44px oklch(0 0 0 / 0.42); display: flex; flex-direction: column; gap: 1px;
+           animation: cn-menu-in 0.1s var(--ease); }
+@keyframes cn-menu-in { from { opacity: 0; transform: scale(0.97) translateY(-3px); } }
+.cn-menu-item { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left;
+                padding: 7px 9px; border-radius: 7px; cursor: pointer; font-size: 12.5px;
+                background: none; border: none; color: var(--ink); }
+.cn-menu-item:hover { background: var(--bg); }
+.cn-menu-item > svg:first-child { flex-shrink: 0; color: var(--ink-faint); }
+.cn-menu-item > span { flex: 1; min-width: 0; }
+.cn-menu-item.on > svg:last-child { color: var(--vid); }
+.cn-menu-item.danger { color: var(--err, oklch(0.65 0.19 25)); }
+.cn-menu-item.danger > svg:first-child { color: currentColor; }
+.cn-menu-item.danger:hover { background: color-mix(in oklch, var(--err, oklch(0.65 0.19 25)) 12%, transparent); }
+.cn-menu-gap { width: 14px; flex-shrink: 0; }
+.cn-menu-sep { height: 1px; margin: 4px 6px; background: var(--line-soft); }
+.cn-menu-head { padding: 6px 9px 5px; font-size: 11px; font-weight: 700; color: var(--ink-faint);
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* the volume row inside the user menu */
+.cn-menu-vol { padding: 4px 9px 8px; display: flex; flex-direction: column; gap: 6px; }
+.cn-menu-vol label { font-size: 11.5px; color: var(--ink-dim); display: flex; justify-content: space-between; }
+.cn-menu-vol b { color: var(--ink); font-weight: 650; }
+.cn-menu-vol input[type=range] { width: 100%; accent-color: var(--vid); cursor: pointer; }
+
+/* the emoji row at the top of the message menu */
+.cn-menu-rx { display: flex; gap: 2px; padding: 3px 4px; }
+.cn-menu-rx-btn { flex: 1; padding: 5px 0; font-size: 16px; line-height: 1; cursor: pointer;
+                  background: none; border: none; border-radius: 7px; transition: background 0.1s, transform 0.1s; }
+.cn-menu-rx-btn:hover { background: var(--bg); transform: scale(1.18); }
+
+.cn-ignored-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.cn-ignored-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+                      font-size: 12.5px; padding: 7px 10px; background: var(--bg); border-radius: 8px; }
+.cn-ctl.warn { color: var(--acc); border-color: color-mix(in oklch, var(--acc) 40%, transparent);
+               background: color-mix(in oklch, var(--acc) 12%, var(--bg)); }
+
+/* ============================================================
+   Connect: noise cancellation panel
+   ============================================================ */
+.cn-noise { display: flex; flex-direction: column; gap: 12px; }
+.cn-noise-body { display: flex; flex-direction: column; gap: 12px; transition: opacity 0.14s; }
+/* "disabled" is a visual + interaction state, not a per-input attribute â€” one
+   class beats setting `disabled` on a dozen controls and remembering to undo it. */
+.cn-noise-body.disabled, .cn-noise-adv.disabled { opacity: 0.4; pointer-events: none; }
+.cn-noise-adv { display: flex; flex-direction: column; gap: 13px; padding: 12px 13px;
+                background: var(--bg); border: 1px solid var(--line-soft); border-radius: 10px; }
+.cn-dev-row.check span em { display: block; font-style: normal; font-size: 11px; color: var(--ink-ghost);
+                            margin-top: 2px; line-height: 1.45; }
+.cn-slide-row { display: flex; flex-direction: column; gap: 5px; }
+.cn-slide-row label { font-size: 12px; color: var(--ink-dim); display: flex; justify-content: space-between; gap: 10px; }
+.cn-slide-row label b { color: var(--ink); font-weight: 650; font-variant-numeric: tabular-nums; }
+.cn-slide-row input[type=range] { width: 100%; accent-color: var(--vid); cursor: pointer; }
+.cn-slide-row em { font-style: normal; font-size: 10.5px; color: var(--ink-ghost); line-height: 1.5; }
+
+.cn-mictest { display: flex; flex-direction: column; gap: 9px; padding: 12px 13px;
+              background: var(--bg); border: 1px solid var(--line-soft); border-radius: 10px; }
+.cn-mictest-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
+.cn-mictest-warn { display: flex; align-items: flex-start; gap: 7px; margin: 0; font-size: 11px; line-height: 1.5;
+                   color: var(--ink-dim); }
+.cn-mictest-warn svg { flex-shrink: 0; margin-top: 1px; color: var(--acc); }
+
+/* the level meter: fill shows the current level, the marker shows the threshold,
+   and the fill turns accent-coloured when the gate is actually open */
+.cn-meter { position: relative; height: 10px; border-radius: 20px; overflow: hidden;
+            background: color-mix(in oklch, var(--ink) 10%, transparent); }
+.cn-meter-fill { height: 100%; width: 0%; border-radius: 20px;
+                 background: color-mix(in oklch, var(--ink) 28%, transparent);
+                 transition: width 0.06s linear, background 0.12s; }
+.cn-meter-fill.open { background: var(--vid); }
+.cn-meter-thresh { position: absolute; top: -2px; bottom: -2px; width: 2px; left: 0;
+                   background: var(--acc); box-shadow: 0 0 0 1px color-mix(in oklch, var(--acc) 30%, transparent); }
+.cn-meter-legend { display: flex; justify-content: space-between; gap: 10px; font-size: 10.5px; color: var(--ink-ghost); }
+.cn-noise-reset { align-self: flex-start; }
+
+/* ============================================================
+   Connect: attachment text previews + the lightbox
+   ============================================================ */
+.cn-file-text { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: var(--bg); }
+.cn-file-text-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; font-size: 12px;
+                     border-bottom: 1px solid var(--line-soft); }
+.cn-file-text-head svg { flex-shrink: 0; color: var(--vid); }
+.cn-file-text-head b { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cn-file-text-head > span { flex-shrink: 0; font-size: 10.5px; color: var(--ink-ghost); }
+.cn-file-text-body { margin: 0; padding: 9px 11px; font-family: var(--mono); font-size: 11px; line-height: 1.55;
+                     color: var(--ink-dim); white-space: pre-wrap; word-break: break-word;
+                     max-height: 108px; overflow: hidden; }
+.cn-file-text-body.cn-text-err { color: var(--ink-ghost); font-family: inherit; font-size: 11.5px; }
+.cn-file-text-open { display: block; width: 100%; padding: 7px; cursor: pointer; font-size: 11.5px; font-weight: 600;
+                     color: var(--vid); background: none; border: none; border-top: 1px solid var(--line-soft); }
+.cn-file-text-open:hover { background: color-mix(in oklch, var(--vid) 10%, transparent); }
+.cn-file-img { cursor: zoom-in; }
+
+.cn-prev { max-width: min(1080px, 94vw); width: auto; display: flex; flex-direction: column; gap: 0; padding: 0; overflow: hidden; }
+.cn-prev-head { display: flex; align-items: center; gap: 12px; padding: 13px 15px; border-bottom: 1px solid var(--line-soft); }
+.cn-prev-id { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.cn-prev-id b { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cn-prev-id span { font-size: 11px; color: var(--ink-ghost); }
+.cn-prev-x { flex-shrink: 0; display: inline-flex; padding: 6px; border-radius: 8px; cursor: pointer;
+             background: none; border: none; color: var(--ink-faint); }
+.cn-prev-x:hover { background: var(--bg); color: var(--ink); }
+.cn-prev-body { flex: 1; min-height: 0; overflow: auto; padding: 14px 15px; max-height: 72vh; }
+.cn-prev-img { display: flex; align-items: center; justify-content: center; }
+.cn-prev-img img { max-width: 100%; max-height: 68vh; border-radius: 8px; display: block; }
+.cn-prev-code { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.6; color: var(--ink-dim);
+                white-space: pre-wrap; word-break: break-word; }
+.cn-prev-md { font-size: 13.5px; line-height: 1.65; }
+.cn-prev-md h1, .cn-prev-md h2, .cn-prev-md h3 { margin: 14px 0 7px; }
+.cn-prev-md p { margin: 0 0 10px; }
+.cn-prev-md pre { padding: 10px 12px; border-radius: 8px; background: var(--bg); overflow-x: auto; }
+.cn-prev-md code { font-family: var(--mono); font-size: 12px; }
+.cn-prev-err { margin: 0; font-size: 12.5px; color: var(--ink-faint); text-align: center; padding: 26px 10px; }
+.cn-prev-acts { display: flex; gap: 8px; justify-content: flex-end; padding: 11px 15px;
+                border-top: 1px solid var(--line-soft); flex-wrap: wrap; }
+
+/* ---- narrow screens ---- */
+@media (max-width: 900px) {
+  /* Right-click menus are a desktop affordance; on touch there is no right-click
+     and the hover toolbar already covers these actions. The menus still WORK if a
+     device fires contextmenu (a long-press on some Androids), so they're only
+     resized to fit, not disabled. */
+  .cn-menu { min-width: 190px; max-width: calc(100vw - 24px); }
+  .cn-grid.focused .cn-strip .cn-tile { width: clamp(96px, 26vw, 150px); }
+  .cn-prev { max-width: 96vw; }
+  .cn-prev-body { max-height: 62vh; }
+}
+
+
+/* ============================================================
+   Connect: the WIDE modal (noise cancellation)
+   A panel with three sliders, three toggles, a live meter and a monitor is too
+   much for a small centred box â€” it scrolled awkwardly and the meter ended up
+   below the fold, which is exactly the control you need to watch while tuning.
+   `wide` lets it fill the window and, once there's horizontal room, split the
+   controls into columns so everything is visible at once.
+   ============================================================ */
+.cn-modal.wide {
+  width: min(1100px, 100vw - 32px);
+  max-width: none;
+  max-height: min(880px, 100vh - 32px);
+  display: flex; flex-direction: column;
+}
+.cn-modal.wide .cn-modal-body { flex: 1; min-height: 0; overflow-y: auto; }
+
+/* Two columns once the window can carry them: settings on the left, the test
+   rig on the right so the meter stays in view while the sliders move. */
+@media (min-width: 860px) {
+  .cn-modal.wide .cn-noise-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 16px 20px;
+    align-items: start;
+  }
+  /* the two checkboxes span both columns and sit above the split */
+  .cn-modal.wide .cn-noise-body > .cn-dev-row.check { grid-column: 1 / -1; }
+  .cn-modal.wide .cn-noise-adv { grid-column: 1; margin: 0; }
+  .cn-modal.wide .cn-mictest { grid-column: 2; margin: 0; position: sticky; top: 0; }
+  .cn-modal.wide .cn-noise-reset { grid-column: 1 / -1; }
+}
+
+/* Below that, one column â€” and on a phone the panel goes genuinely full-screen,
+   because a 12px margin around a full-height sheet is wasted space. */
+@media (max-width: 640px) {
+  .cn-modal.wide {
+    width: 100vw; height: 100%; height: var(--app-h, 100dvh);
+    max-height: none; border-radius: 0;
+    padding-top: max(14px, var(--safe-top));
+    padding-bottom: max(14px, var(--safe-bottom));
+    padding-left: max(14px, var(--safe-left));
+    padding-right: max(14px, var(--safe-right));
+  }
+  /* the backdrop shouldn't pad a sheet that already fills the screen */
+  .modal-bg:has(.cn-modal.wide) { padding: 0; align-items: stretch; justify-content: stretch; }
+  .cn-modal.wide .cn-noise-adv, .cn-modal.wide .cn-mictest { padding: 11px 12px; }
+  /* a comfortable touch target on the sliders */
+  .cn-modal.wide input[type=range] { height: 26px; }
+}
+

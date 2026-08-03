@@ -40,8 +40,37 @@
 
 /* ---- tuning constants ---------------------------------------------------- */
 const CN_AUDIO_BITRATE = 64000;          // 64 kbps, per spec
-const CN_VIDEO_BITRATE = 2_500_000;      // camera target; screen gets more (below)
-const CN_SCREEN_BITRATE = 8_000_000;     // sharing text/code needs the headroom
+
+/* ---- video quality presets ----------------------------------------------
+   Chosen by the user in Devices & quality, separately for the CAMERA and the
+   SCREEN SHARE, because they want opposite things: a camera can drop resolution
+   happily, while shared text stays readable only if resolution is preserved.
+
+   'auto' asks for the best the device offers and lets the encoder adapt — right
+   for most people. The fixed tiers exist for a capped connection, a data plan,
+   or a laptop whose fans spin up encoding 1080p60.
+
+   `max` is intentionally uncapped-ish: the browser still adapts downward under
+   congestion, this only sets the ceiling. */
+const CN_CAM_QUALITY = {
+  auto:   { label: 'Auto (recommended)', w: 1920, h: 1080, fps: 60, bitrate: 2_500_000, note: 'Best your camera supports, adapts to your connection' },
+  low:    { label: 'Low · 360p',         w: 640,  h: 360,  fps: 24, bitrate: 350_000,   note: 'Easiest on data and battery' },
+  medium: { label: 'Medium · 720p',      w: 1280, h: 720,  fps: 30, bitrate: 1_200_000, note: 'Good balance' },
+  high:   { label: 'High · 1080p',       w: 1920, h: 1080, fps: 30, bitrate: 3_000_000, note: 'Sharp, needs a solid connection' },
+  max:    { label: 'Max · 1080p60',      w: 1920, h: 1080, fps: 60, bitrate: 6_000_000, note: 'Smoothest motion, heaviest upload' },
+};
+const CN_SCREEN_QUALITY = {
+  auto:   { label: 'Auto (recommended)', w: 3840, h: 2160, fps: 60, bitrate: 8_000_000,  note: 'Full resolution, adapts to your connection' },
+  low:    { label: 'Low · 720p',         w: 1280, h: 720,  fps: 15, bitrate: 800_000,    note: 'Readable text, very light' },
+  medium: { label: 'Medium · 1080p',     w: 1920, h: 1080, fps: 30, bitrate: 3_000_000,  note: 'Good for slides and code' },
+  high:   { label: 'High · 1440p',       w: 2560, h: 1440, fps: 30, bitrate: 6_000_000,  note: 'Crisp detail' },
+  max:    { label: 'Max · 4K60',         w: 3840, h: 2160, fps: 60, bitrate: 12_000_000, note: 'For video or fast motion' },
+};
+/* the user's current choice, persisted in PREFS (see cnQualityPrefs) */
+function cnCamQuality() { return CN_CAM_QUALITY[(PREFS && PREFS.connectCamQuality) || 'auto'] || CN_CAM_QUALITY.auto; }
+function cnScreenQuality() { return CN_SCREEN_QUALITY[(PREFS && PREFS.connectScreenQuality) || 'auto'] || CN_SCREEN_QUALITY.auto; }
+/* the live ceiling the sender is capped at, by track kind */
+function cnVideoBitrateFor(isScreen) { return isScreen ? cnScreenQuality().bitrate : cnCamQuality().bitrate; }
 /* Public STUN only. STUN just tells a peer its own public address so the two can
    find each other — it never carries media, so using Google's public servers
    costs no privacy for the call content itself. No TURN: a relay would be a third
@@ -78,6 +107,30 @@ function cnResetState() {
   CN.levelTimer = null;
   CN.audioCtx = null;
   CN.analysers = new Map();
+
+  /* ---- tile focus (the Discord model) ----
+     The KEY of the tile filling the stage: 'self', an accountId, or a screen key
+     ('scr:<accountId>'). Everyone else drops into the filmstrip rather than being
+     hidden, which is what separates this from Zoom's speaker view. */
+  CN.focus = null;
+
+  /* ---- screen shares as their own participants ----
+     A share is no longer a second video track on the sharer's tile; it gets its
+     own tile keyed 'scr:<accountId>'. `openScreens` holds the keys the viewer has
+     actually OPENED — an unopened share is a 1fps still preview with its audio
+     muted, so ten people sharing doesn't cost ten live decodes. */
+  CN.screens = new Map();     // 'scr:<accountId>' -> { key, ownerId, ownerName, stream, live }
+  CN.openScreens = new Set();
+
+  /* ---- per-user, per-viewer overrides (local only, never published) ----
+     volume 0..1, muted (silence them for me), ignored (hide their video+audio
+     entirely). Keyed by accountId. Persisted per room in PREFS so an ignore
+     survives a refresh. */
+  CN.userPrefs = new Map();
+
+  /* the noise-suppression graph, when it's running (see cnBuildMicChain) */
+  CN.micChain = null;
+  CN.micTest = null;          // the "hear yourself" monitor, while open
 }
 
 /* ============================================================
@@ -132,7 +185,17 @@ function cnRenderBody() {
   const body = document.getElementById('cnBody');
   if (!body) return;
   body.innerHTML = CN.room ? cnRoomHTML() : cnLobbyHTML();
-  if (CN.room) cnWireRoom(); else cnWireLobby();
+  if (CN.room) {
+    // Seed the render caches (see cnRenderStage) so the first stage render after
+    // a full body render doesn't needlessly rebuild markup it just wrote.
+    // NB: read from the GENERATORS, not from innerHTML — the browser normalises
+    // markup on parse, so the round-tripped string never compares equal.
+    const stage = document.getElementById('cnStage');
+    if (stage) stage._cnHTML = cnStageHTML();
+    const bar = document.querySelector('.cn-bar');
+    if (bar) bar._cnHTML = cnBarHTML();
+    cnWireRoom();
+  } else cnWireLobby();
 }
 
 function cnLobbyHTML() {
@@ -248,9 +311,11 @@ function cnRoomHTML() {
         <div class="cn-msgs" id="cnMsgs">${cnMessagesHTML()}</div>
         <div class="cn-reply" id="cnReplyBar" hidden></div>
         <form class="cn-compose" id="cnCompose">
+          <button type="button" class="cn-attach" id="cnAttach" title="Share a file">${svg('plus', 15)}</button>
           <textarea id="cnInput" rows="1" placeholder="Message the room…" maxlength="4000"></textarea>
           <button type="submit" class="btn primary sm" id="cnSend" title="Send">${svg('send', 14)}</button>
         </form>
+        <input type="file" id="cnFilePick" class="hidden" multiple />
       </aside>
     </div>
   </div>`;
@@ -282,20 +347,50 @@ function cnStageHTML() {
       </div>
     </div>`;
   }
-  const tiles = [cnSelfTileHTML(), ...[...CN.peers.values()].map(cnPeerTileHTML)].join('');
-  const n = CN.peers.size + 1;
-  const cls = CN.pinned ? 'pinned' : `n${Math.min(n, 9)}`;
-  return `<div class="cn-grid ${cls}" id="cnGrid">${tiles}</div>`;
+  /* Build the full tile list: self, every peer (minus the ones this viewer has
+     ignored), then every screen share as its OWN tile. */
+  const tiles = [
+    { key: 'self', html: cnSelfTileHTML() },
+    ...[...CN.peers.values()]
+      .filter(p => !cnUserPref(p.id).ignored)
+      .map(p => ({ key: p.id, html: cnPeerTileHTML(p) })),
+    ...(CN.media.screen ? [{ key: 'scr:self', html: cnSelfScreenTileHTML() }] : []),
+    ...[...CN.screens.values()]
+      .filter(s => !cnUserPref(s.ownerId).ignored)
+      .map(s => ({ key: s.key, html: cnScreenTileHTML(s) })),
+  ];
+
+  // FOCUS VIEW: the focused tile fills the stage, everyone else goes to the strip.
+  if (CN.focus && tiles.some(t => t.key === CN.focus)) {
+    const hero = tiles.find(t => t.key === CN.focus);
+    const rest = tiles.filter(t => t.key !== CN.focus);
+    return `<div class="cn-grid focused" id="cnGrid">
+      ${hero.html}
+      ${rest.length ? `<div class="cn-strip">${rest.map(t => t.html).join('')}</div>` : ''}
+    </div>`;
+  }
+  // A focus target that has since left the call falls back to the grid.
+  if (CN.focus) CN.focus = null;
+
+  const n = tiles.length;
+  const cls = n > 9 ? 'nmany' : `n${n}`;
+  return `<div class="cn-grid ${cls}" id="cnGrid">${tiles.map(t => t.html).join('')}</div>`;
+}
+
+/* The class list every tile shares: focus state, and whether it's the hero. */
+function cnTileCls(key) {
+  return CN.focus === key ? 'focus' : '';
 }
 
 function cnSelfTileHTML() {
-  const pinned = CN.pinned === 'self';
-  const showing = CN.media.screen || CN.media.cam;
-  return `<div class="cn-tile self ${pinned ? 'pin' : ''} ${CN.pinned && !pinned ? 'thumb' : ''}" data-peer="self">
+  // Your own tile now only ever shows your CAMERA — your screen share is a
+  // separate tile (cnSelfScreenTileHTML), the same as everyone else's.
+  const showing = CN.media.cam;
+  return `<div class="cn-tile self ${cnTileCls('self')}" data-peer="self" data-key="self">
     <video id="cnSelfVideo" autoplay muted playsinline class="${showing ? '' : 'off'}"></video>
     ${showing ? '' : `<div class="cn-avatar">${cnInitials(CN.self ? CN.self.name : 'You')}</div>`}
     <div class="cn-tile-bar">
-      <span class="cn-tile-name">You${CN.media.screen ? ' · presenting' : ''}</span>
+      <span class="cn-tile-name">You</span>
       <span class="cn-tile-icons">
         ${CN.media.hand ? '<span class="cn-hand">✋</span>' : ''}
         ${CN.media.mic ? '' : `<span class="cn-muted" title="Muted">${svg('volmute', 12)}</span>`}
@@ -305,20 +400,185 @@ function cnSelfTileHTML() {
 }
 
 function cnPeerTileHTML(p) {
-  const pinned = CN.pinned === p.id;
-  const showing = p.media && (p.media.cam || p.media.screen);
-  return `<div class="cn-tile ${pinned ? 'pin' : ''} ${CN.pinned && !pinned ? 'thumb' : ''}" data-peer="${esc(p.id)}">
+  const pref = cnUserPref(p.id);
+  const showing = p.media && p.media.cam;
+  const key = p.id;
+  return `<div class="cn-tile ${cnTileCls(key)}" data-peer="${esc(p.id)}" data-key="${esc(key)}">
     <video autoplay playsinline data-video="${esc(p.id)}" class="${showing ? '' : 'off'}"></video>
     ${showing ? '' : `<div class="cn-avatar">${cnInitials(p.name)}</div>`}
     ${p.connecting ? `<div class="cn-connecting">connecting…</div>` : ''}
     <div class="cn-tile-bar">
-      <span class="cn-tile-name">${esc(p.name)}${p.media && p.media.screen ? ' · presenting' : ''}</span>
+      <span class="cn-tile-name">${esc(p.name)}</span>
       <span class="cn-tile-icons">
+        ${pref.muted ? `<span class="cn-muted" title="Muted for you">${svg('volmute', 12)}</span>` : ''}
+        ${pref.volume !== 1 && !pref.muted ? `<span class="cn-vol-badge" title="Volume ${Math.round(pref.volume * 100)}%">${Math.round(pref.volume * 100)}%</span>` : ''}
         ${p.media && p.media.hand ? '<span class="cn-hand">✋</span>' : ''}
         ${p.media && p.media.mic ? '' : `<span class="cn-muted" title="Muted">${svg('volmute', 12)}</span>`}
       </span>
     </div>
   </div>`;
+}
+
+/* Your own screen share, shown to you as its own tile so the layout matches what
+   everyone else sees. Always "open" — it's your screen, there's nothing to fetch. */
+function cnSelfScreenTileHTML() {
+  const key = 'scr:self';
+  return `<div class="cn-tile screen open ${cnTileCls(key)}" data-peer="self" data-key="${esc(key)}" data-screen="self">
+    <video id="cnSelfScreenVideo" autoplay muted playsinline></video>
+    <div class="cn-tile-bar">
+      <span class="cn-tile-name">${svg('window', 11)} Your screen</span>
+      <span class="cn-tile-icons"><span class="cn-live-tag">live</span></span>
+    </div>
+  </div>`;
+}
+
+/* Someone else's screen share.
+   CLOSED  → a still frame refreshed about once a second, audio muted. This is the
+             "1 fps preview" — cheap enough to have several on screen at once.
+   OPEN    → the real <video>, full framerate, audio audible.
+   Opening is deliberate (click / "Open stream") so a busy room doesn't decode
+   every share the moment it appears. */
+function cnScreenTileHTML(s) {
+  const open = CN.openScreens.has(s.key);
+  const pref = cnUserPref(s.ownerId);
+  return `<div class="cn-tile screen ${open ? 'open' : 'closed'} ${cnTileCls(s.key)}"
+       data-peer="${esc(s.ownerId)}" data-key="${esc(s.key)}" data-screen="${esc(s.key)}">
+    ${open
+      ? `<video autoplay playsinline data-screenvideo="${esc(s.key)}"></video>`
+      : `<canvas class="cn-scr-preview" data-screenpreview="${esc(s.key)}"></canvas>
+         <div class="cn-scr-overlay">
+           <button class="cn-scr-open" data-openscreen="${esc(s.key)}">${svg('play', 15)} Open stream</button>
+           <span class="cn-scr-hint">preview · 1 fps, no sound</span>
+         </div>`}
+    <div class="cn-tile-bar">
+      <span class="cn-tile-name">${svg('window', 11)} ${esc(s.ownerName)}'s screen</span>
+      <span class="cn-tile-icons">
+        ${pref.muted ? `<span class="cn-muted" title="Muted for you">${svg('volmute', 12)}</span>` : ''}
+        ${open ? '<span class="cn-live-tag">live</span>' : ''}
+      </span>
+    </div>
+  </div>`;
+}
+
+/* ============================================================
+   PER-USER, PER-VIEWER OVERRIDES
+   These are LOCAL: volume/mute/ignore change what THIS viewer hears and sees and
+   are never signalled to the room. Nobody is told they've been muted or ignored.
+   ============================================================ */
+const CN_PREF_DEFAULT = { volume: 1, muted: false, ignored: false };
+
+function cnUserPref(id) {
+  if (!id || id === 'self') return { ...CN_PREF_DEFAULT };
+  let p = CN.userPrefs.get(id);
+  if (!p) { p = { ...CN_PREF_DEFAULT }; CN.userPrefs.set(id, p); }
+  return p;
+}
+
+function cnSetUserPref(id, patch) {
+  const p = cnUserPref(id);
+  Object.assign(p, patch);
+  CN.userPrefs.set(id, p);
+  cnApplyUserPrefs();
+  cnSaveUserPrefs();
+  cnRenderStage();
+}
+
+/* Push volume/mute onto the live <audio>/<video> elements. Ignoring is handled at
+   render time (the tile isn't emitted at all) — but we still mute the element,
+   because an ignored peer's audio would otherwise keep playing from a detached
+   element that the browser is happy to leave running. */
+function cnApplyUserPrefs() {
+  for (const p of CN.peers.values()) {
+    const pref = cnUserPref(p.id);
+    const gain = pref.ignored || pref.muted ? 0 : pref.volume;
+    // Their voice comes out of the dedicated element (cnPeerAudioEl); the tile's
+    // <video> is always muted, so volume only has to be applied in one place.
+    if (p.audioEl) {
+      // HTMLMediaElement.volume can't exceed 1, so anything ABOVE 100% is done
+      // with a Web Audio gain node instead (cnPeerBoost) — that's the whole
+      // reason the slider goes to 150%: the common complaint is someone too
+      // quiet to hear, which a 0..1 control cannot fix.
+      if (gain > 1) {
+        p.audioEl.volume = 1;
+        cnPeerBoost(p, gain);
+      } else {
+        cnPeerBoost(p, 1);       // tear the booster down when it isn't needed
+        p.audioEl.volume = Math.max(0, gain);
+      }
+      p.audioEl.muted = gain === 0;
+    }
+    // An ignored peer shouldn't keep decoding video we never show.
+    const el = document.querySelector(`[data-video="${CSS.escape(p.id)}"]`);
+    if (el) el.muted = true;
+  }
+  // a screen share follows its OWNER's volume, so muting someone kills their
+  // screen's system audio too — which is what "mute this person" should mean
+  for (const s of CN.screens.values()) {
+    const pref = cnUserPref(s.ownerId);
+    const gain = pref.ignored || pref.muted ? 0 : pref.volume;
+    const el = document.querySelector(`[data-screenvideo="${CSS.escape(s.key)}"]`);
+    if (el) { el.volume = gain; el.muted = gain === 0; }
+  }
+}
+
+/* Amplify one peer beyond 100%.
+
+   The graph is source(their stream) → gain → speakers, and the <audio> element is
+   muted while it runs so the sound isn't playing twice. Built lazily and only for
+   peers actually turned above 100%, because each one costs an AudioContext.
+
+   Note this reads from the STREAM, not from the element: createMediaElementSource
+   permanently rewires an element's output and can't be undone (the same trap
+   documented in [[audio-equalizer]]), which would make going back below 100%
+   impossible. */
+function cnPeerBoost(p, gain) {
+  if (gain <= 1) {
+    // tear down and hand playback back to the plain element
+    if (p.boost) {
+      try { p.boost.src.disconnect(); p.boost.gain.disconnect(); p.boost.ctx.close(); } catch (e) {}
+      p.boost = null;
+      if (p.audioEl) p.audioEl.muted = false;
+    }
+    return;
+  }
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx || !p.audioStream) return;
+  if (!p.boost) {
+    try {
+      const ctx = new Ctx();
+      const src = ctx.createMediaStreamSource(p.audioStream);
+      const g = ctx.createGain();
+      src.connect(g); g.connect(ctx.destination);
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      p.boost = { ctx, src, gain: g };
+    } catch (e) { return; }
+  }
+  p.boost.gain.gain.value = gain;
+  // the element would otherwise play the same audio underneath the boosted copy
+  if (p.audioEl) p.audioEl.muted = true;
+}
+
+/* Persist per-room so an "ignore" survives a refresh. Only non-default entries
+   are written — no point storing "everyone at 100%, nobody muted". */
+function cnSaveUserPrefs() {
+  if (!CN.room || typeof setPrefs !== 'function') return;
+  const all = (PREFS && PREFS.connectUserPrefs) || {};
+  const mine = {};
+  for (const [id, p] of CN.userPrefs) {
+    if (p.volume !== 1 || p.muted || p.ignored) mine[id] = { volume: p.volume, muted: p.muted, ignored: p.ignored };
+  }
+  if (Object.keys(mine).length) all[CN.room.id] = mine; else delete all[CN.room.id];
+  setPrefs({ connectUserPrefs: all });
+}
+
+function cnLoadUserPrefs() {
+  CN.userPrefs = new Map();
+  if (!CN.room) return;
+  const saved = ((PREFS && PREFS.connectUserPrefs) || {})[CN.room.id];
+  if (!saved) return;
+  for (const [id, p] of Object.entries(saved)) {
+    CN.userPrefs.set(id, { ...CN_PREF_DEFAULT, ...p });
+  }
 }
 
 function cnBarHTML() {
@@ -336,9 +596,21 @@ function cnBarHTML() {
     <button class="cn-ctl ${CN.media.hand ? 'on' : ''}" id="cnHand" title="Raise hand">
       <span class="cn-hand-ico">✋</span><span>Hand</span>
     </button>
+    <button class="cn-ctl ${cnNoise().enabled ? 'on' : ''}" id="cnNoise" title="Noise cancellation">
+      ${svg('vol', 17)}<span>Noise</span>
+    </button>
     <button class="cn-ctl" id="cnDevices" title="Choose microphone & camera">${svg('gear', 17)}<span>Devices</span></button>
+    ${cnIgnoredCount() ? `<button class="cn-ctl warn" id="cnIgnored" title="You've hidden some people">
+      ${svg('eye', 17)}<span>${cnIgnoredCount()} hidden</span>
+    </button>` : ''}
     <div class="spacer"></div>
     <button class="cn-ctl leave" id="cnLeave" title="Leave the call">${svg('close', 17)}<span>Leave</span></button>`;
+}
+
+function cnIgnoredCount() {
+  let n = 0;
+  for (const p of CN.peers.values()) if (cnUserPref(p.id).ignored) n++;
+  return n;
 }
 
 function cnWireRoom() {
@@ -365,6 +637,47 @@ function cnWireStage() {
   if (j1) j1.onclick = () => cnJoinCall({ cam: false });
   if (j2) j2.onclick = () => cnJoinCall({ cam: true });
 
+  cnWireBar();
+
+  document.querySelectorAll('.cn-tile').forEach(t => {
+    const key = t.getAttribute('data-key');
+    const peerId = t.getAttribute('data-peer');
+    const screenKey = t.getAttribute('data-screen');
+
+    t.onclick = (e) => {
+      // the explicit "Open stream" button handles itself
+      if (e.target.closest('[data-openscreen]')) return;
+      // A CLOSED screen preview opens on click rather than focusing — opening is
+      // what you almost always want from a 1fps still, and you can focus it after.
+      if (screenKey && screenKey !== 'self' && !CN.openScreens.has(screenKey)) {
+        cnOpenScreen(screenKey);
+        return;
+      }
+      // Single click focuses (Discord), click the focused tile again to release.
+      CN.focus = (CN.focus === key) ? null : key;
+      cnRenderStage();
+    };
+
+    // Right-click: per-user controls, or the stream menu on a screen tile.
+    t.oncontextmenu = (e) => {
+      e.preventDefault();
+      if (screenKey) cnScreenMenu(e, screenKey);
+      else if (peerId && peerId !== 'self') cnUserMenu(e, peerId);
+      else cnSelfMenu(e);
+    };
+  });
+
+  document.querySelectorAll('[data-openscreen]').forEach(b => {
+    b.onclick = (e) => { e.stopPropagation(); cnOpenScreen(b.getAttribute('data-openscreen')); };
+  });
+
+  cnAttachStreams();
+  cnApplyUserPrefs();
+}
+
+/* The control bar re-renders independently of the tiles (see cnRenderStage), so
+   its handlers are bound separately. */
+function cnWireBar() {
   const mic = document.getElementById('cnMic');
   const cam = document.getElementById('cnCam');
   const scr = document.getElementById('cnScreen');
@@ -377,45 +690,365 @@ function cnWireStage() {
   if (hand) hand.onclick = cnToggleHand;
   if (dev) dev.onclick = cnDevicePicker;
   if (leave) leave.onclick = () => cnLeaveCall();
-
-  // click a tile to pin it to speaker view; click again to unpin
-  document.querySelectorAll('.cn-tile').forEach(t => {
-    t.ondblclick = () => {
-      const id = t.getAttribute('data-peer');
-      CN.pinned = (CN.pinned === id) ? null : id;
-      cnRenderStage();
-    };
-  });
-  cnAttachStreams();
+  const ign = document.getElementById('cnIgnored');
+  if (ign) ign.onclick = cnIgnoredList;
+  const noise = document.getElementById('cnNoise');
+  if (noise) noise.onclick = cnNoiseSettings;
 }
 
-/* Re-render only the video area (not the chat, which would lose scroll + input). */
+/* Re-render only the video area (not the chat, which would lose scroll + input).
+
+   Replacing innerHTML throws away every <video> and builds new ones, which makes
+   each element re-attach its srcObject and briefly go black. That was tolerable
+   when the stage rendered rarely, but focus, screen tiles and per-user prefs all
+   call this — and a peer-media event (someone toggling their mic) fires it for
+   everyone. So: if the markup hasn't actually changed, don't touch the DOM.
+   The rendered HTML is its own change key; nothing about a tile's appearance
+   lives outside it. */
 function cnRenderStage() {
   const stage = document.getElementById('cnStage');
   if (!stage) return;
-  stage.innerHTML = cnStageHTML();
+  const html = cnStageHTML();
+  if (stage._cnHTML !== html) {
+    stage._cnHTML = html;
+    stage.innerHTML = html;
+    cnWireStage();
+  } else {
+    // Same markup, but the streams may have changed underneath it (a track
+    // arriving doesn't alter the HTML), so the bindings still need refreshing.
+    cnAttachStreams();
+    cnApplyUserPrefs();
+  }
   const bar = document.querySelector('.cn-bar');
-  if (bar) bar.innerHTML = cnBarHTML();
+  if (bar) {
+    const barHTML = cnBarHTML();
+    if (bar._cnHTML !== barHTML) { bar._cnHTML = barHTML; bar.innerHTML = barHTML; cnWireBar(); }
+  }
   const room = document.getElementById('cnRoom');
   if (room) room.classList.toggle('in-call', CN.inCall);
-  cnWireStage();
 }
 
 /* Put the MediaStream objects back onto the freshly-rendered <video> elements.
    srcObject can't live in HTML, so this runs after every stage render. */
 function cnAttachStreams() {
+  // Your own tile is now ALWAYS your camera — the screen has its own tile below.
   const self = document.getElementById('cnSelfVideo');
   if (self) {
-    // While presenting, your own tile previews the SCREEN; otherwise the camera.
-    const want = CN.media.screen && CN.screen ? CN.screen : CN.local;
-    if (want && self.srcObject !== want) self.srcObject = want;
+    if (CN.local && self.srcObject !== CN.local) self.srcObject = CN.local;
     cnTrackTileRatio(self);
+  }
+  const selfScr = document.getElementById('cnSelfScreenVideo');
+  if (selfScr) {
+    if (CN.screen && selfScr.srcObject !== CN.screen) selfScr.srcObject = CN.screen;
+    cnTrackTileRatio(selfScr);
   }
   for (const p of CN.peers.values()) {
     const el = document.querySelector(`[data-video="${CSS.escape(p.id)}"]`);
     if (el && p.stream && el.srcObject !== p.stream) el.srcObject = p.stream;
     if (el) cnTrackTileRatio(el);
+    cnPeerAudioEl(p);
   }
+  // Screen shares: an OPEN one gets the live stream; a CLOSED one gets the
+  // low-rate canvas preview instead.
+  for (const s of CN.screens.values()) {
+    if (CN.openScreens.has(s.key)) {
+      const el = document.querySelector(`[data-screenvideo="${CSS.escape(s.key)}"]`);
+      if (el && s.stream && el.srcObject !== s.stream) el.srcObject = s.stream;
+      if (el) cnTrackTileRatio(el);
+    } else {
+      cnStartScreenPreview(s);
+    }
+  }
+  cnSweepScreenPreviews();
+}
+
+/* Every peer gets a dedicated, hidden <audio> element carrying only their audio
+   track, created once and reused for the life of the peer.
+
+   Why not just let the tile's <video> play the sound? Because the tile is
+   re-rendered whenever anything about the call changes, and the video element is
+   display:none whenever their camera is off — both of which make audio playback
+   unreliable across browsers (Safari in particular will stop a hidden media
+   element). A persistent element outside the stage sidesteps all of it, and it's
+   also the natural place to hang per-viewer volume (see cnApplyUserPrefs). */
+function cnPeerAudioEl(p) {
+  if (!p || !p.stream) return null;
+  const audioTracks = p.stream.getAudioTracks();
+  if (!audioTracks.length) return p.audioEl || null;
+
+  if (!p.audioEl) {
+    const a = document.createElement('audio');
+    a.autoplay = true;
+    a.setAttribute('playsinline', '');
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    p.audioEl = a;
+  }
+  // Bind ONLY the audio, so this element never decodes video.
+  const want = p.audioStream || (p.audioStream = new MediaStream());
+  for (const t of audioTracks) if (!want.getTracks().includes(t)) want.addTrack(t);
+  if (p.audioEl.srcObject !== want) p.audioEl.srcObject = want;
+  // Autoplay can be refused until the user has interacted; joining a call counts,
+  // but retry quietly rather than failing silent.
+  const pr = p.audioEl.play();
+  if (pr && pr.catch) pr.catch(() => {});
+
+  // The tile's <video> must NOT also play the audio, or everyone is doubled.
+  const vid = document.querySelector(`[data-video="${CSS.escape(p.id)}"]`);
+  if (vid) vid.muted = true;
+  return p.audioEl;
+}
+
+/* ---- the 1 fps preview ----
+   A closed share still has a live MediaStream arriving (we can't ask the sender to
+   stop without a whole extra negotiation), but we don't want to PAINT it at 60fps
+   in five tiles at once. So the stream is decoded into an offscreen <video> that
+   is never shown, and once a second we copy one frame onto the tile's <canvas>.
+   That keeps the cost to a single drawImage per share per second, and the audio
+   element is never created at all, so a closed share is genuinely silent. */
+function cnStartScreenPreview(s) {
+  const canvas = document.querySelector(`[data-screenpreview="${CSS.escape(s.key)}"]`);
+  if (!canvas || !s.stream) return;
+  if (canvas._cnWired) { canvas._cnPaint && canvas._cnPaint(); return; }
+  canvas._cnWired = true;
+
+  // one hidden decoder per share, reused across re-renders
+  let v = s.previewEl;
+  if (!v) {
+    v = document.createElement('video');
+    v.autoplay = true; v.playsInline = true; v.muted = true;   // muted: preview is silent
+    v.srcObject = s.stream;
+    // Safari won't decode a <video> that isn't in the document, so it lives in
+    // the DOM but is visually gone (display:none would stop decoding too).
+    v.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px;';
+    document.body.appendChild(v);
+    v.play().catch(() => {});
+    s.previewEl = v;
+  }
+
+  const paint = () => {
+    if (!canvas.isConnected) return;
+    const w = v.videoWidth, h = v.videoHeight;
+    if (!w || !h) return;
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    try { canvas.getContext('2d').drawImage(v, 0, 0, w, h); } catch (e) {}
+    const tile = canvas.closest('.cn-tile');
+    if (tile) { tile.style.setProperty('--tile-ar', `${w} / ${h}`); tile.classList.add('has-video'); }
+  };
+  canvas._cnPaint = paint;
+  paint();
+  s.previewTimer = setInterval(paint, 1000);    // the "1 fps"
+}
+
+function cnStopScreenPreview(s) {
+  if (s.previewTimer) { clearInterval(s.previewTimer); s.previewTimer = null; }
+  if (s.previewEl) { try { s.previewEl.srcObject = null; s.previewEl.remove(); } catch (e) {} s.previewEl = null; }
+}
+
+/* Kill preview machinery for shares that are now open or gone. Without this the
+   hidden <video> and its interval would leak every time a share is opened. */
+function cnSweepScreenPreviews() {
+  for (const s of CN.screens.values()) {
+    if (CN.openScreens.has(s.key) && s.previewTimer) cnStopScreenPreview(s);
+  }
+}
+
+/* ---- opening and closing a share ---- */
+function cnOpenScreen(key) {
+  const s = CN.screens.get(key);
+  if (!s) return;
+  CN.openScreens.add(key);
+  cnStopScreenPreview(s);
+  // Opening a share is nearly always followed by wanting to actually look at it,
+  // so focus it in the same gesture.
+  CN.focus = key;
+  cnRenderStage();
+  toast(`Opened ${s.ownerName}'s screen`, 'window');
+}
+
+function cnCloseScreen(key) {
+  const s = CN.screens.get(key);
+  CN.openScreens.delete(key);
+  if (CN.focus === key) CN.focus = null;    // don't focus a tile you just closed
+  cnRenderStage();
+  if (s) toast(`Closed ${s.ownerName}'s screen`, 'info');
+}
+
+/* ============================================================
+   CONTEXT MENUS (desktop right-click)
+   A small positioned popover. Built once per open and torn down on any outside
+   click, Escape, or scroll — the same lifecycle for every menu in this file.
+   ============================================================ */
+function cnMenu(ev, items) {
+  cnCloseMenu();
+  const m = document.createElement('div');
+  m.className = 'cn-menu';
+  m.id = 'cnMenu';
+  m.innerHTML = items.map(it => {
+    if (it.sep) return '<div class="cn-menu-sep"></div>';
+    if (it.html) return `<div class="cn-menu-custom">${it.html}</div>`;
+    return `<button class="cn-menu-item ${it.danger ? 'danger' : ''} ${it.on ? 'on' : ''}" data-act="${esc(it.id)}">
+      ${it.icon ? svg(it.icon, 14) : '<span class="cn-menu-gap"></span>'}
+      <span>${esc(it.label)}</span>
+      ${it.on ? svg('check', 13) : ''}
+    </button>`;
+  }).join('');
+  document.body.appendChild(m);
+
+  // Position at the cursor, then pull back inside the viewport if it would spill.
+  const pad = 8;
+  const r = m.getBoundingClientRect();
+  let x = ev.clientX, y = ev.clientY;
+  if (x + r.width + pad > innerWidth) x = Math.max(pad, innerWidth - r.width - pad);
+  if (y + r.height + pad > innerHeight) y = Math.max(pad, innerHeight - r.height - pad);
+  m.style.left = x + 'px';
+  m.style.top = y + 'px';
+
+  m.querySelectorAll('[data-act]').forEach(b => {
+    b.onclick = () => {
+      const it = items.find(i => i.id === b.getAttribute('data-act'));
+      cnCloseMenu();
+      if (it && it.run) it.run();
+    };
+  });
+  // let a custom row (the volume slider) wire itself up
+  items.filter(i => i.onMount).forEach(i => i.onMount(m));
+
+  // Close on anything that isn't a click inside the menu.
+  setTimeout(() => {
+    const off = (e) => { if (!m.contains(e.target)) cnCloseMenu(); };
+    const esckey = (e) => { if (e.key === 'Escape') cnCloseMenu(); };
+    m._off = off; m._esc = esckey;
+    document.addEventListener('mousedown', off, true);
+    document.addEventListener('contextmenu', off, true);
+    document.addEventListener('keydown', esckey, true);
+    window.addEventListener('scroll', cnCloseMenu, true);
+  }, 0);
+  return m;
+}
+
+function cnCloseMenu() {
+  const m = document.getElementById('cnMenu');
+  if (!m) return;
+  if (m._off) {
+    document.removeEventListener('mousedown', m._off, true);
+    document.removeEventListener('contextmenu', m._off, true);
+  }
+  if (m._esc) document.removeEventListener('keydown', m._esc, true);
+  window.removeEventListener('scroll', cnCloseMenu, true);
+  m.remove();
+}
+
+/* Right-click a person: volume, mute-for-me, ignore, focus. */
+function cnUserMenu(ev, peerId) {
+  const p = CN.peers.get(peerId);
+  if (!p) return;
+  const pref = cnUserPref(peerId);
+  const focused = CN.focus === peerId;
+
+  cnMenu(ev, [
+    { id: 'hdr', html: `<div class="cn-menu-head">${esc(p.name)}</div>` },
+    {
+      id: 'vol',
+      html: `<div class="cn-menu-vol">
+        <label>Volume <b id="cnVolVal">${Math.round(pref.volume * 100)}%</b></label>
+        <input type="range" id="cnVolSlider" min="0" max="150" step="5" value="${Math.round(pref.volume * 100)}" />
+      </div>`,
+      // The slider applies LIVE as it's dragged — you're adjusting someone who is
+      // talking right now, so waiting for a commit would make it unusable.
+      onMount: (root) => {
+        const sl = root.querySelector('#cnVolSlider');
+        const val = root.querySelector('#cnVolVal');
+        if (!sl) return;
+        sl.oninput = () => {
+          const v = Number(sl.value) / 100;
+          val.textContent = Math.round(v * 100) + '%';
+          const pr = cnUserPref(peerId);
+          pr.volume = v; pr.muted = false;
+          CN.userPrefs.set(peerId, pr);
+          cnApplyUserPrefs();
+        };
+        // persist only when they let go, not on every pixel of the drag
+        sl.onchange = () => { cnSaveUserPrefs(); cnRenderStage(); };
+      },
+    },
+    { sep: true },
+    {
+      id: 'mute', icon: pref.muted ? 'vol' : 'volmute', on: pref.muted,
+      label: pref.muted ? 'Unmute for me' : 'Mute for me',
+      run: () => cnSetUserPref(peerId, { muted: !pref.muted }),
+    },
+    {
+      id: 'ignore', icon: 'eye', on: pref.ignored,
+      label: pref.ignored ? 'Stop ignoring' : 'Ignore (hide camera & sound)',
+      run: () => {
+        cnSetUserPref(peerId, { ignored: !pref.ignored });
+        toast(pref.ignored ? `Showing ${p.name} again` : `Ignoring ${p.name}`, 'info');
+      },
+    },
+    { sep: true },
+    {
+      id: 'focus', icon: 'full', label: focused ? 'Unfocus' : 'Focus',
+      run: () => { CN.focus = focused ? null : peerId; cnRenderStage(); },
+    },
+  ]);
+}
+
+/* Right-click your own tile: a short menu, since muting yourself for yourself is
+   meaningless — the useful actions are the ones in the control bar. */
+function cnSelfMenu(ev) {
+  const focused = CN.focus === 'self';
+  cnMenu(ev, [
+    { id: 'hdr', html: `<div class="cn-menu-head">You</div>` },
+    { id: 'focus', icon: 'full', label: focused ? 'Unfocus' : 'Focus', run: () => { CN.focus = focused ? null : 'self'; cnRenderStage(); } },
+    { id: 'mic', icon: CN.media.mic ? 'volmute' : 'vol', label: CN.media.mic ? 'Mute my mic' : 'Unmute my mic', run: cnToggleMic },
+    { id: 'cam', icon: 'video', label: CN.media.cam ? 'Turn camera off' : 'Turn camera on', run: cnToggleCam },
+  ]);
+}
+
+/* Right-click a screen share: open / close / focus. */
+function cnScreenMenu(ev, key) {
+  // your own share: the only sensible actions are focus and stop sharing
+  if (key === 'scr:self') {
+    const focused = CN.focus === 'scr:self';
+    return cnMenu(ev, [
+      { id: 'hdr', html: `<div class="cn-menu-head">Your screen</div>` },
+      { id: 'focus', icon: 'full', label: focused ? 'Unfocus' : 'Focus', run: () => { CN.focus = focused ? null : 'scr:self'; cnRenderStage(); } },
+      { sep: true },
+      { id: 'stop', icon: 'close', danger: true, label: 'Stop sharing', run: cnStopScreen },
+    ]);
+  }
+  const s = CN.screens.get(key);
+  if (!s) return;
+  const open = CN.openScreens.has(key);
+  const focused = CN.focus === key;
+  cnMenu(ev, [
+    { id: 'hdr', html: `<div class="cn-menu-head">${esc(s.ownerName)}'s screen</div>` },
+    open
+      ? { id: 'close', icon: 'close', label: 'Close stream', run: () => cnCloseScreen(key) }
+      : { id: 'open', icon: 'play', label: 'Open stream', run: () => cnOpenScreen(key) },
+    { id: 'focus', icon: 'full', label: focused ? 'Unfocus' : 'Focus', run: () => { CN.focus = focused ? null : key; cnRenderStage(); } },
+    { sep: true },
+    { id: 'user', icon: 'user', label: `Controls for ${s.ownerName}…`, run: () => cnUserMenu(ev, s.ownerId) },
+  ]);
+}
+
+/* The "N hidden" chip in the control bar — a way back for anyone you've ignored,
+   since an ignored person has no tile left to right-click. */
+function cnIgnoredList() {
+  const hidden = [...CN.peers.values()].filter(p => cnUserPref(p.id).ignored);
+  if (!hidden.length) return;
+  const rows = hidden.map(p => `<li><span>${esc(p.name)}</span>
+    <button class="cn-kick" data-unignore="${esc(p.id)}">Show again</button></li>`).join('');
+  cnHelpModal('People you\'ve hidden', `
+    <p>These people are hidden for <b>you only</b> — they haven't been told, and everyone else still sees and hears them normally.</p>
+    <ul class="cn-ignored-list">${rows}</ul>`);
+  document.querySelectorAll('[data-unignore]').forEach(b => {
+    b.onclick = () => {
+      cnSetUserPref(b.getAttribute('data-unignore'), { ignored: false });
+      b.closest('li').remove();
+    };
+  });
 }
 
 /* Tiles are a fixed 16:9 by default. Once a <video> actually has frames, adopt the
@@ -498,20 +1131,28 @@ async function cnJoinCall({ cam }) {
   const hint = cnPermHint(cam);
   let stream = null;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: cnAudioConstraints(),
-      video: cam ? cnVideoConstraints() : false,
-    });
+    // Audio FIRST, on its own. A combined request is all-or-nothing: one awkward
+    // video constraint (see the Safari note on cnVideoConstraints) would fail the
+    // mic too and drop the user out of the call entirely.
+    stream = await navigator.mediaDevices.getUserMedia({ audio: cnAudioConstraints() });
   } catch (e) {
     hint.remove();
-    // Asking for the camera when only a mic exists fails the WHOLE request, so retry
-    // audio-only rather than leaving them stuck outside the call.
-    if (cam && (e && (e.name === 'NotFoundError' || e.name === 'OverconstrainedError'))) {
-      toast('No camera found — joining with just your mic', 'info');
-      return cnJoinCall({ cam: false });
-    }
     cnPermissionHelpModal(e, cam);
     return;
+  }
+
+  // Then the camera, through the relaxation ladder, as a separate request.
+  if (cam) {
+    try {
+      const vs = await cnGetCameraStream();
+      for (const t of vs.getVideoTracks()) stream.addTrack(t);
+    } catch (e) {
+      // Joining with just the mic is a reasonable outcome; they can turn the
+      // camera on later from the control bar.
+      toast(e && e.name === 'NotFoundError'
+        ? 'No camera found — joining with just your mic'
+        : "Couldn't start your camera — joining with just your mic", 'info');
+    }
   }
   hint.remove();
 
@@ -519,6 +1160,9 @@ async function cnJoinCall({ cam }) {
   CN.media.mic = true;
   CN.media.cam = !!cam && stream.getVideoTracks().length > 0;
   CN.inCall = true;
+  cnLoadUserPrefs();
+  // Route the mic through the noise-suppression graph before anyone hears it.
+  await cnApplyMicProcessing();
   cnRenderStage();
   cnOpenSignaling();
   cnStartLevelMeter();
@@ -599,21 +1243,96 @@ function cnHelpModal(title, bodyHTML) {
    clean, full-band audio rather than the narrowband speech profile. */
 function cnAudioConstraints() {
   const id = CN.devices.micId;
+  const n = cnNoise();
   return {
-    ...(id ? { deviceId: { exact: id } } : {}),
+    // `ideal`, not `exact` — same reasoning as the camera: a stale deviceId
+    // shouldn't fail the whole request.
+    ...(id ? { deviceId: { ideal: id } } : {}),
     echoCancellation: true,
-    noiseSuppression: true,
+    // LAYER 1: the browser's built-in denoiser. Users who find it over-processes
+    // their voice (it can sound thin on a good mic) can turn it off and rely on
+    // our gate alone.
+    noiseSuppression: !!(n.enabled && n.browserNS),
     autoGainControl: true,
     channelCount: 2,
     sampleRate: 48000,
   };
 }
-function cnVideoConstraints() {
+/* Camera constraints for the chosen quality.
+   `relaxed` drops everything except the device, and is what we retry with when a
+   browser rejects the sized request outright (see cnGetCameraStream).
+
+   Safari note — this is the "lower the camera to 360 and the camera just turns
+   off" bug. Safari on macOS treats width/height/frameRate far more strictly than
+   Chrome does even when they're expressed as `ideal`: asking a camera whose
+   native modes start at 1280x720 for 640x360 at 24fps can fail the whole
+   getUserMedia call with OverconstrainedError instead of quietly picking the
+   nearest mode. The old code caught OverconstrainedError, blanked the deviceId
+   and retried with the SAME resolution, so the retry failed the same way and the
+   camera ended up off. Hence: no `max` on frameRate, and a real relaxation ladder
+   below rather than a single retry. */
+function cnVideoConstraints(opts = {}) {
   const id = CN.devices.camId;
+  const q = cnCamQuality();
+  if (opts.relaxed) {
+    // last resort: just give us this camera, any mode it likes
+    return id ? { deviceId: { ideal: id } } : true;
+  }
   return {
-    ...(id ? { deviceId: { exact: id } } : {}),
-    width: { ideal: 1920 }, height: { ideal: 1080 },
-    frameRate: { ideal: 60, max: 60 },
+    // `ideal`, never `exact`: an exact deviceId that no longer resolves (camera
+    // unplugged, or Safari rotating its ids between grants) is itself a common
+    // source of OverconstrainedError.
+    ...(id ? { deviceId: { ideal: id } } : {}),
+    width: { ideal: q.w }, height: { ideal: q.h },
+    // No `max` here. `frameRate: {ideal, max}` is the single most rejection-prone
+    // part of this constraint set on Safari — a camera that only reports 30fps
+    // modes can fail a max:24 request. The sender-side bitrate cap already limits
+    // what we actually transmit, so the capture framerate needs no hard ceiling.
+    frameRate: { ideal: q.fps },
+  };
+}
+
+/* Open the camera, relaxing the constraints step by step rather than giving up.
+   Returns a MediaStream, or throws the LAST error if even the bare request fails
+   (so the permission/hardware message the user sees is the real one). */
+async function cnGetCameraStream() {
+  const attempts = [
+    cnVideoConstraints(),                 // what the user actually asked for
+    { ...cnVideoConstraints(), frameRate: undefined },   // same size, any framerate
+    cnVideoConstraints({ relaxed: true }),               // this camera, any mode
+    true,                                                // any camera at all
+  ];
+  let lastErr = null;
+  for (let i = 0; i < attempts.length; i++) {
+    const video = attempts[i];
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video });
+      if (i > 0) {
+        // Say so plainly — silently handing back 720p when they picked 360p would
+        // leave them thinking the setting did nothing.
+        const t = s.getVideoTracks()[0];
+        const st = (t && t.getSettings && t.getSettings()) || {};
+        if (st.width && st.height) {
+          toast(`Your camera doesn't support that exact size — using ${st.width}×${st.height}`, 'info');
+        }
+      }
+      return s;
+    } catch (e) {
+      lastErr = e;
+      // A permission refusal will fail identically at every step, so stop early
+      // rather than prompting the user four times.
+      if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError')) throw e;
+      // NotReadableError means the device is busy — relaxing constraints won't help.
+      if (e && e.name === 'NotReadableError') throw e;
+    }
+  }
+  throw lastErr || new Error('no camera');
+}
+function cnScreenConstraints() {
+  const q = cnScreenQuality();
+  return {
+    video: { frameRate: { ideal: q.fps, max: q.fps }, width: { ideal: q.w }, height: { ideal: q.h } },
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
   };
 }
 function cnMediaError(e) {
@@ -622,6 +1341,254 @@ function cnMediaError(e) {
   if (n === 'NotFoundError') return 'No microphone or camera found';
   if (n === 'NotReadableError') return 'Your mic/camera is in use by another app';
   return 'Could not start your mic/camera';
+}
+
+/* ============================================================
+   NOISE CANCELLATION
+   Two layers, because they catch different things:
+
+   1) The BROWSER's own suppressor (`noiseSuppression` in the audio constraints).
+      This is the good one — a real, trained denoiser inside Chrome/Safari/Firefox
+      that removes steady background noise without touching speech. It's on by
+      default and costs nothing.
+
+   2) Our own Web Audio chain on top: a high-pass to kill rumble, and a noise
+      GATE that mutes the mic between sentences. This is what handles the things
+      the browser's suppressor leaves through — a fan, a mechanical keyboard, a
+      room with an echo, someone talking in the background.
+
+   Layer 2 is the tweakable part, because a gate is a trade: set it too high and
+   the start of your own quiet sentences gets clipped. That's exactly why the
+   controls (and the "hear yourself" test) exist rather than shipping one fixed
+   setting and hoping.
+
+   Everything is plain Web Audio — no model to download, works offline, and adds
+   about a millisecond of latency.
+   ============================================================ */
+const CN_NOISE_DEFAULTS = {
+  enabled: true,        // on by default, per the brief
+  browserNS: true,      // layer 1
+  gate: true,           // layer 2: the noise gate
+  threshold: -50,       // dBFS below which we treat it as silence
+  attack: 8,            // ms to open once you start talking (short = no clipped words)
+  release: 220,         // ms to close after you stop (long = doesn't chop word gaps)
+  highPass: 85,         // Hz; below this is rumble, handling noise and pops
+  gain: 1,              // post-gate makeup gain
+};
+
+function cnNoise() {
+  return { ...CN_NOISE_DEFAULTS, ...((PREFS && PREFS.connectNoise) || {}) };
+}
+
+/* Build (or rebuild) the mic processing graph and swap its output into the call.
+
+   The chain: mic → high-pass → analyser ─┐
+                                          ├→ gate gain → makeup gain → destination
+   The analyser drives the gate in a rAF loop rather than using a ScriptProcessor
+   (deprecated, and it runs on the main thread) or an AudioWorklet (needs a
+   separate module file, which this no-build app can't lazily add cheaply). At a
+   ~60Hz control rate a gate is perceptually indistinguishable from a sample-rate
+   one, because attack/release are measured in tens of milliseconds anyway. */
+async function cnBuildMicChain(sourceTrack) {
+  const cfg = cnNoise();
+  if (!cfg.enabled || !cfg.gate) return null;      // layer 1 only; nothing to build
+  if (!window.AudioContext && !window.webkitAudioContext) return null;
+
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  const ctx = new Ctx({ sampleRate: 48000 });
+  // Safari starts contexts suspended until a gesture; joining a call IS a gesture,
+  // but resume() is still required to be explicit about it.
+  if (ctx.state === 'suspended') { try { await ctx.resume(); } catch (e) {} }
+
+  const src = ctx.createMediaStreamSource(new MediaStream([sourceTrack]));
+
+  const hp = ctx.createBiquadFilter();
+  hp.type = 'highpass';
+  hp.frequency.value = cfg.highPass;
+  hp.Q.value = 0.7;
+
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  analyser.smoothingTimeConstant = 0.2;
+
+  const gate = ctx.createGain();
+  gate.gain.value = 1;
+
+  const makeup = ctx.createGain();
+  makeup.gain.value = cfg.gain;
+
+  const dest = ctx.createMediaStreamDestination();
+
+  src.connect(hp);
+  hp.connect(analyser);
+  hp.connect(gate);
+  gate.connect(makeup);
+  makeup.connect(dest);
+
+  const chain = {
+    ctx, src, hp, analyser, gate, makeup, dest,
+    sourceTrack,
+    outTrack: dest.stream.getAudioTracks()[0],
+    raf: 0, open: false, level: -100, cfg,
+  };
+
+  /* ---- the gate loop ----
+     Driven by setInterval, NOT requestAnimationFrame. rAF is throttled to zero in
+     a hidden tab, and this loop decides whether your microphone is open — a user
+     who switched tabs mid-call would have the gate freeze in whatever state it
+     was last in, muting them for the rest of the call with no way to tell.
+     A 16ms interval keeps ticking regardless of visibility. Browsers do clamp
+     background timers (to ~1s in some cases), which softens the gate's timing but
+     never strands it closed, because each tick still re-evaluates the level. */
+  const buf = new Float32Array(analyser.fftSize);
+  const tick = () => {
+    if (!chain.raf) return;                       // stopped
+    analyser.getFloatTimeDomainData(buf);
+    // RMS → dBFS. RMS rather than peak so a single click doesn't open the gate.
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    const rms = Math.sqrt(sum / buf.length);
+    const db = rms > 0 ? 20 * Math.log10(rms) : -100;
+    chain.level = db;
+
+    const c = chain.cfg;
+    const shouldOpen = db > c.threshold;
+    if (shouldOpen !== chain.open) {
+      chain.open = shouldOpen;
+      const now = ctx.currentTime;
+      const secs = (shouldOpen ? c.attack : c.release) / 1000;
+      // Ramp rather than jump: an instant gain change is an audible click.
+      gate.gain.cancelScheduledValues(now);
+      gate.gain.setValueAtTime(gate.gain.value, now);
+      gate.gain.linearRampToValueAtTime(shouldOpen ? 1 : 0, now + secs);
+    }
+  };
+  chain.raf = setInterval(tick, 16);
+
+  return chain;
+}
+
+/* Tear the graph down and release its AudioContext. Browsers cap the number of
+   live AudioContexts, so leaking one per settings change would eventually stop
+   the mic working entirely. */
+function cnStopMicChain() {
+  const c = CN.micChain;
+  if (!c) return;
+  CN.micChain = null;
+  if (c.raf) { clearInterval(c.raf); c.raf = 0; }
+  try { c.src.disconnect(); c.hp.disconnect(); c.gate.disconnect(); c.makeup.disconnect(); } catch (e) {}
+  try { c.ctx.close(); } catch (e) {}
+}
+
+/* Put the processed track on the wire (or take it back off).
+   The RAW mic track stays in CN.local as the source; what peers receive is the
+   chain's output. replaceTrack means this needs no renegotiation, so it can be
+   toggled mid-sentence without a glitch. */
+async function cnApplyMicProcessing() {
+  if (!CN.local) return;
+  const raw = CN.local.getAudioTracks()[0];
+  if (!raw) return;
+
+  cnStopMicChain();
+  const cfg = cnNoise();
+
+  let outbound = raw;
+  if (cfg.enabled && cfg.gate) {
+    try {
+      const chain = await cnBuildMicChain(raw);
+      if (chain && chain.outTrack) {
+        CN.micChain = chain;
+        outbound = chain.outTrack;
+        // The processed track carries its own enabled state, so the mute button
+        // has to reach it too.
+        outbound.enabled = CN.media.mic;
+      }
+    } catch (e) {
+      // Any failure here falls back to the raw mic — a call with unfiltered audio
+      // beats a call with no audio.
+      console.warn('[connect] noise chain failed, using the raw mic', e);
+    }
+  }
+
+  CN.outboundAudio = outbound;
+  for (const peer of CN.peers.values()) {
+    if (!peer.pc) continue;
+    const sender = peer.pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+    if (sender && sender.track !== outbound) {
+      try { await sender.replaceTrack(outbound); } catch (e) {}
+    }
+  }
+}
+
+/* ---- the "hear yourself" test ----
+   Routes the PROCESSED mic to the speakers so the user can hear exactly what the
+   room hears while they move the sliders. Headphones are essential here and the
+   modal says so — on speakers this is a feedback loop. */
+async function cnStartMicTest() {
+  cnStopMicTest();
+  if (!CN.local) return null;
+  const raw = CN.local.getAudioTracks()[0];
+  if (!raw) return null;
+
+  // A test needs its own chain: the call's chain output goes to a
+  // MediaStreamDestination, and we want this one going to the speakers instead.
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return null;
+  const ctx = new Ctx({ sampleRate: 48000 });
+  if (ctx.state === 'suspended') { try { await ctx.resume(); } catch (e) {} }
+
+  const cfg = cnNoise();
+  const src = ctx.createMediaStreamSource(new MediaStream([raw]));
+  const hp = ctx.createBiquadFilter();
+  hp.type = 'highpass'; hp.frequency.value = cfg.highPass; hp.Q.value = 0.7;
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0.2;
+  const gate = ctx.createGain(); gate.gain.value = cfg.gate ? 0 : 1;
+  const makeup = ctx.createGain(); makeup.gain.value = cfg.gain;
+
+  src.connect(hp);
+  hp.connect(analyser);
+  hp.connect(gate);
+  gate.connect(makeup);
+  makeup.connect(ctx.destination);        // ← the speakers, not a peer
+
+  const test = { ctx, src, hp, analyser, gate, makeup, cfg, raf: 0, level: -100, open: false, onLevel: null };
+  const buf = new Float32Array(analyser.fftSize);
+  const tick = () => {
+    if (!test.raf) return;
+    analyser.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    const rms = Math.sqrt(sum / buf.length);
+    const db = rms > 0 ? 20 * Math.log10(rms) : -100;
+    test.level = db;
+    const c = test.cfg;
+    const shouldOpen = !c.gate || db > c.threshold;
+    if (shouldOpen !== test.open) {
+      test.open = shouldOpen;
+      const now = ctx.currentTime;
+      const secs = (shouldOpen ? c.attack : c.release) / 1000;
+      gate.gain.cancelScheduledValues(now);
+      gate.gain.setValueAtTime(gate.gain.value, now);
+      gate.gain.linearRampToValueAtTime(shouldOpen ? 1 : 0, now + secs);
+    }
+    if (test.onLevel) test.onLevel(db, shouldOpen);
+  };
+  // Same reasoning as the call chain: a timer, not rAF. The meter is only visible
+  // while the panel is open anyway, and a gate that stops evaluating would show a
+  // frozen reading that doesn't match what you're hearing.
+  test.raf = setInterval(tick, 16);
+  CN.micTest = test;
+  return test;
+}
+
+function cnStopMicTest() {
+  const t = CN.micTest;
+  if (!t) return;
+  CN.micTest = null;
+  if (t.raf) { clearInterval(t.raf); t.raf = 0; }
+  try { t.src.disconnect(); t.hp.disconnect(); t.gate.disconnect(); t.makeup.disconnect(); } catch (e) {}
+  try { t.ctx.close(); } catch (e) {}
 }
 
 /* Open the SSE signaling stream. Everything about who is in the call flows
@@ -725,9 +1692,16 @@ function cnRemovePeer(id) {
   const p = CN.peers.get(id);
   if (!p) return;
   try { if (p.pc) { p.pc.onicecandidate = null; p.pc.ontrack = null; p.pc.close(); } } catch (e) {}
+  // the persistent audio element and any boost graph go with them, or they leak
+  // one <audio> (and possibly one AudioContext) per person who ever joined
+  cnPeerBoost(p, 1);
+  if (p.audioEl) { try { p.audioEl.srcObject = null; p.audioEl.remove(); } catch (e) {} p.audioEl = null; }
   CN.peers.delete(id);
   CN.analysers.delete(id);
   if (CN.pinned === id) CN.pinned = null;
+  if (CN.focus === id) CN.focus = null;
+  // their screen tile (and its preview timer) goes with them
+  cnRemoveRemoteScreen('scr:' + id);
 }
 
 /* Build the RTCPeerConnection for one peer and attach our outgoing tracks. */
@@ -739,20 +1713,47 @@ function cnMakePc(peerId) {
   const pc = new RTCPeerConnection({ iceServers: CN_ICE, bundlePolicy: 'max-bundle' });
   peer.pc = pc;
 
-  // send our current tracks
-  if (CN.local) for (const t of CN.local.getTracks()) pc.addTrack(t, CN.local);
-  if (CN.screen) for (const t of CN.screen.getVideoTracks()) pc.addTrack(t, CN.screen);
+  // send our current tracks. The screen goes out on its OWN MediaStream so the
+  // receiver can tell it apart from the camera — see cnIsScreenStream.
+  if (CN.local) {
+    for (const t of CN.local.getTracks()) {
+      // Peers hear the NOISE-PROCESSED mic, not the raw one. CN.local keeps the
+      // raw track because that's what the chain (and the level meter) reads from.
+      if (t.kind === 'audio' && CN.outboundAudio && CN.outboundAudio !== t) continue;
+      pc.addTrack(t, CN.local);
+    }
+    if (CN.outboundAudio && !CN.local.getAudioTracks().includes(CN.outboundAudio)) {
+      pc.addTrack(CN.outboundAudio, CN.local);
+    }
+  }
+  if (CN.screen) for (const t of CN.screen.getTracks()) pc.addTrack(t, CN.screen);
 
   pc.onicecandidate = (e) => {
     if (e.candidate) cnSignal(peerId, 'ice', e.candidate.toJSON());
   };
 
+  /* Route an inbound track to the right tile.
+     A peer now has TWO possible destinations: their own camera/mic stream, and a
+     separate screen-share stream that becomes its own tile. We tell them apart by
+     the MediaStream id the sender used — cnScreenStreamId stamps a recognisable
+     prefix on the screen stream before it's ever added to a connection. */
   pc.ontrack = (e) => {
-    // One stream per peer keeps the tile simple: whatever they send lands here.
+    const remote = e.streams && e.streams[0];
+    peer.connecting = false;
+
+    if (remote && cnIsScreenStream(remote)) {
+      cnAddRemoteScreen(peer, remote);
+      cnRenderStage();
+      return;
+    }
+
+    // camera / mic: the peer's own tile
     let stream = peer.stream;
     if (!stream) { stream = new MediaStream(); peer.stream = stream; }
     if (!stream.getTracks().includes(e.track)) stream.addTrack(e.track);
-    peer.connecting = false;
+    // A track the sender removed should take its tile state with it, otherwise a
+    // camera that was switched off leaves a frozen last frame behind.
+    e.track.onended = () => { try { stream.removeTrack(e.track); } catch (err) {} cnRenderStage(); };
     cnRenderStage();
     cnWatchLevel(peerId, stream);
   };
@@ -771,6 +1772,86 @@ function cnMakePc(peerId) {
 
   cnTuneAudio(pc);
   return pc;
+}
+
+/* ============================================================
+   TELLING A SCREEN SHARE APART FROM A CAMERA
+   `MediaStream.id` survives the trip to the far end (it's carried in the SDP's
+   a=msid), so stamping the id at capture time is enough — no extra signalling
+   round-trip, and it can't get out of sync with the tracks the way a separate
+   "I am now sharing" message can.
+
+   getDisplayMedia hands back a stream with a browser-assigned id, and that id is
+   read-only, so we can't rename it. Instead we copy its tracks into a stream we
+   build ourselves... which also has a read-only generated id. So the marker rides
+   on the TRACK's contentHint plus a label check, with the stream id as the
+   primary signal where the browser allows setting it via addTransceiver's
+   streams — in practice we tag the tracks and check both. */
+const CN_SCREEN_TAG = 'simplex-screen';
+
+/* Mark every track of a display-capture stream so the far end can recognise it. */
+function cnTagScreenStream(stream) {
+  if (!stream) return stream;
+  stream._cnScreen = true;
+  for (const t of stream.getTracks()) {
+    t._cnScreen = true;
+    // contentHint is a standard, settable property that survives to the receiver
+    // via the track's own settings on some browsers; harmless where it doesn't.
+    try { t.contentHint = t.kind === 'video' ? 'detail' : 'music'; } catch (e) {}
+  }
+  return stream;
+}
+
+/* Does this inbound stream carry a screen share?
+   Checked in order of reliability:
+     1) our own tag, if this is a local stream
+     2) the track label — Chrome/Edge/Firefox name display captures "screen",
+        "window", "web-contents", etc.
+     3) contentHint 'detail', which we set on the sending side
+   Safari gives a generic label, so 3 is what carries it there. */
+function cnIsScreenStream(stream) {
+  if (!stream) return false;
+  if (stream._cnScreen) return true;
+  if (stream.id && stream.id.indexOf(CN_SCREEN_TAG) === 0) return true;
+  for (const t of stream.getVideoTracks()) {
+    if (t._cnScreen) return true;
+    if (t.label && /screen|window|display|monitor|web-contents|entire|tab/i.test(t.label)) return true;
+    if (t.contentHint === 'detail') return true;
+  }
+  return false;
+}
+
+/* Register (or update) a peer's inbound screen share as its own tile. */
+function cnAddRemoteScreen(peer, stream) {
+  const key = 'scr:' + peer.id;
+  let s = CN.screens.get(key);
+  if (!s) {
+    s = { key, ownerId: peer.id, ownerName: peer.name, stream, previewEl: null, previewTimer: null };
+    CN.screens.set(key, s);
+    // A new share announces itself but does NOT auto-open — opening is the
+    // viewer's call, which is the whole point of the preview state.
+    toast(`${peer.name} started sharing their screen`, 'window');
+  } else {
+    // a re-share replaces the stream; drop any preview bound to the old one
+    if (s.stream !== stream) { cnStopScreenPreview(s); s.stream = stream; }
+  }
+  // The sender ending the share is the signal to remove the tile.
+  for (const t of stream.getTracks()) {
+    t.onended = () => cnRemoveRemoteScreen(key);
+  }
+  stream.onremovetrack = () => {
+    if (!stream.getVideoTracks().length) cnRemoveRemoteScreen(key);
+  };
+}
+
+function cnRemoveRemoteScreen(key) {
+  const s = CN.screens.get(key);
+  if (!s) return;
+  cnStopScreenPreview(s);
+  CN.screens.delete(key);
+  CN.openScreens.delete(key);
+  if (CN.focus === key) CN.focus = null;
+  cnRenderStage();
 }
 
 /* We are the offerer for this peer. */
@@ -851,7 +1932,7 @@ function cnSdpBitrate(sdp) {
     out.push(line);
     // b= must come directly after the c= line of its own m= section
     if (line.startsWith('c=') && section) {
-      const kbps = section === 'audio' ? CN_AUDIO_BITRATE / 1000 : (CN.media.screen ? CN_SCREEN_BITRATE : CN_VIDEO_BITRATE) / 1000;
+      const kbps = section === 'audio' ? CN_AUDIO_BITRATE / 1000 : cnVideoBitrateFor(!!CN.media.screen) / 1000;
       out.push('b=AS:' + Math.round(kbps));
       out.push('b=TIAS:' + Math.round(kbps * 1000));
     }
@@ -883,7 +1964,7 @@ async function cnTuneAudio(pc) {
           p.encodings[0].priority = 'high';   // voice must survive congestion
         } else {
           const screen = s.track.label && /screen|window|tab|display/i.test(s.track.label);
-          p.encodings[0].maxBitrate = screen ? CN_SCREEN_BITRATE : CN_VIDEO_BITRATE;
+          p.encodings[0].maxBitrate = cnVideoBitrateFor(screen);
           p.degradationPreference = screen ? 'maintain-resolution' : 'balanced';
         }
         await s.setParameters(p);
@@ -897,6 +1978,11 @@ function cnToggleMic() {
   if (!CN.local) return;
   CN.media.mic = !CN.media.mic;
   for (const t of CN.local.getAudioTracks()) t.enabled = CN.media.mic;
+  // When the noise chain is running it's the PROCESSED track that peers receive,
+  // and it has its own enabled flag — muting the raw source alone would leave the
+  // gate happily forwarding silence-shaped audio, but muting both is what
+  // actually guarantees nothing goes out.
+  if (CN.micChain && CN.micChain.outTrack) CN.micChain.outTrack.enabled = CN.media.mic;
   cnPublishMedia();
   cnRenderStage();
 }
@@ -909,7 +1995,9 @@ async function cnToggleCam() {
   } else {
     const hint = cnPermHint(true);
     try {
-      const s = await navigator.mediaDevices.getUserMedia({ video: cnVideoConstraints() });
+      // relaxation ladder, so a quality this camera can't hit exactly still
+      // turns the camera ON rather than failing the whole toggle
+      const s = await cnGetCameraStream();
       const track = s.getVideoTracks()[0];
       CN.local.addTrack(track);
       cnAddTrackToPeers(track, CN.local);
@@ -928,17 +2016,18 @@ async function cnToggleScreen() {
   if (!CN.inCall) return;
   if (CN.media.screen) return cnStopScreen();
   try {
-    // Ask for the best the display will give, and take system audio if offered.
-    CN.screen = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: 60, max: 60 }, width: { ideal: 3840 }, height: { ideal: 2160 } },
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-    });
+    // Resolution/framerate follow the user's screen-share quality choice; system
+    // audio is taken if the browser offers it.
+    CN.screen = await navigator.mediaDevices.getDisplayMedia(cnScreenConstraints());
   } catch (e) {
     // The user cancelling the picker is a normal outcome, not an error to shout about.
     if (e && e.name === 'NotAllowedError') return;
     toast("Couldn't start screen sharing", 'info');
     return;
   }
+  // Tag it BEFORE it reaches any peer connection, so the very first ontrack at
+  // the far end already knows this is a screen and not a camera.
+  cnTagScreenStream(CN.screen);
   const track = CN.screen.getVideoTracks()[0];
   if (!track) return;
   // "Stop sharing" in the browser's own bar ends the track behind our back.
@@ -946,6 +2035,9 @@ async function cnToggleScreen() {
   cnAddTrackToPeers(track, CN.screen);
   for (const a of CN.screen.getAudioTracks()) cnAddTrackToPeers(a, CN.screen);
   CN.media.screen = true;
+  // Your share opens focused on your own screen so you can see what you're
+  // presenting; it's your screen, so there's no preview state to opt out of.
+  CN.focus = 'scr:self';
   cnPublishMedia();
   cnRenderStage();
 }
@@ -956,6 +2048,7 @@ function cnStopScreen() {
     CN.screen = null;
   }
   CN.media.screen = false;
+  if (CN.focus === 'scr:self') CN.focus = null;   // its tile is about to vanish
   cnPublishMedia();
   cnRenderStage();
 }
@@ -1015,10 +2108,16 @@ async function cnLeaveCall(opts = {}) {
     cnApi('/api/connect/rooms/' + encodeURIComponent(CN.room.id) + '/hangup', { method: 'POST' }).catch(() => {});
   }
   for (const id of [...CN.peers.keys()]) cnRemovePeer(id);
+  // any screen tiles that outlived their peer (and their 1fps preview timers)
+  for (const key of [...CN.screens.keys()]) cnRemoveRemoteScreen(key);
+  CN.openScreens.clear();
   if (CN.local) { for (const t of CN.local.getTracks()) t.stop(); CN.local = null; }
   if (CN.screen) { for (const t of CN.screen.getTracks()) t.stop(); CN.screen = null; }
+  cnStopMicChain();
+  cnStopMicTest();
   CN.media = { mic: false, cam: false, screen: false, hand: false };
   CN.pinned = null;
+  CN.focus = null;
   cnStopLevelMeter();
   cnCloseSignaling();
   if (wasIn && !opts.silent) {
@@ -1048,18 +2147,47 @@ async function cnDevicePicker() {
       <select id="cnCamSel">${CN.devices.cams.map((d, i) => opt(d, CN.devices.camId, i)).join('') || '<option value="">No camera found</option>'}</select>
     </label>
     ${unlabeled ? `<p class="cn-dev-note">Your browser hides device names until you've allowed access once. Choosing a camera below will ask for permission.</p>` : ''}
-    <p class="cn-dev-note">Changes apply straight away — the call keeps running. Audio is sent as 64 kbps stereo Opus.</p>
+
+    <div class="cn-qual-head">Quality</div>
+    <label class="cn-dev-row"><span>Camera</span>
+      <select id="cnCamQual">${cnQualityOptions(CN_CAM_QUALITY, (PREFS && PREFS.connectCamQuality) || 'auto')}</select>
+      <em class="cn-qual-note" id="cnCamQualNote">${esc(cnCamQuality().note)}</em>
+    </label>
+    <label class="cn-dev-row"><span>Screen share</span>
+      <select id="cnScrQual">${cnQualityOptions(CN_SCREEN_QUALITY, (PREFS && PREFS.connectScreenQuality) || 'auto')}</select>
+      <em class="cn-qual-note" id="cnScrQualNote">${esc(cnScreenQuality().note)}</em>
+    </label>
+
+    <p class="cn-dev-note">Changes apply straight away — the call keeps running. Voice is always 64 kbps stereo Opus; these settings only affect video.</p>
   </div>`;
   // Read the selects INSIDE onAccept — the modal is removed before the promise
   // resolves, so reading them afterwards would always come back empty.
   const picked = await cnModal({
-    title: 'Devices', bodyHTML: html, okText: 'Use these',
+    title: 'Devices & quality', bodyHTML: html, okText: 'Use these',
     onAccept: (root) => ({
       mic: (root.querySelector('#cnMicSel') || {}).value || null,
       cam: (root.querySelector('#cnCamSel') || {}).value || null,
+      camQ: (root.querySelector('#cnCamQual') || {}).value || 'auto',
+      scrQ: (root.querySelector('#cnScrQual') || {}).value || 'auto',
     }),
+    onMount: (root) => {
+      // live-update the little explainer under each picker
+      const wire = (sel, noteId, table) => {
+        const s = root.querySelector(sel), n = root.querySelector(noteId);
+        if (s && n) s.onchange = () => { n.textContent = (table[s.value] || {}).note || ''; };
+      };
+      wire('#cnCamQual', '#cnCamQualNote', CN_CAM_QUALITY);
+      wire('#cnScrQual', '#cnScrQualNote', CN_SCREEN_QUALITY);
+    },
   });
   if (!picked) return;
+
+  // Persist the quality choices (they apply to future calls too, not just this one)
+  const camQChanged = picked.camQ !== ((PREFS && PREFS.connectCamQuality) || 'auto');
+  const scrQChanged = picked.scrQ !== ((PREFS && PREFS.connectScreenQuality) || 'auto');
+  if (camQChanged || scrQChanged) {
+    setPrefs({ connectCamQuality: picked.camQ, connectScreenQuality: picked.scrQ });
+  }
 
   const newMic = picked.mic || null;
   const newCam = picked.cam || null;
@@ -1084,12 +2212,218 @@ async function cnDevicePicker() {
       // so turn it on rather than silently doing nothing until they toggle it.
       await cnToggleCam();
     }
+  } else if (camQChanged && CN.media.cam) {
+    // Same camera, new quality: re-open the track at the new resolution. The
+    // sender cap alone can't raise resolution, only lower the bitrate.
+    if (await cnSwapTrack('video')) toast('Camera quality: ' + cnCamQuality().label, 'check');
+  }
+
+  // Screen-share quality: re-acquiring the display would pop the picker again,
+  // which is obnoxious mid-presentation. Apply the new BITRATE ceiling live and
+  // let the resolution change apply the next time they start sharing.
+  if (scrQChanged) {
+    cnApplySenderBitrates();
+    if (CN.media.screen) toast('Screen quality applies when you restart sharing', 'info');
   }
   cnRenderStage();
 }
 
+/* ============================================================
+   NOISE CANCELLATION SETTINGS
+   Live: every control applies as you move it, and the meter shows the gate
+   opening and closing in real time. Turning this into an OK/Cancel form would
+   make it useless — you can't tune a gate you can't hear.
+   ============================================================ */
+async function cnNoiseSettings() {
+  const cfg = cnNoise();
+  const html = `<div class="cn-noise">
+    <label class="cn-dev-row check">
+      <input type="checkbox" id="cnNsOn" ${cfg.enabled ? 'checked' : ''} />
+      <span><b>Noise cancellation</b><em>Removes background noise from your microphone</em></span>
+    </label>
+
+    <div class="cn-noise-body ${cfg.enabled ? '' : 'disabled'}" id="cnNsBody">
+      <label class="cn-dev-row check">
+        <input type="checkbox" id="cnNsBrowser" ${cfg.browserNS ? 'checked' : ''} />
+        <span>Browser noise suppression<em>Your browser's own filter. Leave this on unless it makes your voice sound thin or underwater.</em></span>
+      </label>
+      <label class="cn-dev-row check">
+        <input type="checkbox" id="cnNsGate" ${cfg.gate ? 'checked' : ''} />
+        <span>Silence between sentences<em>Mutes your mic when you're not speaking, so typing and fans don't carry.</em></span>
+      </label>
+
+      <div class="cn-noise-adv ${cfg.gate ? '' : 'disabled'}" id="cnNsAdv">
+        <div class="cn-slide-row">
+          <label for="cnNsThresh">Sensitivity <b id="cnNsThreshV">${cfg.threshold} dB</b></label>
+          <input type="range" id="cnNsThresh" min="-75" max="-20" step="1" value="${cfg.threshold}" />
+          <em>Lower catches quieter speech; higher cuts more noise. If the start of your words disappears, lower this.</em>
+        </div>
+        <div class="cn-slide-row">
+          <label for="cnNsRelease">Hold after speaking <b id="cnNsReleaseV">${cfg.release} ms</b></label>
+          <input type="range" id="cnNsRelease" min="60" max="800" step="10" value="${cfg.release}" />
+          <em>How long the mic stays open after you stop. Raise it if your speech sounds chopped up.</em>
+        </div>
+        <div class="cn-slide-row">
+          <label for="cnNsHp">Remove low rumble <b id="cnNsHpV">${cfg.highPass} Hz</b></label>
+          <input type="range" id="cnNsHp" min="0" max="200" step="5" value="${cfg.highPass}" />
+          <em>Cuts desk knocks, footsteps and handling noise below this pitch.</em>
+        </div>
+      </div>
+
+      <div class="cn-mictest">
+        <div class="cn-mictest-head">
+          <b>Test it</b>
+          <button type="button" class="btn ghost sm" id="cnNsTest">${svg('play', 13)} Hear myself</button>
+        </div>
+        <p class="cn-mictest-warn">${svg('info', 12)} <span><b>Use headphones.</b> On speakers this will feed back and screech.</span></p>
+        <div class="cn-meter"><div class="cn-meter-fill" id="cnNsMeter"></div><div class="cn-meter-thresh" id="cnNsMark"></div></div>
+        <div class="cn-meter-legend"><span id="cnNsState">Not testing</span><span>the marker is your sensitivity setting</span></div>
+      </div>
+
+      <button type="button" class="btn ghost sm cn-noise-reset" id="cnNsReset">Reset to defaults</button>
+    </div>
+  </div>`;
+
+  await cnModal({
+    title: 'Noise cancellation', bodyHTML: html, okText: 'Done', cancelText: null,
+    // A full-screen surface: there are three sliders, three toggles, a meter and
+    // a live test in here, and squeezing that into a small centred box made it
+    // scroll awkwardly. `wide` lets the panel use the window and lay its controls
+    // out in columns when there's room (see .cn-modal.wide in the CSS).
+    wide: true,
+    onMount: (root) => {
+      const $ = (id) => root.querySelector(id);
+      const body = $('#cnNsBody'), adv = $('#cnNsAdv');
+
+      // Write a change through to PREFS, the live call chain, and the open test.
+      const save = (patch, { rebuild = false } = {}) => {
+        const next = { ...cnNoise(), ...patch };
+        setPrefs({ connectNoise: next });
+        // the running test picks up threshold/release/highPass immediately
+        if (CN.micTest) {
+          CN.micTest.cfg = next;
+          try { CN.micTest.hp.frequency.value = next.highPass; } catch (e) {}
+        }
+        if (CN.micChain) {
+          CN.micChain.cfg = next;
+          try { CN.micChain.hp.frequency.value = next.highPass; } catch (e) {}
+        }
+        // Only a change of SHAPE (on/off, gate on/off) needs the graph rebuilt and
+        // the sender re-pointed; a slider move is just a value.
+        if (rebuild) cnApplyMicProcessing();
+        const btn = document.getElementById('cnNoise');
+        if (btn) btn.classList.toggle('on', next.enabled);
+      };
+
+      $('#cnNsOn').onchange = (e) => {
+        body.classList.toggle('disabled', !e.target.checked);
+        save({ enabled: e.target.checked }, { rebuild: true });
+        // browserNS lives in the CONSTRAINTS, so it only takes effect on the next
+        // capture — say so rather than letting them wonder.
+        toast(e.target.checked ? 'Noise cancellation on' : 'Noise cancellation off', 'check');
+      };
+      $('#cnNsBrowser').onchange = (e) => {
+        save({ browserNS: e.target.checked });
+        toast('Applies the next time your microphone starts', 'info');
+      };
+      $('#cnNsGate').onchange = (e) => {
+        adv.classList.toggle('disabled', !e.target.checked);
+        save({ gate: e.target.checked }, { rebuild: true });
+      };
+
+      const slider = (id, valId, key, fmt) => {
+        const s = $(id), v = $(valId);
+        if (!s) return;
+        s.oninput = () => { v.textContent = fmt(s.value); save({ [key]: Number(s.value) }); if (key === 'threshold') mark(); };
+      };
+      slider('#cnNsThresh', '#cnNsThreshV', 'threshold', v => `${v} dB`);
+      slider('#cnNsRelease', '#cnNsReleaseV', 'release', v => `${v} ms`);
+      slider('#cnNsHp', '#cnNsHpV', 'highPass', v => `${v} Hz`);
+
+      // ---- the meter ----
+      // dBFS is logarithmic and mostly empty at the top; -70..0 maps the useful
+      // range of speech across the full width.
+      const pct = (db) => Math.max(0, Math.min(100, ((db + 70) / 70) * 100));
+      const markEl = $('#cnNsMark');
+      const mark = () => { markEl.style.left = pct(Number($('#cnNsThresh').value)) + '%'; };
+      mark();
+
+      const meter = $('#cnNsMeter'), state = $('#cnNsState'), testBtn = $('#cnNsTest');
+      let testing = false;
+
+      const stopTest = () => {
+        testing = false;
+        cnStopMicTest();
+        meter.style.width = '0%';
+        meter.classList.remove('open');
+        state.textContent = 'Not testing';
+        testBtn.innerHTML = `${svg('play', 13)} Hear myself`;
+      };
+
+      testBtn.onclick = async () => {
+        if (testing) return stopTest();
+        const t = await cnStartMicTest();
+        if (!t) { toast("Couldn't start the test — join the call first", 'info'); return; }
+        testing = true;
+        testBtn.innerHTML = `${svg('stop', 13)} Stop test`;
+        t.onLevel = (db, open) => {
+          meter.style.width = pct(db) + '%';
+          meter.classList.toggle('open', open);
+          state.textContent = open ? 'Sending — the room would hear this' : 'Silent — gated out';
+        };
+      };
+
+      $('#cnNsReset').onclick = () => {
+        setPrefs({ connectNoise: { ...CN_NOISE_DEFAULTS } });
+        cnApplyMicProcessing();
+        stopTest();
+        cnCloseModalAndReopenNoise();
+      };
+
+      // The test must not outlive the modal — a monitor left running after the
+      // window closes is an invisible feedback loop.
+      root._cnCleanup = stopTest;
+    },
+    onClose: (root) => { if (root && root._cnCleanup) root._cnCleanup(); cnStopMicTest(); },
+  });
+  cnStopMicTest();
+}
+
+/* Reset re-opens the panel so every control shows its restored value. */
+function cnCloseModalAndReopenNoise() {
+  const bg = document.querySelector('.modal-bg');
+  if (bg) bg.remove();
+  cnStopMicTest();
+  setTimeout(cnNoiseSettings, 0);
+}
+
+/* Build the <option> list for a quality table. */
+function cnQualityOptions(table, current) {
+  return Object.entries(table)
+    .map(([k, v]) => `<option value="${esc(k)}" ${k === current ? 'selected' : ''}>${esc(v.label)}</option>`)
+    .join('');
+}
+
+/* Re-apply the sender bitrate ceilings on every peer connection (used when the
+   quality preference changes without re-acquiring the track). */
+async function cnApplySenderBitrates() {
+  for (const peer of CN.peers.values()) {
+    if (!peer.pc) continue;
+    for (const s of peer.pc.getSenders()) {
+      if (!s.track || s.track.kind !== 'video') continue;
+      try {
+        const p = s.getParameters();
+        if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+        const isScreen = s.track.label && /screen|window|tab|display/i.test(s.track.label);
+        p.encodings[0].maxBitrate = cnVideoBitrateFor(isScreen);
+        await s.setParameters(p);
+      } catch (e) {}
+    }
+  }
+}
+
 /* Replace one live track everywhere (replaceTrack needs no renegotiation). */
-async function cnSwapTrack(kind) {
+async function cnSwapTrack(kind, opts = {}) {
   if (!cnCanCapture()) { cnInsecureOriginModal(); return false; }
   // Selecting a device the browser hasn't granted yet triggers a FRESH permission
   // prompt (each camera is its own grant), so show the same hint as on join —
@@ -1097,19 +2431,23 @@ async function cnSwapTrack(kind) {
   const hint = cnPermHint(kind === 'video');
   let fresh = null;
   try {
-    const s = await navigator.mediaDevices.getUserMedia(
-      kind === 'audio' ? { audio: cnAudioConstraints() } : { video: cnVideoConstraints() });
+    // Video goes through the relaxation ladder (see cnGetCameraStream) so a
+    // quality the camera can't hit exactly still produces a working track rather
+    // than turning the camera off.
+    const s = kind === 'audio'
+      ? await navigator.mediaDevices.getUserMedia({ audio: cnAudioConstraints() })
+      : await cnGetCameraStream();
     fresh = kind === 'audio' ? s.getAudioTracks()[0] : s.getVideoTracks()[0];
     if (!fresh) { s.getTracks().forEach(t => t.stop()); return false; }
   } catch (e) {
     hint.remove();
-    // A device can vanish between listing and selecting (unplugged), and an exact
-    // deviceId that no longer resolves throws OverconstrainedError. Fall back to
-    // the system default rather than leaving them with no camera at all.
-    if (e && (e.name === 'OverconstrainedError' || e.name === 'NotFoundError')) {
+    // A device can vanish between listing and selecting (unplugged). For audio
+    // there's no ladder, so fall back to the system default once — guarded by a
+    // flag so a permanently-failing device can't recurse forever.
+    if (e && (e.name === 'OverconstrainedError' || e.name === 'NotFoundError') && !opts._retried) {
       if (kind === 'audio') CN.devices.micId = null; else CN.devices.camId = null;
       toast('That device is unavailable — using the default instead', 'info');
-      return cnSwapTrack(kind);
+      return cnSwapTrack(kind, { _retried: true });
     }
     cnPermissionHelpModal(e, kind === 'video');
     return false;
@@ -1126,7 +2464,13 @@ async function cnSwapTrack(kind) {
   const old = kind === 'audio' ? CN.local.getAudioTracks()[0] : CN.local.getVideoTracks()[0];
   if (old) { old.stop(); CN.local.removeTrack(old); }
   CN.local.addTrack(fresh);
-  if (kind === 'audio') fresh.enabled = CN.media.mic;
+  if (kind === 'audio') {
+    fresh.enabled = CN.media.mic;
+    // The noise chain was reading from the OLD mic, which we just stopped. Rebuild
+    // it around the new one — otherwise switching microphones silently drops the
+    // user back to unprocessed audio (or to a dead track).
+    await cnApplyMicProcessing();
+  }
 
   // Force the local preview to re-bind. cnAttachStreams() only assigns srcObject
   // when the OBJECT changed, and CN.local is the same MediaStream instance — so
@@ -1212,7 +2556,8 @@ function cnMsgHTML(m, grouped) {
       <span class="cn-msg-at">${cnTime(m.created)}</span>
     </div>`}
     ${reply ? `<div class="cn-msg-reply">${svg('back', 10)} <b>${esc(reply.authorName)}</b> ${esc(cnTrim(reply.text, 90))}</div>` : ''}
-    <div class="cn-msg-body">${cnLinkify(m.text)}${m.edited ? '<span class="cn-edited">(edited)</span>' : ''}</div>
+    ${m.text ? `<div class="cn-msg-body">${cnLinkify(m.text)}${m.edited ? '<span class="cn-edited">(edited)</span>' : ''}</div>` : ''}
+    ${(m.files && m.files.length) ? `<div class="cn-msg-files">${m.files.map(cnFileHTML).join('')}</div>` : ''}
     <div class="cn-msg-tools">
       <button class="cn-tool" data-react="${esc(m.id)}" title="React">😊</button>
       <button class="cn-tool" data-reply="${esc(m.id)}" title="Reply">${svg('back', 12)}</button>
@@ -1252,8 +2597,401 @@ function cnWireChat() {
       input.style.height = Math.min(input.scrollHeight, 140) + 'px';
     };
   }
+  const attach = document.getElementById('cnAttach');
+  if (attach) attach.onclick = cnAttachMenu;
+  const picker = document.getElementById('cnFilePick');
+  if (picker) picker.onchange = async () => {
+    const files = [...(picker.files || [])];
+    picker.value = '';                 // let the same file be picked again later
+    for (const f of files) await cnUploadFile(f);
+  };
   cnWireMsgTools();
   cnScrollChat();
+}
+
+/* ============================================================
+   CHAT ATTACHMENTS — from the device, or out of the vault
+   ============================================================ */
+
+/* Ask where the file is coming from. The device path carries a warning, because
+   those bytes exist ONLY on this server and go when the room does. */
+async function cnAttachMenu() {
+  const html = `<div class="cn-attach-menu">
+    <button class="cn-attach-opt" data-pick="device">
+      ${svg('upload', 20)}
+      <div><b>From this device</b><span>Pick a file from your phone or computer</span></div>
+    </button>
+    <button class="cn-attach-opt" data-pick="vault">
+      ${svg('database', 20)}
+      <div><b>From my Database</b><span>Share something already in your vault</span></div>
+    </button>
+    <p class="cn-attach-warn">${svg('info', 13)}
+      <span><b>Files shared here are deleted with the room.</b> A file you upload from your device
+      lives only in this room — when the room is deleted it's gone from the server for good.
+      Sharing from your Database copies it, so your original always stays safe in your vault.</span>
+    </p>
+  </div>`;
+  // cnChoiceModal resolves with whatever the clicked option carried, so there's
+  // no state to stash outside the modal.
+  const pick = await cnChoiceModal({ title: 'Share a file', bodyHTML: html });
+  if (pick === 'device') { const p = document.getElementById('cnFilePick'); if (p) p.click(); }
+  else if (pick === 'vault') await cnVaultPicker();
+}
+
+/* A modal whose OPTIONS resolve the promise: any [data-pick] element inside
+   `bodyHTML` closes it and resolves with that element's data-pick value.
+   Cancel / backdrop resolve null. Used for pick-one-of-N choices where the plain
+   OK/Cancel shape of cnModal doesn't fit. */
+function cnChoiceModal({ title, bodyHTML, cancelText = 'Cancel', onMount = null }) {
+  return new Promise(resolve => {
+    const bg = document.createElement('div'); bg.className = 'modal-bg';
+    bg.innerHTML = `<div class="modal cn-modal">
+      <h3>${esc(title)}</h3>
+      <div class="cn-modal-body">${bodyHTML}</div>
+      <div class="acts"><div class="spacer"></div><button class="btn ghost" data-cancel>${esc(cancelText)}</button></div>
+    </div>`;
+    document.body.appendChild(bg);
+    let settled = false;
+    const done = (v) => { if (settled) return; settled = true; bg.remove(); resolve(v); };
+    bg.querySelector('[data-cancel]').onclick = () => done(null);
+    bg.onclick = e => { if (e.target === bg) done(null); };
+    bg.querySelectorAll('[data-pick]').forEach(b => {
+      b.onclick = () => done(b.getAttribute('data-pick'));
+    });
+    if (onMount) onMount(bg.querySelector('.modal'), done);
+  });
+}
+
+/* Upload one file straight from the device. */
+async function cnUploadFile(file) {
+  if (!CN.room || !file) return;
+  const max = 256 * 1024 * 1024;
+  if (file.size > max) { toast(`"${file.name}" is over the 256MB chat limit`, 'info'); return; }
+  const id = 'up' + Math.random().toString(36).slice(2, 8);
+  cnShowUploading(id, file.name);
+  try {
+    const fd = new FormData();
+    fd.append('file', file, file.name);
+    const res = await fetch(`/api/connect/rooms/${encodeURIComponent(CN.room.id)}/files`, { method: 'POST', body: fd });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((data && data.error) || 'upload failed');
+    cnUpsertMessage(data.message);
+  } catch (e) {
+    toast(e.message || "Couldn't share that file", 'info');
+  } finally { cnClearUploading(id); }
+}
+
+/* A placeholder row while an upload is in flight, so a big file doesn't look
+   like nothing happened. */
+function cnShowUploading(id, name) {
+  const box = document.getElementById('cnMsgs');
+  if (!box) return;
+  const el = document.createElement('div');
+  el.className = 'cn-uploading';
+  el.id = 'cnUp_' + id;
+  el.innerHTML = `<span class="cn-up-spin"></span><span>Sending ${esc(name)}…</span>`;
+  box.appendChild(el);
+  cnScrollChat();
+}
+function cnClearUploading(id) {
+  const el = document.getElementById('cnUp_' + id);
+  if (el) el.remove();
+}
+
+/* Pick a file out of the caller's own vault. Reuses the already-loaded file list
+   when the Database app has been opened; otherwise fetches it. */
+async function cnVaultPicker() {
+  let files = [];
+  try {
+    if (typeof DB !== 'undefined' && DB && Array.isArray(DB.files) && DB.files.length) files = DB.files;
+    else files = await (await fetch('/api/files')).json();
+  } catch (e) { toast("Couldn't read your vault", 'info'); return; }
+  const pickable = files
+    .filter(f => !f.folder && !f.trashed && f.hasBlob !== false)
+    .sort((a, b) => (b.date || 0) - (a.date || 0))
+    .slice(0, 400);
+  if (!pickable.length) { toast('Nothing in your vault to share yet', 'info'); return; }
+
+  const rows = pickable.map(f => `<button class="cn-vault-row" data-pick="${esc(f.id)}">
+      ${svg(cnIconForType(f.type), 15)}
+      <span class="cn-vault-name">${esc(f.name)}</span>
+      <span class="cn-vault-size">${esc(cnBytes(f.size || 0))}</span>
+    </button>`).join('');
+  const html = `<div class="cn-vault-pick">
+    <input id="cnVaultSearch" placeholder="Search your vault…" />
+    <div class="cn-vault-list" id="cnVaultList">${rows}</div>
+    <p class="cn-dev-note">Sharing copies the file into this room — your original stays in your vault. The copy is deleted with the room.</p>
+  </div>`;
+  // rows carry data-pick (the file id), so the modal resolves with the choice
+  const chosen = await cnChoiceModal({
+    title: 'Share from your Database', bodyHTML: html,
+    onMount: (root) => {
+      const search = root.querySelector('#cnVaultSearch');
+      const list = root.querySelector('#cnVaultList');
+      if (search) search.oninput = () => {
+        const q = search.value.toLowerCase();
+        list.querySelectorAll('.cn-vault-row').forEach(r => {
+          const n = r.querySelector('.cn-vault-name').textContent.toLowerCase();
+          r.style.display = n.includes(q) ? '' : 'none';
+        });
+      };
+      setTimeout(() => { if (search) search.focus(); }, 0);
+    },
+  });
+  if (chosen) await cnShareVaultFile(chosen);
+}
+
+async function cnShareVaultFile(fileId) {
+  if (!CN.room) return;
+  const id = 'vf' + Math.random().toString(36).slice(2, 8);
+  cnShowUploading(id, 'file from your vault');
+  try {
+    const d = await cnApi(`/api/connect/rooms/${encodeURIComponent(CN.room.id)}/files/vault`, {
+      method: 'POST', body: { fileId },
+    });
+    cnUpsertMessage(d.message);
+  } catch (e) {
+    toast(e.message || "Couldn't share that file", 'info');
+  } finally { cnClearUploading(id); }
+}
+
+function cnIconForType(t) {
+  return ({ image: 'image', video: 'video', audio: 'audio', document: 'document', model3d: 'cube', uasset: 'uasset' })[t] || 'files';
+}
+function cnBytes(n) {
+  if (!n) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  return (n / Math.pow(1024, i)).toFixed(i ? 1 : 0) + ' ' + u[i];
+}
+
+/* One attachment inside a chat message. Images and video preview inline; anything
+   else gets a download row. */
+function cnFileHTML(f) {
+  const temp = f.temporary
+    ? `<span class="cn-file-temp" title="Uploaded from a device — deleted when this room is deleted">temporary</span>` : '';
+  const cap = `<span class="cn-file-cap">${esc(f.name)} · ${esc(cnBytes(f.size))} ${temp}</span>`;
+
+  // Images open the lightbox rather than a new tab, so the download / save-to-
+  // photos actions are right there instead of behind the browser's own chrome.
+  if (f.kind === 'image') {
+    return `<a class="cn-file-img" href="${esc(f.url)}" data-preview="${esc(f.id)}">
+      <img src="${esc(f.url)}" alt="${esc(f.name)}" loading="lazy" />
+      ${cap}
+    </a>`;
+  }
+  if (f.kind === 'video') {
+    return `<div class="cn-file-vid">
+      <video src="${esc(f.url)}" controls preload="metadata"></video>
+      ${cap}
+    </div>`;
+  }
+  if (f.kind === 'audio') {
+    return `<div class="cn-file-aud">
+      <audio src="${esc(f.url)}" controls preload="metadata"></audio>
+      ${cap}
+    </div>`;
+  }
+  // TEXT-ish files small enough to be worth showing get an inline excerpt with a
+  // "click to read" affordance. Markdown is the common case (notes, snippets),
+  // but any small text file benefits — a filename alone tells you nothing about
+  // whether it's the thing you wanted.
+  if (cnIsTextPreviewable(f)) {
+    return `<div class="cn-file-text" data-textfile="${esc(f.id)}">
+      <div class="cn-file-text-head">
+        ${svg('document', 14)}
+        <b>${esc(f.name)}</b>
+        <span>${esc(cnBytes(f.size))} ${temp}</span>
+      </div>
+      <pre class="cn-file-text-body" data-textbody="${esc(f.id)}">Loading…</pre>
+      <button class="cn-file-text-open" data-preview="${esc(f.id)}">Open</button>
+    </div>`;
+  }
+  return `<a class="cn-file-row" href="${esc(f.url)}?download=1" download="${esc(f.name)}">
+    ${svg(cnIconForType(f.kind), 16)}
+    <span class="cn-file-meta"><b>${esc(f.name)}</b><span>${esc(cnBytes(f.size))} ${temp}</span></span>
+    ${svg('download', 15)}
+  </a>`;
+}
+
+/* Which attachments get an inline text excerpt.
+   The size cap matters: this fetches the file to show it, so it has to stay in
+   "nano/small markdown" territory rather than pulling a 40MB log into the chat. */
+const CN_TEXT_PREVIEW_MAX = 256 * 1024;
+const CN_TEXT_EXT = /\.(md|markdown|txt|text|log|json|ya?ml|toml|ini|cfg|conf|csv|tsv|js|ts|jsx|tsx|py|rb|go|rs|java|c|h|cpp|hpp|cs|sh|bash|zsh|sql|html?|css|scss|xml|svg)$/i;
+
+function cnIsTextPreviewable(f) {
+  if (!f || !f.name) return false;
+  if (f.size > CN_TEXT_PREVIEW_MAX) return false;
+  if (f.kind === 'image' || f.kind === 'video' || f.kind === 'audio') return false;
+  return CN_TEXT_EXT.test(f.name);
+}
+
+/* Fill in the inline excerpts after a chat render. Kept separate from the HTML so
+   a re-render doesn't re-fetch what we already have — the cache is keyed by file
+   id and lives as long as the room does. */
+const CN_TEXT_CACHE = new Map();
+
+async function cnFillTextPreviews() {
+  const nodes = document.querySelectorAll('[data-textbody]');
+  for (const el of nodes) {
+    const id = el.getAttribute('data-textbody');
+    if (el._cnFilled) continue;
+    el._cnFilled = true;
+    if (CN_TEXT_CACHE.has(id)) { cnPaintTextPreview(el, CN_TEXT_CACHE.get(id)); continue; }
+    const f = cnFindFile(id);
+    if (!f) { el.textContent = ''; continue; }
+    try {
+      const res = await fetch(f.url);
+      if (!res.ok) throw new Error('fetch failed');
+      const text = (await res.text()).slice(0, CN_TEXT_PREVIEW_MAX);
+      CN_TEXT_CACHE.set(id, text);
+      cnPaintTextPreview(el, text);
+    } catch (e) {
+      el.textContent = "Couldn't load a preview of this file.";
+      el.classList.add('cn-text-err');
+    }
+  }
+}
+
+/* The inline excerpt is deliberately the RAW first few lines, not rendered
+   markdown — at four lines tall, rendered headings and bullets read worse than
+   the source. The full preview (cnOpenFilePreview) does render it. */
+function cnPaintTextPreview(el, text) {
+  const lines = text.split('\n').slice(0, 6);
+  el.textContent = lines.join('\n') + (text.split('\n').length > 6 ? '\n…' : '');
+}
+
+/* Find an attachment by id across every loaded message. */
+function cnFindFile(id) {
+  for (const m of CN.messages) {
+    if (!m.files) continue;
+    const f = m.files.find(x => x.id === id);
+    if (f) return f;
+  }
+  return null;
+}
+
+/* ============================================================
+   THE ATTACHMENT LIGHTBOX
+   Full-size preview with Download and — on iOS/macOS — Save to Photos.
+   ============================================================ */
+async function cnOpenFilePreview(id) {
+  const f = cnFindFile(id);
+  if (!f) return;
+
+  let bodyHTML;
+  if (f.kind === 'image') {
+    bodyHTML = `<div class="cn-prev-img"><img src="${esc(f.url)}" alt="${esc(f.name)}" /></div>`;
+  } else if (cnIsTextPreviewable(f)) {
+    // rendered markdown where the app already has a renderer, raw text otherwise
+    let text = CN_TEXT_CACHE.get(id);
+    if (text === undefined) {
+      try { text = await (await fetch(f.url)).text(); CN_TEXT_CACHE.set(id, text); }
+      catch (e) { text = null; }
+    }
+    if (text === null) bodyHTML = `<p class="cn-prev-err">Couldn't load this file.</p>`;
+    else if (/\.(md|markdown)$/i.test(f.name) && typeof mdToHtml === 'function') {
+      bodyHTML = `<div class="cn-prev-md">${mdToHtml(text)}</div>`;
+    } else {
+      bodyHTML = `<pre class="cn-prev-code">${esc(text)}</pre>`;
+    }
+  } else {
+    bodyHTML = `<p class="cn-prev-err">No preview for this kind of file — you can still download it.</p>`;
+  }
+
+  const canSavePhotos = f.kind === 'image' && cnCanSaveToPhotos();
+  cnPreviewModal({
+    title: f.name,
+    subtitle: cnBytes(f.size) + (f.temporary ? ' · deleted with the room' : ''),
+    bodyHTML,
+    actions: [
+      { id: 'download', label: 'Download', icon: 'download', run: () => cnDownloadFile(f) },
+      ...(canSavePhotos ? [{ id: 'photos', label: 'Save to Photos', icon: 'image', run: () => cnSaveToPhotos(f) }] : []),
+    ],
+  });
+}
+
+/* A wide, chrome-light modal for looking at one thing. */
+function cnPreviewModal({ title, subtitle, bodyHTML, actions = [] }) {
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg cn-prev-bg';
+  bg.innerHTML = `<div class="modal cn-prev">
+    <div class="cn-prev-head">
+      <div class="cn-prev-id"><b>${esc(title)}</b><span>${esc(subtitle || '')}</span></div>
+      <button class="cn-prev-x" data-close title="Close">${svg('close', 16)}</button>
+    </div>
+    <div class="cn-prev-body">${bodyHTML}</div>
+    <div class="cn-prev-acts">
+      ${actions.map(a => `<button class="btn ghost sm" data-act="${esc(a.id)}">${svg(a.icon, 14)} ${esc(a.label)}</button>`).join('')}
+    </div>
+  </div>`;
+  document.body.appendChild(bg);
+  const close = () => { document.removeEventListener('keydown', onKey, true); bg.remove(); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey, true);
+  bg.querySelector('[data-close]').onclick = close;
+  bg.onclick = (e) => { if (e.target === bg) close(); };
+  bg.querySelectorAll('[data-act]').forEach(b => {
+    const a = actions.find(x => x.id === b.getAttribute('data-act'));
+    if (a) b.onclick = () => a.run();
+  });
+  return bg;
+}
+
+/* Save to Photos / camera roll.
+   There's no web API that writes to the photo library directly, so this uses the
+   Web Share API: on iOS and macOS, sharing an image file offers "Save Image" (and
+   "Add to Photos") in the share sheet. That's the closest a web page can get, and
+   it's the same route native apps use. Everywhere else we don't offer the button
+   at all rather than showing one that can't work. */
+function cnCanSaveToPhotos() {
+  if (!navigator.canShare || !navigator.share) return false;
+  // Apple platforms are where the share sheet actually offers a Photos target.
+  const ua = navigator.userAgent || '';
+  const isApple = /iPhone|iPad|iPod|Macintosh/.test(ua);
+  // iPadOS reports as Macintosh; touch support disambiguates, but either way both
+  // are Apple platforms with the same share sheet, so no further check is needed.
+  return isApple;
+}
+
+async function cnSaveToPhotos(f) {
+  try {
+    const res = await fetch(f.url);
+    if (!res.ok) throw new Error('fetch failed');
+    const blob = await res.blob();
+    const file = new File([blob], f.name, { type: blob.type || 'image/jpeg' });
+    if (navigator.canShare && !navigator.canShare({ files: [file] })) {
+      throw new Error('sharing this file type is not supported');
+    }
+    await navigator.share({ files: [file], title: f.name });
+  } catch (e) {
+    // AbortError just means they dismissed the sheet — not a failure worth a toast.
+    if (e && e.name === 'AbortError') return;
+    toast('Couldn\'t open the share sheet — use Download instead', 'info');
+  }
+}
+
+/* Download an attachment. Goes through a blob so the filename is honoured even
+   when the response has no Content-Disposition. */
+async function cnDownloadFile(f) {
+  try {
+    const res = await fetch(f.url + '?download=1');
+    if (!res.ok) throw new Error('fetch failed');
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = f.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Revoking immediately can cancel the download in some browsers; a tick later
+    // is enough for the click to have been consumed.
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  } catch (e) {
+    // fall back to letting the browser navigate to it
+    window.open(f.url + '?download=1', '_blank', 'noopener');
+  }
 }
 
 /* One delegated handler for every message action, re-bound after each render. */
@@ -1271,7 +3009,59 @@ function cnWireMsgTools() {
     if (ed) return cnEditMessage(ed.getAttribute('data-edit'));
     const del = e.target.closest('[data-del]');
     if (del) return cnDeleteMessage(del.getAttribute('data-del'));
+    // clicking an attachment opens the preview rather than navigating away
+    const prev = e.target.closest('[data-preview]');
+    if (prev) { e.preventDefault(); return cnOpenFilePreview(prev.getAttribute('data-preview')); }
   };
+
+  // Right-click a message for the same actions as the hover toolbar, plus the
+  // ones there's no room for on hover (copy text, copy link to the sender).
+  box.oncontextmenu = (e) => {
+    const el = e.target.closest('[data-msg]');
+    if (!el) return;
+    // let the browser's own menu win on a link or an image — "copy image",
+    // "open in new tab" and "save as" are genuinely useful there
+    if (e.target.closest('a[href], img, video, audio')) return;
+    e.preventDefault();
+    cnMessageMenu(e, el.getAttribute('data-msg'));
+  };
+}
+
+/* Right-click menu for one chat message. */
+function cnMessageMenu(ev, msgId) {
+  const m = CN.messages.find(x => x.id === msgId);
+  if (!m) return;
+  const canDelete = m.mine || (CN.room && CN.room.canManage);
+
+  const items = [
+    // The reaction row goes first — it's the most-used action, and putting the
+    // emoji inline saves a second click through a picker.
+    {
+      id: 'rxrow',
+      html: `<div class="cn-menu-rx">${CN_REACTIONS.map(e2 =>
+        `<button class="cn-menu-rx-btn" data-emoji="${esc(e2)}">${esc(e2)}</button>`).join('')}</div>`,
+      onMount: (root) => {
+        root.querySelectorAll('.cn-menu-rx-btn').forEach(b => {
+          b.onclick = () => { cnCloseMenu(); cnToggleReaction(msgId, b.getAttribute('data-emoji')); };
+        });
+      },
+    },
+    { sep: true },
+    { id: 'reply', icon: 'back', label: 'Reply', run: () => cnSetReply(msgId) },
+    { id: 'copy', icon: 'copy', label: 'Copy text', run: () => cnCopyText(m.text || '') },
+  ];
+  if (m.mine) items.push({ id: 'edit', icon: 'rename', label: 'Edit', run: () => cnEditMessage(msgId) });
+  if (canDelete) {
+    items.push({ sep: true });
+    items.push({ id: 'del', icon: 'trash', danger: true, label: 'Delete', run: () => cnDeleteMessage(msgId) });
+  }
+  cnMenu(ev, items);
+}
+
+function cnCopyText(t) {
+  if (!t) { toast('Nothing to copy', 'info'); return; }
+  try { navigator.clipboard.writeText(t); toast('Copied', 'copy'); }
+  catch (e) { toast("Couldn't copy that", 'info'); }
 }
 
 function cnRenderMessages() {
@@ -1280,6 +3070,7 @@ function cnRenderMessages() {
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
   box.innerHTML = cnMessagesHTML();
   cnWireMsgTools();
+  cnFillTextPreviews();
   if (atBottom) cnScrollChat();
 }
 function cnScrollChat() {
@@ -1457,6 +3248,10 @@ async function cnRoomSettings() {
     <label class="cn-dev-row"><span>Name</span><input id="cnSetName" value="${esc(r.name)}" maxlength="120" /></label>
     <label class="cn-dev-row"><span>Topic</span><input id="cnSetTopic" value="${esc(r.topic || '')}" maxlength="300" placeholder="optional" /></label>
     <label class="cn-dev-row check"><input type="checkbox" id="cnSetLock" ${r.locked ? 'checked' : ''} /><span>Locked — the code stops letting new people in</span></label>
+    ${r.isOwner ? `<label class="cn-dev-row check"><input type="checkbox" id="cnSetPerm" ${r.permanent ? 'checked' : ''} /><span>Keep this room permanently</span></label>
+    <p class="cn-dev-note">${r.permanent
+      ? 'This room stays put when everyone leaves.'
+      : 'Temporary: once everyone leaves the call, this room and its chat are deleted automatically.'}</p>` : ''}
     <div class="cn-set-members"><h4>People (${r.members.length})</h4><ul id="cnMemberList">${members}</ul></div>
     <p class="cn-dev-note">Deleting the room erases its chat and reactions for everyone.</p>
   </div>`;
@@ -1482,6 +3277,7 @@ async function cnRoomSettings() {
       name: (root.querySelector('#cnSetName') || {}).value || '',
       topic: (root.querySelector('#cnSetTopic') || {}).value || '',
       locked: !!(root.querySelector('#cnSetLock') || {}).checked,
+      permanent: root.querySelector('#cnSetPerm') ? !!root.querySelector('#cnSetPerm').checked : undefined,
     }),
     onMount: (root) => {
       root.querySelectorAll('[data-kick]').forEach(b => {
@@ -1498,10 +3294,12 @@ async function cnRoomSettings() {
   });
   if (!ok) return;
   // captured by onAccept while the modal was still mounted (see cnModal)
-  const { name, topic, locked } = ok;
+  const { name, topic, locked, permanent } = ok;
   try {
+    const body = { name, topic, locked };
+    if (permanent !== undefined) body.permanent = permanent;
     const d = await cnApi('/api/connect/rooms/' + encodeURIComponent(r.id), {
-      method: 'PATCH', body: { name, topic, locked },
+      method: 'PATCH', body,
     });
     CN.room = d.room;
     cnRenderBody();
@@ -1542,16 +3340,21 @@ function cnPrompt({ title, label, value = '', placeholder = '', okText = 'OK', h
 /* Modal with custom body markup. `onMount` gets the modal element so callers can
    wire controls inside it; `extra` adds a third (usually destructive) button
    whose handler returning true closes the modal. */
-function cnModal({ title, bodyHTML, okText = 'Save', extraText = '', onExtra = null, onMount = null, onAccept = null }) {
+/* `cancelText: null` drops the Cancel button entirely — for panels that apply
+   their changes live and so have nothing to cancel BACK to.
+   `onClose` always runs when the modal goes away, whichever way it went. Panels
+   that start something (an audio monitor, a timer) use it to guarantee cleanup;
+   relying on the OK handler alone would leak when the user clicks the backdrop. */
+function cnModal({ title, bodyHTML, okText = 'Save', cancelText = 'Cancel', extraText = '', onExtra = null, onMount = null, onAccept = null, onClose = null, wide = false }) {
   return new Promise(resolve => {
     const bg = document.createElement('div'); bg.className = 'modal-bg';
-    bg.innerHTML = `<div class="modal cn-modal">
+    bg.innerHTML = `<div class="modal cn-modal ${wide ? 'wide' : ''}">
       <h3>${esc(title)}</h3>
       <div class="cn-modal-body">${bodyHTML}</div>
       <div class="acts">
         ${extraText ? `<button class="btn danger" data-extra>${esc(extraText)}</button>` : ''}
         <div class="spacer"></div>
-        <button class="btn ghost" data-cancel>Cancel</button>
+        ${cancelText ? `<button class="btn ghost" data-cancel>${esc(cancelText)}</button>` : ''}
         <button class="btn primary" data-ok>${esc(okText)}</button>
       </div>
     </div>`;
@@ -1564,12 +3367,16 @@ function cnModal({ title, bodyHTML, okText = 'Save', extraText = '', onExtra = n
     const done = (v) => {
       if (settled) return;
       settled = true;
+      const root = bg.querySelector('.modal');
       let out = v;
-      if (v === true && onAccept) { try { out = onAccept(bg.querySelector('.modal')); } catch (e) { out = v; } }
+      if (v === true && onAccept) { try { out = onAccept(root); } catch (e) { out = v; } }
+      // cleanup runs while the DOM is still intact, and on EVERY exit path
+      if (onClose) { try { onClose(root); } catch (e) {} }
       bg.remove();
       resolve(out);
     };
-    bg.querySelector('[data-cancel]').onclick = () => done(false);
+    const cancelBtn = bg.querySelector('[data-cancel]');
+    if (cancelBtn) cancelBtn.onclick = () => done(false);
     bg.querySelector('[data-ok]').onclick = () => done(true);
     bg.onclick = e => { if (e.target === bg) done(false); };
     const ex = bg.querySelector('[data-extra]');

@@ -349,9 +349,13 @@ actor API {
         try decode(ConnectRoomResponse.self, from: try await run(request("/api/connect/rooms/\(id)"))).room
     }
 
-    func updateConnectRoom(_ id: String, name: String, topic: String?, locked: Bool) async throws -> ConnectRoom {
+    /// `permanent` is only honoured for the room's owner (server-enforced); pass
+    /// nil to leave it as-is.
+    func updateConnectRoom(_ id: String, name: String, topic: String?,
+                           locked: Bool, permanent: Bool? = nil) async throws -> ConnectRoom {
         var body: [String: Any] = ["name": name, "locked": locked]
         body["topic"] = topic ?? ""
+        if let permanent { body["permanent"] = permanent }
         return try decode(ConnectRoomResponse.self,
                           from: try await run(request("/api/connect/rooms/\(id)", method: "PATCH", json: body))).room
     }
@@ -400,6 +404,36 @@ actor API {
         try decode(ConnectMessageResponse.self,
                    from: try await run(request("/api/connect/rooms/\(room)/messages/\(id)/react",
                                                method: "POST", json: ["emoji": emoji, "remove": remove]))).message
+    }
+
+    /// Share a file out of the caller's own vault into a room's chat. The bytes are
+    /// COPIED server-side, so the original stays in the vault untouched and only the
+    /// copy is destroyed with the room.
+    func shareVaultFileToConnect(room: String, fileId: String) async throws -> ConnectMessage {
+        try decode(ConnectMessageResponse.self,
+                   from: try await run(request("/api/connect/rooms/\(room)/files/vault",
+                                               method: "POST", json: ["fileId": fileId]))).message
+    }
+
+    /// Upload a file straight from the device into a room's chat. These bytes live
+    /// ONLY on the server for this room — deleting the room deletes them.
+    func uploadConnectFile(room: String, fileURL: URL) async throws -> ConnectMessage {
+        let boundary = "sx-" + UUID().uuidString
+        var req = URLRequest(url: baseURL.appendingPathComponent("api/connect/rooms/\(room)/files"))
+        req.httpMethod = "POST"
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        let name = fileURL.lastPathComponent
+        var body = Data()
+        func append(_ s: String) { body.append(s.data(using: .utf8)!) }
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"file\"; filename=\"\(name)\"\r\n")
+        append("Content-Type: application/octet-stream\r\n\r\n")
+        body.append(try Data(contentsOf: fileURL))
+        append("\r\n--\(boundary)--\r\n")
+        req.httpBody = body
+
+        return try decode(ConnectMessageResponse.self, from: try await run(req)).message
     }
 
     /// The in-app call page. The live call runs in a WKWebView pointed here because

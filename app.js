@@ -1117,6 +1117,24 @@ const WHATS_NEW = [
         head: 'On your phone too',
         body: `Connect is in the iOS app as its own system: the room list, joining by code, and the full chat are native, and tapping <strong>Join</strong> drops you into the call with the speaker and Bluetooth wired up.`,
       },
+      {
+        icon: 'clock', tint: 'video',
+        head: 'Rooms clean up after themselves',
+        badge: { text: 'New', cls: 'new' },
+        body: `A room is <strong>temporary by default</strong>: once everyone leaves the call, it and its whole chat are deleted automatically, so a quick catch-up leaves nothing behind. Want one to stay? The owner ticks <strong>Keep this room permanently</strong>. There's a short grace period, so a refresh or a dropped connection won't wipe your room.`,
+      },
+      {
+        icon: 'upload', tint: 'video',
+        head: 'Share files in the chat',
+        badge: { text: 'New', cls: 'new' },
+        body: `Send a file straight <strong>from your device</strong>, or pull one <strong>from your Database</strong>. Images, video and audio play inline; everything else lands as a download. Files uploaded from a device live only in that room and are <strong>deleted from the server when the room goes</strong> — you're told before you send. Sharing from your vault copies the file, so your original always stays safe.`,
+      },
+      {
+        icon: 'gear', tint: 'video',
+        head: 'Pick your own video quality',
+        badge: { text: 'New', cls: 'new' },
+        body: `Set the <strong>camera</strong> and the <strong>screen share</strong> quality separately — Auto, or a fixed tier from 360p all the way to 4K60. Useful on a data plan, or when a laptop gets loud encoding 1080p. Your voice stays 64 kbps stereo no matter what.`,
+      },
     ],
   },
   {

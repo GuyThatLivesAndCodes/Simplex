@@ -67,7 +67,12 @@ final class NeuralStore: ObservableObject {
     private func scheduleSync(_ id: String) {
         syncTimer?.invalidate()
         syncTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
-            Task { await self?.pushToServer(id) }
+            // Bind `self` OUTSIDE the Task. Writing `Task { await self?.… }` makes
+            // the Task close over the optional captured var itself, which Swift 6
+            // rejects ("reference to captured var 'self' in concurrently-executing
+            // code"). Unwrapping first hands the Task a plain immutable value.
+            guard let self else { return }
+            Task { await self.pushToServer(id) }
         }
     }
 
