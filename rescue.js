@@ -57,7 +57,7 @@ const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const vault = require('./crypto');
 
-const RESCUE_VERSION = '4';   // bump when commands are added; printed by every command
+const RESCUE_VERSION = '5';   // bump when commands are added; printed by every command
 const ROOT = __dirname;
 const VAULT_DIR = process.env.SIMPLEX_VAULT_DIR ? path.resolve(process.env.SIMPLEX_VAULT_DIR) : path.join(ROOT, 'vault');
 const ACCOUNTS_DIR = path.join(VAULT_DIR, 'accounts');
@@ -741,8 +741,82 @@ function cmdCheckSystem() {
   }
 }
 
+/* ---------- inspect: what IS this file? ----------
+   When a recovered database reports "no accounts table", the question is which
+   of several very different things went wrong: an empty file, a non-SQLite file,
+   a real database whose content is stranded in a WAL, or a real database that
+   simply belongs to something else. Guessing wastes the one shot you get at a
+   shadow copy, so look at the bytes. Read-only; opens only throwaway copies. */
+function cmdInspect() {
+  const src = positional[0];
+  if (!src) die('usage: node rescue.js inspect <path-to-a-file>');
+  if (!fs.existsSync(src)) die('no file at ' + src);
+
+  const st = fs.statSync(src);
+  console.log('\n  file    : ' + src);
+  console.log('  size    : ' + st.size + ' bytes (' + fmtSize(st.size) + ')');
+  console.log('  mtime   : ' + mtime(src) + '  (UTC — Windows shows local time)');
+
+  if (st.size === 0) {
+    console.log('\n  EMPTY FILE. Nothing was copied, or the source really is 0 bytes.');
+    console.log('  Re-copy it, and check the source with: dir "<source folder>"\n');
+    return;
+  }
+
+  const head = Buffer.alloc(Math.min(16, st.size));
+  const fd = fs.openSync(src, 'r');
+  try { fs.readSync(fd, head, 0, head.length, 0); } finally { fs.closeSync(fd); }
+  const isSqlite = head.toString('latin1').startsWith('SQLite format 3');
+  console.log('  header  : ' + JSON.stringify(head.toString('latin1')) + (isSqlite ? '   <- valid SQLite' : '   <- NOT a SQLite database'));
+  if (!isSqlite) {
+    if (st.size === 32) console.log('\n  32 bytes and not SQLite — this looks like a master KEY, not a database.\n');
+    else console.log('\n  Whatever this is, it is not a database. Check what you actually copied.\n');
+    return;
+  }
+
+  for (const suffix of ['-wal', '-shm']) {
+    const p = src + suffix;
+    console.log('  ' + suffix.slice(1) + '     : ' + (fs.existsSync(p) ? fs.statSync(p).size + ' bytes, mtime ' + mtime(p) : 'absent'));
+  }
+
+  // Tables, read two ways: the db alone, then the db with whatever WAL sits beside
+  // it. A database whose tables appear only in the second is one whose content is
+  // stranded in the WAL — copy the pair or you copy nothing.
+  const work = path.join(VAULT_DIR, 'rescue-backups', 'inspect-' + Date.now());
+  const listTables = (withSiblings, label) => {
+    const dir = path.join(work, label.replace(/\W+/g, '-'));
+    fs.mkdirSync(dir, { recursive: true });
+    const dst = path.join(dir, 'db.sqlite');
+    fs.copyFileSync(src, dst);
+    if (withSiblings) for (const suffix of ['-wal', '-shm']) {
+      if (fs.existsSync(src + suffix)) fs.copyFileSync(src + suffix, dst + suffix);
+    }
+    let db;
+    try { db = new Database(dst); } catch (e) { console.log('    ' + label + ': cannot open — ' + e.message); return; }
+    try {
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(r => r.name);
+      if (!tables.length) { console.log('    ' + label + ': no tables at all'); }
+      else {
+        console.log('    ' + label + ': ' + tables.length + ' table(s)');
+        for (const t of tables) {
+          let n = '?';
+          try { n = db.prepare('SELECT COUNT(*) c FROM "' + t + '"').get().c; } catch (e) {}
+          console.log('        ' + t.padEnd(24) + n + ' row(s)');
+        }
+      }
+    } catch (e) { console.log('    ' + label + ': ' + e.message); }
+    db.close();
+  };
+  console.log('\n  contents:');
+  listTables(false, 'db alone');
+  console.log('');
+  listTables(true, 'db + its wal');
+  console.log('\n  (both read from throwaway copies under ' + work + ')\n');
+}
+
 switch (cmd) {
   case 'scan': cmdScan(); break;
+  case 'inspect': cmdInspect(); break;
   case 'check-system': cmdCheckSystem(); break;
   case 'names': cmdNames(); break;
   case 'wal-check': cmdWalCheck(); break;
@@ -761,7 +835,8 @@ switch (cmd) {
     console.log('  node rescue.js names <id> [--key <k>]        decrypt filenames — tells you WHICH vault a folder is');
     console.log('  node rescue.js wal-check                    does the surviving -wal hold the old account rows?');
     console.log('  node rescue.js find-keys [dir...]           hunt for a master key on disk and test it');
-    console.log('  node rescue.js check-system <path>          is this recovered system.sqlite the right one?\n');
+    console.log('  node rescue.js check-system <path>          is this recovered system.sqlite the right one?');
+    console.log('  node rescue.js inspect <path>               what IS this file? size, header, tables\n');
     console.log('  scan / try-key / orphan-blobs never write. adopt backs up system.sqlite first.');
     console.log('  Nothing in this tool deletes anything.\n');
 }
