@@ -219,9 +219,24 @@ function cmdScan() {
   console.log('SYSTEM DB (accounts / logins)');
   console.log('  path   : ' + SYSTEM_DB_PATH);
   console.log('  exists : ' + fs.existsSync(SYSTEM_DB_PATH) + (fs.existsSync(SYSTEM_DB_PATH) ? '   mtime ' + mtime(SYSTEM_DB_PATH) : ''));
+  let walNewer = false;
   for (const suffix of ['-wal', '-shm']) {
     const p = SYSTEM_DB_PATH + suffix;
-    if (fs.existsSync(p)) console.log('  ' + suffix.slice(1) + '    : present, mtime ' + mtime(p) + (mtime(p) !== mtime(SYSTEM_DB_PATH) ? '   <- OLDER/NEWER than the db: may hold pre-copy rows' : ''));
+    if (!fs.existsSync(p)) continue;
+    let newer = false;
+    try { newer = fs.statSync(p).mtimeMs > fs.statSync(SYSTEM_DB_PATH).mtimeMs + 1000; } catch (e) {}
+    if (newer) walNewer = true;
+    console.log('  ' + suffix.slice(1) + '    : present, mtime ' + mtime(p) + (newer ? '   <- NEWER than the db itself' : ''));
+  }
+  if (walNewer) {
+    console.log('');
+    console.log('  !! The -wal is NEWER than system.sqlite. That is the signature of a file');
+    console.log('     copy dropping a database in underneath a WAL the running server was');
+    console.log('     still writing — the two no longer belong together.');
+    console.log('     SQLite REPLAYS a WAL on open, and replaying a foreign one can leave the');
+    console.log('     database unreadable. Do not start the server until you have run:');
+    console.log('         node rescue.js wal-check');
+    console.log('     It tests both combinations on COPIES and tells you which is real.');
   }
   const accounts = new Map();
   const sysdb = openRO(SYSTEM_DB_PATH);
@@ -454,8 +469,207 @@ function cmdOrphanBlobs() {
   }
 }
 
+/* ---------- names: decrypt v1 filenames, to identify WHICH vault a folder came from ----------
+   When two vaults have been mixed together, the fastest way to tell which is
+   which is to read the filenames back and look at them. v1 names need only the
+   master key; v2 names stay sealed without the account row, and are reported as
+   such rather than silently skipped. */
+function cmdNames() {
+  const id = positional[0];
+  if (!id) die('usage: node rescue.js names <accountId> [--limit N] [--key <hex|file>]');
+  const dbPath = path.join(ACCOUNTS_DIR, id, 'simplex.sqlite');
+  const db = openRO(dbPath);
+  if (!db) die('no metadata db at ' + dbPath);
+  if (db._err) die(db._err);
+
+  let key;
+  const kArg = opt('key');
+  if (kArg) {
+    if (fs.existsSync(kArg) && fs.statSync(kArg).isFile()) {
+      const buf = fs.readFileSync(kArg);
+      key = buf.length === 32 ? buf : vault.decodeKeyString(buf.toString('utf8'));
+    } else key = vault.decodeKeyString(kArg);
+    if (!key || key.length !== 32) die('could not read a 32-byte key from --key');
+  } else {
+    try { const i = vault.readExistingMasterKey(VAULT_DIR); key = i && i.key; } catch (e) { die(e.message); }
+    if (!key) die('no master key installed; pass one with --key');
+  }
+
+  const limit = Math.max(1, Number(opt('limit')) || 60);
+  const keys = { v1: vault.makeKeyring(key)(id), v2: null };
+  const rows = db.prepare('SELECT name, type, size, COALESCE(kv,1) kv FROM files ORDER BY size DESC LIMIT ?').all(limit);
+  db.close();
+
+  console.log('\n  ' + id + '  — largest ' + rows.length + ' entries, names decrypted with key ' + fingerprint(key) + '\n');
+  let sealed = 0;
+  for (const r of rows) {
+    const nm = vault.decText(r.name, keys);
+    const readable = typeof nm === 'string' && !nm.startsWith('enc');
+    if (!readable) sealed++;
+    console.log('    ' + (readable ? nm : '[sealed — ' + (r.kv === 2 ? 'per-user key, needs the original account row' : 'wrong master key') + ']')
+      + '   ' + r.type + '  ' + fmtSize(r.size));
+  }
+  if (sealed) console.log('\n  ' + sealed + '/' + rows.length + ' names could not be decrypted.');
+  console.log('');
+}
+
+/* ---------- wal-check: does the surviving -wal hold pre-copy account rows? ----------
+   A file copy replaces system.sqlite but often leaves the running server's
+   -wal/-shm behind (they exist only while the db is live, so the source vault
+   frequently has none to copy over). A WAL written AFTER the db file it sits
+   next to is the giveaway. SQLite replays a WAL on open, so we never test this
+   in place — we test on COPIES, twice: the db alone, then the db with its WAL.
+   If the second one has accounts the first doesn't, the WAL is holding them. */
+function cmdWalCheck() {
+  if (!fs.existsSync(SYSTEM_DB_PATH)) die('no system.sqlite at ' + SYSTEM_DB_PATH);
+  const work = path.join(VAULT_DIR, 'rescue-backups', 'wal-check-' + Date.now());
+  const bare = path.join(work, 'bare'), withWal = path.join(work, 'with-wal');
+  fs.mkdirSync(bare, { recursive: true });
+  fs.mkdirSync(withWal, { recursive: true });
+
+  fs.copyFileSync(SYSTEM_DB_PATH, path.join(bare, 'system.sqlite'));
+  for (const suffix of ['', '-wal', '-shm']) {
+    const p = SYSTEM_DB_PATH + suffix;
+    if (fs.existsSync(p)) fs.copyFileSync(p, path.join(withWal, 'system.sqlite' + suffix));
+  }
+  console.log('\n  working on copies in ' + work);
+  console.log('  (the real vault files are not touched)\n');
+
+  const readAccounts = (dir, label) => {
+    const f = path.join(dir, 'system.sqlite');
+    let db;
+    // opened read-write on purpose: that is what makes SQLite replay the WAL.
+    // It is a throwaway copy, so recovery can do whatever it likes to it.
+    try { db = new Database(f); } catch (e) { console.log('  ' + label + ': cannot open — ' + e.message); return null; }
+    let out = null;
+    try {
+      if (!tableExists(db, 'accounts')) { console.log('  ' + label + ': no accounts table'); }
+      else {
+        out = db.prepare('SELECT id, username, is_admin, key_enrolled FROM accounts ORDER BY username').all();
+        console.log('  ' + label + ': ' + out.length + ' account(s)');
+        for (const a of out) console.log('      ' + a.id + '  ' + String(a.username).padEnd(16) + (a.is_admin ? 'admin ' : 'member') + (a.key_enrolled ? '  per-user key ENROLLED' : ''));
+      }
+    } catch (e) { console.log('  ' + label + ': ' + e.message); }
+    db.close();
+    return out;
+  };
+
+  const a = readAccounts(bare, 'db WITHOUT its wal');
+  console.log('');
+  const b = readAccounts(withWal, 'db WITH the surviving wal');
+
+  const ids = (list) => new Set((list || []).map(r => r.id));
+  const A = ids(a), B = ids(b);
+  const extra = [...B].filter(x => !A.has(x));
+  console.log('');
+  if (extra.length) {
+    console.log('  *** THE WAL HOLDS ' + extra.length + ' ACCOUNT ROW(S) THE DATABASE FILE DOES NOT ***');
+    for (const e of extra) console.log('      ' + e);
+    console.log('\n  This is the best possible outcome: those rows carry the wrapped per-user');
+    console.log('  keys. Recover them by keeping system.sqlite AND its -wal together —');
+    console.log('  copy the recovered pair in ' + withWal);
+    console.log('  over vault/system.sqlite (+ -wal) with the server STOPPED.\n');
+  } else if (b === null && a) {
+    console.log('  *** DANGER: replaying that WAL DESTROYED the copy — the accounts table');
+    console.log('      became unreadable. The WAL belongs to a DIFFERENT database file.');
+    console.log('      SQLite replays a WAL automatically on open, so starting the server');
+    console.log('      now would do this to your REAL system.sqlite.');
+    console.log('      With the server stopped, move the stray files aside FIRST:');
+    console.log('          rename vault\\system.sqlite-wal system.sqlite-wal.foreign');
+    console.log('          rename vault\\system.sqlite-shm system.sqlite-shm.foreign');
+    console.log('      Keep them — they are still evidence, and may be readable beside');
+    console.log('      the database they actually came from if you find it.\n');
+  } else {
+    console.log('  The WAL adds no accounts — it belongs to the database now in place,');
+    console.log('  or SQLite discarded it as foreign. The original rows are not here.\n');
+  }
+}
+
+/* ---------- find-keys: hunt for a master key anywhere and test it against the data ----------
+   A master key is 32 raw bytes, or a hex/base64 dump of them. Old installs,
+   `key.js backup` output, a copied app folder, a USB stick — any of them may
+   hold the original. Every candidate is tested against the actual encrypted
+   filenames, which is the only proof that matters. */
+function cmdFindKeys() {
+  const roots = positional.length ? positional : [path.parse(process.cwd()).root];
+  const maxFiles = Number(opt('max-files')) || 400000;
+  const SKIP = /^(node_modules|\.git|Windows|WinSxS|\$Recycle\.Bin|System Volume Information|AppData\\Local\\Temp)$/i;
+
+  console.log('\n  searching for candidate master keys under:');
+  for (const r of roots) console.log('    ' + r);
+  console.log('  (32-byte files, and small files whose name mentions "key")\n');
+
+  const candidates = [];
+  let seen = 0, stop = false;
+  const walk = (d, depth) => {
+    if (stop || depth > 12) return;
+    let ents; try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+    for (const e of ents) {
+      if (stop) return;
+      if (e.isSymbolicLink()) continue;
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { if (!SKIP.test(e.name)) walk(p, depth + 1); continue; }
+      if (++seen > maxFiles) { stop = true; console.log('  (stopped at ' + maxFiles + ' files — narrow the search with a path argument)'); return; }
+      let st; try { st = fs.statSync(p); } catch (_) { continue; }
+      const nameHints = /key/i.test(e.name);
+      if (st.size === 32) candidates.push({ p, how: 'raw 32 bytes' });
+      else if (nameHints && st.size > 0 && st.size <= 4096) candidates.push({ p, how: 'name mentions "key"' });
+    }
+  };
+  for (const r of roots) walk(r, 0);
+
+  console.log('  scanned ' + seen + ' files, ' + candidates.length + ' candidate(s)\n');
+  if (!candidates.length) { console.log('  nothing to test.\n'); return; }
+
+  // the folders worth testing against: those with v1-encrypted names
+  const folders = [];
+  for (const id of fs.readdirSync(ACCOUNTS_DIR, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name)) {
+    const db = openRO(path.join(ACCOUNTS_DIR, id, 'simplex.sqlite'));
+    if (!db || db._err) continue;
+    let has = false;
+    try { has = !!db.prepare("SELECT 1 FROM files WHERE name LIKE 'enc:%' LIMIT 1").get(); } catch (_) {}
+    db.close();
+    if (has) folders.push(id);
+  }
+  if (!folders.length) { console.log('  no folder has v1-encrypted names to test a key against.\n'); return; }
+  console.log('  testing against: ' + folders.join(', ') + '\n');
+
+  const tried = new Set();
+  let found = 0;
+  for (const c of candidates) {
+    let key = null;
+    try {
+      const buf = fs.readFileSync(c.p);
+      key = buf.length === 32 ? buf : vault.decodeKeyString(buf.toString('utf8').trim());
+    } catch (_) { continue; }
+    if (!key || key.length !== 32) continue;
+    const fp = fingerprint(key);
+    if (tried.has(fp)) continue;
+    tried.add(fp);
+    const opens = [];
+    for (const id of folders) {
+      const db = openRO(path.join(ACCOUNTS_DIR, id, 'simplex.sqlite'));
+      if (!db || db._err) continue;
+      const r = keyOpensAccount(key, id, db);
+      db.close();
+      if (r && r.match) opens.push(id);
+    }
+    if (opens.length) {
+      found++;
+      console.log('  *** ' + fp + '  opens ' + opens.join(', '));
+      console.log('      ' + c.p + '   (' + c.how + ')');
+    }
+  }
+  console.log('');
+  if (!found) console.log('  none of the candidates decrypt anything here.\n');
+  else console.log('  Install the one that opens the folders you care about:\n      node key.js restore "<path>" --force\n');
+}
+
 switch (cmd) {
   case 'scan': cmdScan(); break;
+  case 'names': cmdNames(); break;
+  case 'wal-check': cmdWalCheck(); break;
+  case 'find-keys': cmdFindKeys(); break;
   case 'try-key': cmdTryKey(); break;
   case 'adopt': cmdAdopt(); break;
   case 'orphan-blobs': cmdOrphanBlobs(); break;
@@ -465,7 +679,10 @@ switch (cmd) {
     console.log('  node rescue.js try-key <hex|file>            test a candidate master key against the data');
     console.log('  node rescue.js adopt <id> --username <u> --password <p> [--admin]');
     console.log('                                              rebuild a login for a surviving folder');
-    console.log('  node rescue.js orphan-blobs <id>            blobs the metadata db lost track of\n');
+    console.log('  node rescue.js orphan-blobs <id>            blobs the metadata db lost track of');
+    console.log('  node rescue.js names <id> [--key <k>]        decrypt filenames — tells you WHICH vault a folder is');
+    console.log('  node rescue.js wal-check                    does the surviving -wal hold the old account rows?');
+    console.log('  node rescue.js find-keys [dir...]           hunt for a master key on disk and test it\n');
     console.log('  scan / try-key / orphan-blobs never write. adopt backs up system.sqlite first.');
     console.log('  Nothing in this tool deletes anything.\n');
 }
