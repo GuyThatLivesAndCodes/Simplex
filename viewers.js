@@ -220,7 +220,13 @@ async function openVideo(id) {
   clock.onstate = (p) => playBtn.innerHTML = svg(p ? 'pause' : 'play', 18);
   clock.play();
   playBtn.onclick = () => clock.toggle();
-  el.querySelector('#vframe').addEventListener('click', e => { if (e.target.closest('.controls')) return; clock.toggle(); });
+  // click the picture to play/pause — but only the FIRST click of a burst, so the
+  // triple-click fullscreen gesture below can cleanly undo it (see the wiring there).
+  el.querySelector('#vframe').addEventListener('click', e => {
+    if (e.target.closest('.controls')) return;
+    if (e.detail > 1) return;
+    clock.toggle();
+  });
   scrubWire(el.querySelector('#vscrub'), clock);
   el.querySelector('#vback').onclick = () => { clock.seekBy(-10); toast('-10s', 'back'); };
   el.querySelector('#vfwd').onclick = () => { clock.seekBy(10); toast('+10s', 'next'); };
@@ -237,7 +243,17 @@ async function openVideo(id) {
     el.querySelector('#vmute').onclick = () => toast('Demo clip — no audio track');
   }
   const frame = el.querySelector('#vframe');
-  el.querySelector('#vfull').onclick = () => { frame.requestFullscreen ? frame.requestFullscreen() : toast('Fullscreen unavailable'); };
+  /* Enter/leave fullscreen with the easing zoom. Leaving plays the shrink
+     animation on the frame after the browser has already restored the layout,
+     so the video appears to settle back into the page instead of snapping. */
+  function enterFs() {
+    if (!frame.requestFullscreen) return void toast('Fullscreen unavailable');
+    frame.classList.remove('fs-leaving');
+    frame.requestFullscreen().catch(() => toast('Fullscreen unavailable'));
+  }
+  function exitFs() { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); }
+  function toggleFs() { document.fullscreenElement === frame ? exitFs() : enterFs(); }
+  el.querySelector('#vfull').onclick = toggleFs;
   // minimize: hand the live <video> to the persistent mini-player so it keeps
   // playing while you use the rest of the site (cleanup below skips releasing it)
   const minBtn = el.querySelector('#vmin');
@@ -254,36 +270,72 @@ async function openVideo(id) {
     closeViewer();
   };
 
-  // ---- fullscreen: bare video, no cursor, no UI; space/click = pause, Esc = exit ----
+  // ---- fullscreen ----
+  // The controls stay on screen in fullscreen and fade out after 3 seconds of no
+  // pointer movement. A paused video keeps them up indefinitely — if you've stopped
+  // to look at a frame, the scrubber is exactly what you want in reach.
+  const FS_IDLE_MS = 3000;
   function isFs() { return document.fullscreenElement === frame; }
-  // idle-cursor: show cursor briefly on move, then hide while in fullscreen
   let idleTimer = null;
-  function onFsMove() {
-    if (!isFs()) return;
-    frame.classList.remove('cursor-hidden');
+  function fsShowUI() {
+    frame.classList.remove('ui-hidden', 'cursor-hidden');
     clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => { if (isFs()) frame.classList.add('cursor-hidden'); }, 1800);
+    if (!isFs()) return;
+    if (media && media.paused) return;          // paused: UI stays up, no timer
+    idleTimer = setTimeout(() => {
+      if (!isFs() || (media && media.paused)) return;
+      frame.classList.add('ui-hidden', 'cursor-hidden');
+    }, FS_IDLE_MS);
   }
+  function onFsMove() { if (isFs()) fsShowUI(); }
   function onFsChange() {
     if (isFs()) {
-      frame.classList.add('fs-active');
+      frame.classList.remove('fs-leaving');
       frame.addEventListener('mousemove', onFsMove);
-      onFsMove();
+      frame.addEventListener('pointerdown', onFsMove);
+      fsShowUI();
     } else {
-      frame.classList.remove('fs-active', 'cursor-hidden');
       frame.removeEventListener('mousemove', onFsMove);
+      frame.removeEventListener('pointerdown', onFsMove);
+      frame.classList.remove('ui-hidden', 'cursor-hidden');
       clearTimeout(idleTimer);
+      // play the shrink-back easing, then clean the class off
+      frame.classList.add('fs-leaving');
+      setTimeout(() => frame.classList.remove('fs-leaving'), 300);
     }
+  }
+  // pausing must bring the UI straight back (and cancel any pending fade)
+  if (media) {
+    media.addEventListener('pause', fsShowUI);
+    media.addEventListener('play', fsShowUI);
   }
   // space toggles play only while fullscreen (so it doesn't fight the editor etc.)
   function onFsKey(e) {
     if (!isFs()) return;
-    if (e.key === ' ' || e.code === 'Space') { e.preventDefault(); clock.toggle(); onFsMove(); }
+    if (e.key === ' ' || e.code === 'Space') { e.preventDefault(); clock.toggle(); fsShowUI(); }
     // Esc is handled natively by the browser to exit fullscreen; we stop it from
     // also closing the viewer (see the guarded global Esc handler below).
   }
+  // f toggles fullscreen from anywhere in the video viewer (ignored while typing)
+  function onFsHotkey(e) {
+    if (/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName)) return;
+    if (e.key === 'f' || e.key === 'F') { e.preventDefault(); toggleFs(); }
+  }
   document.addEventListener('fullscreenchange', onFsChange);
   window.addEventListener('keydown', onFsKey);
+  window.addEventListener('keydown', onFsHotkey);
+
+  // Triple-click the picture toggles fullscreen — in if you're watching windowed,
+  // out if you're already fullscreen. The first click of the burst has already
+  // flipped play/pause, so the second click puts that back; by the third we're
+  // in the same play state we started in and can just switch modes.
+  frame.addEventListener('click', (e) => {
+    if (e.target.closest('.controls')) return;
+    if (e.detail === 2) { clock.toggle(); return; }      // undo the first click's play/pause
+    if (e.detail !== 3) return;
+    toggleFs();
+    fsShowUI();
+  });
 
   // arrow keys seek ±10s while the video viewer is open (ignored when typing)
   function onSeekKey(e) {
@@ -297,6 +349,7 @@ async function openVideo(id) {
     if (!handedOff) clock.destroy();   // when minimized, keep the <video> alive in the mini-player
     document.removeEventListener('fullscreenchange', onFsChange);
     window.removeEventListener('keydown', onFsKey);
+    window.removeEventListener('keydown', onFsHotkey);
     window.removeEventListener('keydown', onSeekKey);
     clearTimeout(idleTimer);
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});

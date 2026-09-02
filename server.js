@@ -288,7 +288,7 @@ async function runVaultReencrypt(store, accountId) {
 }
 
 /* ---------- column model (per-account files table) ---------- */
-const COLS = ['id', 'name', 'type', 'parent', 'size', 'date', 'trashed', 'starred',
+const COLS = ['id', 'name', 'type', 'parent', 'size', 'date', 'trashed', 'trashedAt', 'starred',
   'content', 'lang', 'dur', 'w', 'h', 'artist', 'album', 'locked', 'lockSpec', 'hasBlob', 'storedExt',
   'hasCover', 'coverExt', 'tags', 'kv'];
 const TEXT_COLS = ['name', 'content', 'artist', 'album', 'lockSpec'];   // encrypted at rest
@@ -297,7 +297,7 @@ const FILES_SCHEMA = `
 CREATE TABLE IF NOT EXISTS files (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, parent TEXT,
   size INTEGER NOT NULL DEFAULT 0, date INTEGER NOT NULL,
-  trashed INTEGER NOT NULL DEFAULT 0, starred INTEGER NOT NULL DEFAULT 0,
+  trashed INTEGER NOT NULL DEFAULT 0, trashedAt INTEGER, starred INTEGER NOT NULL DEFAULT 0,
   content TEXT, lang TEXT, dur REAL, w INTEGER, h INTEGER, artist TEXT, album TEXT,
   locked INTEGER NOT NULL DEFAULT 0, lockSpec TEXT,
   hasBlob INTEGER NOT NULL DEFAULT 0, storedExt TEXT,
@@ -307,13 +307,16 @@ CREATE TABLE IF NOT EXISTS files (
 );
 CREATE INDEX IF NOT EXISTS idx_files_parent ON files(parent);
 CREATE INDEX IF NOT EXISTS idx_files_type   ON files(type);
+CREATE INDEX IF NOT EXISTS idx_files_trashed ON files(trashed);
+CREATE INDEX IF NOT EXISTS idx_files_star   ON files(starred);
+CREATE INDEX IF NOT EXISTS idx_files_date   ON files(date);
 `;
 
 function rowForInsert(o) {
   return {
     id: o.id, name: o.name, type: o.type, parent: o.parent ?? null,
     size: o.size ?? 0, date: o.date ?? Date.now(),
-    trashed: o.trashed ? 1 : 0, starred: o.starred ? 1 : 0,
+    trashed: o.trashed ? 1 : 0, trashedAt: o.trashedAt ?? null, starred: o.starred ? 1 : 0,
     content: o.content ?? null, lang: o.lang ?? null, dur: o.dur ?? null,
     w: o.w ?? null, h: o.h ?? null, artist: o.artist ?? null, album: o.album ?? null,
     locked: o.locked ? 1 : 0, lockSpec: o.lockSpec ?? null,
@@ -1109,6 +1112,16 @@ function openStore(accountId) {
   // key generation of this row's artifacts (1 = legacy master-derived, 2 = per-user
   // UDK). Pre-existing rows default to 1 and surface in the UI as "Legacy".
   if (!have.has('kv')) db.exec('ALTER TABLE files ADD COLUMN kv INTEGER NOT NULL DEFAULT 1');
+  // when the row was moved to Trash (ms epoch). Drives per-account trash auto-deletion.
+  // Rows trashed before this column existed are backfilled to "now" the first time we
+  // see them, so an upgrade never nukes an old trash the user hasn't had a chance to see.
+  if (!have.has('trashedAt')) {
+    db.exec('ALTER TABLE files ADD COLUMN trashedAt INTEGER');
+    db.prepare('UPDATE files SET trashedAt = ? WHERE trashed = 1 AND trashedAt IS NULL').run(Date.now());
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_files_trashed ON files(trashed)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_files_star ON files(starred)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_files_date ON files(date)');
 
   /* Notes app (rich-text docs) + Code app (multi-file workspace). Text columns
      (title/body/name/content) are encrypted at rest with the account keys, same
@@ -1200,7 +1213,34 @@ function openStore(accountId) {
     all: db.prepare('SELECT * FROM files'),
     children: db.prepare('SELECT id, type FROM files WHERE parent = ?'),
     childRows: db.prepare('SELECT * FROM files WHERE parent = ?'),
-    used: db.prepare("SELECT COALESCE(SUM(size),0) n FROM files WHERE trashed = 0 AND type != 'folder'"),
+    // Trash counts toward the account's storage limit — the bytes are still on disk
+    // until the row is purged, so `used` spans trashed and live rows alike.
+    used: db.prepare("SELECT COALESCE(SUM(size),0) n FROM files WHERE type != 'folder'"),
+    usedLive: db.prepare("SELECT COALESCE(SUM(size),0) n FROM files WHERE trashed = 0 AND type != 'folder'"),
+    trashUsed: db.prepare("SELECT COALESCE(SUM(size),0) n, COUNT(*) c, MIN(trashedAt) oldest FROM files WHERE trashed = 1 AND type != 'folder'"),
+    trashCount: db.prepare('SELECT COUNT(*) c FROM files WHERE trashed = 1'),
+    // ---- scoped list queries (the client loads slices, never the whole table) ----
+    allFolders: db.prepare("SELECT * FROM files WHERE type = 'folder'"),
+    byParent: db.prepare('SELECT * FROM files WHERE parent IS ? AND trashed = 0'),
+    byType: db.prepare('SELECT * FROM files WHERE type = ? AND trashed = 0'),
+    byStarred: db.prepare('SELECT * FROM files WHERE starred = 1 AND trashed = 0'),
+    byTrashed: db.prepare('SELECT * FROM files WHERE trashed = 1'),
+    byIds: (ids) => ids.length ? db.prepare(`SELECT * FROM files WHERE id IN (${ids.map(() => '?').join(',')})`).all(...ids) : [],
+    recent: db.prepare("SELECT * FROM files WHERE trashed = 0 AND type != 'folder' ORDER BY date DESC LIMIT ?"),
+    withTags: db.prepare("SELECT * FROM files WHERE trashed = 0 AND tags IS NOT NULL AND tags != ''"),
+    // name search needs plaintext, so it decrypts as it scans — capped by the caller
+    searchRows: db.prepare("SELECT * FROM files WHERE trashed = 0"),
+    // ---- aggregates for the storage panel (SQL only; no row shipped to the client) ----
+    statTotals: db.prepare("SELECT COUNT(*) c, COALESCE(SUM(size),0) n FROM files WHERE trashed = 0 AND type != 'folder'"),
+    statByType: db.prepare("SELECT type, COUNT(*) c, COALESCE(SUM(size),0) n FROM files WHERE trashed = 0 AND type != 'folder' GROUP BY type"),
+    statByExt: db.prepare("SELECT LOWER(COALESCE(storedExt,'')) ext, type, COUNT(*) c, COALESCE(SUM(size),0) n FROM files WHERE trashed = 0 AND type != 'folder' GROUP BY ext, type ORDER BY n DESC"),
+    statFolders: db.prepare("SELECT COUNT(*) c FROM files WHERE trashed = 0 AND type = 'folder'"),
+    statRoot: db.prepare('SELECT COUNT(*) c FROM files WHERE parent IS NULL AND trashed = 0'),
+    childCounts: db.prepare('SELECT parent p, COUNT(*) c FROM files WHERE trashed = 0 AND parent IS NOT NULL GROUP BY parent'),
+    statStarred: db.prepare('SELECT COUNT(*) c FROM files WHERE starred = 1 AND trashed = 0'),
+    // ---- trash retention sweep ----
+    expiredTrash: db.prepare('SELECT * FROM files WHERE trashed = 1 AND trashedAt IS NOT NULL AND trashedAt <= ?'),
+    stampTrashed: db.prepare('UPDATE files SET trashedAt = ? WHERE trashed = 1 AND trashedAt IS NULL'),
     insert: db.prepare(`INSERT INTO files (${COLS.join(',')}) VALUES (${COLS.map(c => '@' + c).join(',')})`),
     del: db.prepare('DELETE FROM files WHERE id = ?'),
     sibRoot: db.prepare('SELECT id, name FROM files WHERE parent IS NULL AND trashed = 0'),
@@ -1306,6 +1346,19 @@ function openStore(accountId) {
     bump() { this.rev++; },
     getById: (id) => st.getById.get(id),
     usedBytes: () => st.used.get().n,
+    liveBytes: () => st.usedLive.get().n,
+    trashInfo: () => { const r = st.trashUsed.get(); return { bytes: r.n, files: r.c, oldest: r.oldest || null, count: st.trashCount.get().c }; },
+    /* folder -> live child count, as one grouped query memoized per revision. The
+       client no longer holds every row, so it can't count a folder's contents
+       itself; this rides along on folder rows in list responses. */
+    childCount: (id) => {
+      if (s._kidsRev !== s.rev) {
+        s._kids = new Map();
+        for (const r of st.childCounts.all()) s._kids.set(r.p, r.c);
+        s._kidsRev = s.rev;
+      }
+      return s._kids.get(id) || 0;
+    },
     blobPath: (row) => path.join(filesDir, row.id + '.enc'),
     coverPath: (row) => path.join(filesDir, row.id + '.cover.enc'),
     coverSmPath: (row) => path.join(filesDir, row.id + '.coversm.enc'),   // tiny low-res cover (progressive loading)
@@ -1595,6 +1648,7 @@ function rowToApi(row, store, includeContent = false) {
   for (const c of TEXT_COLS) if (out[c] != null) out[c] = vault.decText(out[c], store.keys);
   out.trashed = !!row.trashed;
   out.starred = !!row.starred;
+  if (!row.trashed) delete out.trashedAt;
   if (row.hasBlob) out.url = `/api/files/${row.id}/raw`;
   if (row.hasCover) out.coverUrl = `/api/files/${row.id}/cover`;
   // videos (with a real blob, not locked) can have a server-generated poster frame;
@@ -1613,7 +1667,8 @@ function rowToApi(row, store, includeContent = false) {
   delete out.hasIcon; delete out.iconExt;
   // key generation: the client badges kv=1 items as "Legacy" and gates
   // edit/download behind re-encryption. Folders carry no blob — omit.
-  if (row.type === 'folder') delete out.kv; else out.kv = row.kv || 1;
+  if (row.type === 'folder') { delete out.kv; out.kids = store.childCount ? store.childCount(row.id) : 0; }
+  else out.kv = row.kv || 1;
   // tags: stored as a JSON id-array; ship it as a real array (empty omitted to stay light)
   if (row.tags) { try { const t = JSON.parse(row.tags); if (Array.isArray(t) && t.length) out.tags = t; else delete out.tags; } catch (e) { delete out.tags; } }
   else delete out.tags;
@@ -2412,6 +2467,9 @@ function finishLogin(req, res, account, ip, pwWeak, keyInfo) {
   try { ipsSys.upsert.run({ account_id: account.id, ip, now: Date.now() }); } catch (e) {}
   const store = openStore(account.id);
   try { store.analyticsLog('session', null); } catch (e) {}   // record sign-in for the Analytics app
+  // an account that's been away for a while gets its expired Trash cleaned on the
+  // way in, so the storage meter is honest the moment the vault paints
+  setImmediate(() => sweepTrash(account.id, store, account));
   // keys: how the sign-in left the per-user key state. The recovery key is
   // NEVER sent here — it stays sealed server-side until explicitly revealed
   // from Settings (POST /api/keys/reveal).
@@ -2884,6 +2942,14 @@ app.patch('/api/accounts/me', requireAuth, (req, res) => {
   }
   // appearance prefs (accent / theme / fonts) — small JSON blob, validated + size-capped
   if (b.prefs && typeof b.prefs === 'object' && !Array.isArray(b.prefs)) {
+    // trash retention is a real policy knob, not just chrome — clamp it here so a
+    // hand-crafted request can't park files in the Trash forever (or purge instantly).
+    if ('trashRetentionDays' in b.prefs) {
+      const n = Number(b.prefs.trashRetentionDays);
+      b.prefs.trashRetentionDays = (n === 0) ? 0
+        : (Number.isFinite(n) && n > 0) ? Math.min(TRASH_RETENTION_MAX, Math.max(1, Math.round(n)))
+        : TRASH_RETENTION_DEFAULT;
+    }
     const json = JSON.stringify(b.prefs);
     if (json.length <= 4000) { fields.push('prefs = @prefs'); vals.prefs = json; }
   }
@@ -3298,8 +3364,93 @@ app.post('/api/signups/:id/reject', requireAdmin, (req, res) => {
 /* ============================================================
    FILES (per-account; req.store set by requireAuth gate)
    ============================================================ */
+/* ------------------------------------------------------------
+   FILE LIST — scoped, never "everything" unless explicitly asked.
+   The client loads slices on demand (the folder it's in, one category, the
+   trash, a search) so a 10k-file vault doesn't ship its whole table on open.
+   Supported scopes (one per request):
+     ?folders=1            every folder row (the tree skeleton — always small)
+     ?parent=<id|root>     live children of a folder
+     ?type=<t>             one library category
+     ?starred=1            starred items
+     ?trashed=1            the trash
+     ?tag=<id>             items carrying a tag
+     ?recent=<n>           the n most recently modified files
+     ?ids=a,b,c            specific rows (up to 500)
+     ?search=<q>[&scope=]  name/tag search, decrypted server-side, capped
+     (no params)           the full table — legacy/one-off consumers only
+   ------------------------------------------------------------ */
+const SEARCH_LIMIT = 500;
 app.get('/api/files', (req, res) => {
-  res.json(req.store.st.all.all().map(r => rowToApi(r, req.store)));
+  const store = req.store, q = req.query || {};
+  const ship = (rows) => res.json(rows.map(r => rowToApi(r, store)));
+
+  if (q.folders === '1' || q.folders === 'true') return ship(store.st.allFolders.all());
+  if (q.parent !== undefined) return ship(store.st.byParent.all(q.parent === 'root' || q.parent === '' ? null : String(q.parent)));
+  if (q.type) return ship(store.st.byType.all(String(q.type)));
+  if (q.starred === '1' || q.starred === 'true') return ship(store.st.byStarred.all());
+  if (q.trashed === '1' || q.trashed === 'true') { sweepTrash(req.accountId, store, req.account); return ship(store.st.byTrashed.all()); }
+  if (q.tag) {
+    const tag = String(q.tag);
+    return ship(store.st.withTags.all().filter(r => { try { return (JSON.parse(r.tags) || []).includes(tag); } catch (e) { return false; } }));
+  }
+  if (q.recent) return ship(store.st.recent.all(Math.min(200, Math.max(1, parseInt(q.recent, 10) || 12))));
+  if (q.ids) {
+    const ids = String(q.ids).split(',').map(x => x.trim()).filter(Boolean).slice(0, 500);
+    return ship(store.st.byIds(ids));
+  }
+  if (q.search != null) {
+    const needle = String(q.search).toLowerCase().trim();
+    if (!needle) return res.json([]);
+    // tags whose NAME matches — an item also hits if it carries one of them
+    const tagHits = new Set(store.tagsList().filter(t => String(t.name || '').toLowerCase().includes(needle)).map(t => t.id));
+    // optional folder scope: restrict to one subtree
+    let inScope = null;
+    if (q.scope) { const set = new Set(store.descendantIds(String(q.scope))); inScope = (id) => set.has(id); }
+    const out = [];
+    for (const r of store.st.searchRows.all()) {
+      if (inScope && !inScope(r.id)) continue;
+      let hit = String(store.decName(r) || '').toLowerCase().includes(needle);
+      if (!hit && tagHits.size && r.tags) { try { hit = (JSON.parse(r.tags) || []).some(id => tagHits.has(id)); } catch (e) {} }
+      if (hit) { out.push(r); if (out.length >= SEARCH_LIMIT) break; }
+    }
+    return ship(out);
+  }
+  ship(store.st.all.all());
+});
+
+/* Storage breakdown for the sidebar meter + its detail view. Pure SQL aggregates:
+   no file rows cross the wire, so this stays O(1) for the client no matter how
+   large the vault is. */
+app.get('/api/files/stats', (req, res) => {
+  const store = req.store;
+  sweepTrash(req.accountId, store, req.account);
+  const totals = store.st.statTotals.get();
+  const byType = {};
+  for (const r of store.st.statByType.all()) byType[r.type] = { count: r.c, bytes: r.n };
+  // storedExt is the on-disk extension; rows that predate it (or never had one)
+  // fall back to their kind so the breakdown never shows a table of dashes
+  const TYPE_LABEL = { video: 'Video', audio: 'Audio', image: 'Image', document: 'Document', model3d: 'Model', uasset: 'Asset' };
+  const byExt = store.st.statByExt.all()
+    .map(r => ({
+      ext: (r.ext || '').replace(/^\./, '').toUpperCase() || ((TYPE_LABEL[r.type] || 'Other') + ' (no ext)'),
+      type: r.type, count: r.c, bytes: r.n,
+    }))
+    .slice(0, 200);
+  const trash = store.trashInfo();
+  const days = trashRetentionDays(req.account);
+  res.json({
+    quota: req.account.quota_bytes,
+    used: store.usedBytes(),               // includes trash — it occupies real disk
+    live: store.liveBytes(),
+    files: totals.c, bytes: totals.n,
+    folders: store.st.statFolders.get().c,
+    rootItems: store.st.statRoot.get().c,
+    starred: store.st.statStarred.get().c,
+    byType, byExt,
+    trash: { count: trash.count, files: trash.files, bytes: trash.bytes, oldest: trash.oldest },
+    trashRetentionDays: days, trashRetentionMax: TRASH_RETENTION_MAX, trashRetentionDefault: TRASH_RETENTION_DEFAULT,
+  });
 });
 /* Full document body for a content-backed doc (the list omits it to stay light).
    Blob-backed docs fetch their text from /raw instead; this is only for docs whose
@@ -4466,13 +4617,72 @@ app.put('/api/files/:id/tags', (req, res) => {
   res.json(out);
 });
 
+/* ============================================================
+   TRASH AUTO-DELETION
+   ------------------------------------------------------------
+   Each account keeps a retention window (prefs.trashRetentionDays). Anything
+   sitting in the Trash longer than that is purged for real — row, blob, cover,
+   poster, icon and any share pointing at it. Default 15 days, hard max 60,
+   0 = never auto-delete. The sweep runs at boot, hourly, and whenever the owner
+   signs in or opens their Trash, so a long-idle account still gets cleaned the
+   moment it comes back.
+   ============================================================ */
+const TRASH_RETENTION_DEFAULT = 15;
+const TRASH_RETENTION_MAX = 60;
+/* read + clamp an account's retention window. Returns 0 for "never". */
+function trashRetentionDays(account) {
+  let prefs = null;
+  if (account && account.prefs) { try { prefs = JSON.parse(account.prefs); } catch (e) {} }
+  const raw = prefs && prefs.trashRetentionDays;
+  if (raw === 0 || raw === '0' || raw === false) return 0;      // explicit "never"
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return TRASH_RETENTION_DEFAULT;
+  return Math.min(TRASH_RETENTION_MAX, Math.max(1, Math.round(n)));
+}
+/* Purge every trashed row past the window. Returns the number of files removed. */
+function sweepTrash(accountId, store, account) {
+  try {
+    const acct = account || sysStmt.getAcct.get(accountId);
+    if (!acct) return 0;
+    const days = trashRetentionDays(acct);
+    if (!days) return 0;
+    const st = store || openStore(accountId);
+    st.st.stampTrashed.run(Date.now());          // legacy rows trashed before trashedAt existed
+    const cutoff = Date.now() - days * 86400000;
+    const rows = st.st.expiredTrash.all(cutoff);
+    if (!rows.length) return 0;
+    st.db.transaction((arr) => {
+      for (const r of arr) {
+        st.unlinkBlob(r); st.unlinkCover(r);
+        st.st.del.run(r.id);
+        sysStmt.delSharesForFile.run(st.id, r.id);
+        try { st.suggestionDelete(r.id); } catch (e) {}
+      }
+    })(rows);
+    st.bump();
+    invalidatePollCache(accountId);
+    console.log(`[simplex] trash sweep: purged ${rows.length} item(s) for ${acct.username} (older than ${days}d)`);
+    return rows.length;
+  } catch (e) {
+    console.error('trash sweep failed for', accountId, e && e.message);
+    return 0;
+  }
+}
+/* Sweep every account. Cheap: one indexed query per account when nothing expired. */
+function sweepAllTrash() {
+  for (const a of sysStmt.listAccts.all()) sweepTrash(a.id, null, a);
+}
+setTimeout(() => runTracked('trashSweep', sweepAllTrash), 30_000).unref();                  // once shortly after boot
+setInterval(() => runTracked('trashSweep', sweepAllTrash), 60 * 60 * 1000).unref();          // then hourly
+
 /* ---------- trash / restore / delete (cascade) ---------- */
 function cascade(store, id) { const row = store.getById(id); return [id, ...(row && row.type === 'folder' ? store.descendantIds(id) : [])]; }
 app.post('/api/files/:id/trash', (req, res) => {
   const store = req.store; if (!store.getById(req.params.id)) return res.status(404).json({ error: 'not found' });
   const ids = cascade(store, req.params.id);
-  const stmt = store.db.prepare('UPDATE files SET trashed = 1 WHERE id = ?');
-  store.db.transaction((a) => a.forEach(i => stmt.run(i)))(ids);
+  const now = Date.now();
+  const stmt = store.db.prepare('UPDATE files SET trashed = 1, trashedAt = ? WHERE id = ?');
+  store.db.transaction((a) => a.forEach(i => stmt.run(now, i)))(ids);
   store.bump();
   invalidatePollCache(req.accountId);
   res.json({ ok: true, ids });
@@ -4480,7 +4690,7 @@ app.post('/api/files/:id/trash', (req, res) => {
 app.post('/api/files/:id/restore', (req, res) => {
   const store = req.store; if (!store.getById(req.params.id)) return res.status(404).json({ error: 'not found' });
   const ids = cascade(store, req.params.id);
-  const stmt = store.db.prepare('UPDATE files SET trashed = 0 WHERE id = ?');
+  const stmt = store.db.prepare('UPDATE files SET trashed = 0, trashedAt = NULL WHERE id = ?');
   store.db.transaction((a) => a.forEach(i => stmt.run(i)))(ids);
   store.bump();
   invalidatePollCache(req.accountId);

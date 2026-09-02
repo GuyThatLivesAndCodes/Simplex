@@ -100,22 +100,188 @@ function uid() { return 'f' + Math.random().toString(36).slice(2, 9); }
 const _shareMatch = location.pathname.match(/^\/s\/([A-Za-z0-9_-]+)\/?$/);
 const SHARE = { active: !!_shareMatch, token: _shareMatch ? _shareMatch[1] : null, root: null, allowDownload: true, invalid: false };
 
-/* ---- persistence ---- */
+/* ============================================================
+   PERSISTENCE — a LAZY, scoped mirror of the server's file table
+   ------------------------------------------------------------
+   We used to pull every row on open. On a 10k-file vault that's megabytes of
+   JSON, thousands of server-side decrypts and a browser tab that stalls (or
+   dies) before the first paint. Instead:
+
+     - DB.files is a *cache*, not the table. It holds only the rows some view
+       has actually asked for, indexed by id for O(1) lookups.
+     - ensureScope('t:video') / ensureScope('p:<folderId>') / … fetch exactly
+       one slice and merge it in. A scope is fetched once, then served from
+       memory until a mutation invalidates it.
+     - Counts and byte totals never come from the cache — they come from
+       /api/files/stats, which the server answers with SQL aggregates.
+     - The folder skeleton (every folder row) IS loaded up front: it's what
+       breadcrumbs, the move dialog and pins need, and it's tiny next to the
+       file rows it used to drag along.
+   ============================================================ */
 let DB = null;
+const DBIDX = new Map();            // id -> record (authoritative lookup index)
+const LOADED = new Set();           // scope keys already merged into the cache
+const _scopeFetches = new Map();    // scope key -> in-flight Promise (dedupe)
+
+function _dbReindex() { DBIDX.clear(); for (const f of DB.files) DBIDX.set(f.id, f); }
+/* insert-or-replace one record, keeping the index in step */
+function dbUpsert(rec) {
+  if (!rec || !rec.id || !DB) return rec;
+  const cur = DBIDX.get(rec.id);
+  if (cur) { const i = DB.files.indexOf(cur); if (i >= 0) DB.files[i] = rec; else DB.files.push(rec); }
+  else DB.files.push(rec);
+  DBIDX.set(rec.id, rec);
+  bumpStats();
+  return rec;
+}
+function dbUpsertAll(rows) { for (const r of rows) dbUpsert(r); }
+/* Any local mutation makes the storage aggregates stale. Re-pull them (debounced,
+   so a 200-file upload costs one request) and repaint the meter. */
+let _statsBump = null, _mergingScope = false;
+function bumpStats() {
+  if (SHARE.active || _mergingScope) return;   // a scope load isn't a change, it's a read
+  clearTimeout(_statsBump);
+  _statsBump = setTimeout(() => {
+    loadStats(true).then(() => { if (typeof renderStorage === 'function') renderStorage(); });
+  }, 600);
+}
+function dbRemove(ids) {
+  const kill = ids instanceof Set ? ids : new Set([].concat(ids));
+  DB.files = DB.files.filter(f => !kill.has(f.id));
+  for (const id of kill) DBIDX.delete(id);
+}
+
+/* Scope registry: key -> { url, keep } where keep(row) says which cached rows
+   this scope owns. After a fetch we drop owned rows the server didn't return,
+   so deletions made elsewhere don't linger in the cache. */
+function _scopeDef(key) {
+  const i = key.indexOf(':');
+  const kind = i < 0 ? key : key.slice(0, i + 1);   // 'folders' | 'p:' | 't:' | …
+  const arg = i < 0 ? '' : key.slice(i + 1);
+  switch (kind) {
+    case 'folders':  return { url: '/api/files?folders=1', keep: f => f.type === 'folder' };
+    case 'trash':    return { url: '/api/files?trashed=1', keep: f => f.trashed };
+    case 'starred':  return { url: '/api/files?starred=1', keep: f => f.starred && !f.trashed };
+    case 'all':      return { url: '/api/files', keep: () => true };
+    case 'p:':       return { url: '/api/files?parent=' + encodeURIComponent(arg || 'root'), keep: f => !f.trashed && (f.parent || 'root') === (arg || 'root') };
+    case 't:':       return { url: '/api/files?type=' + encodeURIComponent(arg), keep: f => !f.trashed && f.type === arg };
+    case 'tag:':     return { url: '/api/files?tag=' + encodeURIComponent(arg), keep: f => !f.trashed && Array.isArray(f.tags) && f.tags.includes(arg) };
+    case 'recent:':  return { url: '/api/files?recent=' + encodeURIComponent(arg), keep: null };
+    case 'q:': {
+      // arg is "<query>" or "<query>|<folderId>" (search narrowed to a subtree)
+      const bar = arg.lastIndexOf('|');
+      const q = bar < 0 ? arg : arg.slice(0, bar), sc = bar < 0 ? '' : arg.slice(bar + 1);
+      return {
+        url: '/api/files?search=' + encodeURIComponent(q) + (sc ? '&scope=' + encodeURIComponent(sc) : ''),
+        keep: null,
+        // the server decided what matches (it holds the plaintext names) — remember
+        // the exact hit list so the view shows those rows and nothing else
+        after: (rows) => { SEARCH = { key, ids: rows.map(r => r.id) }; },
+        // only ONE search hit list is held at a time, so a query the user comes
+        // back to (type "clip", then "cli", then "clip" again) must re-run even
+        // though its scope is marked loaded
+        stale: () => SEARCH.key !== key,
+      };
+    }
+    default:         return null;
+  }
+}
+/* Fetch one slice (once). Resolves when the rows are in the cache. */
+function ensureScope(key) {
+  if (!DB) return Promise.resolve();
+  if (SHARE.active) return Promise.resolve();     // share mode ships its whole (already tiny) subtree
+  if (_scopeFetches.has(key)) return _scopeFetches.get(key);
+  const def = _scopeDef(key);
+  if (!def) return Promise.resolve();
+  if (LOADED.has(key) && !(def.stale && def.stale())) return Promise.resolve();
+  const p = (async () => {
+    const res = await fetch(def.url);
+    if (res.status === 401) { const e = new Error('unauthorized'); e.code = 'AUTH'; throw e; }
+    if (!res.ok) throw new Error('load failed (' + res.status + ')');
+    const rows = await res.json();
+    _mergingScope = true;
+    try {
+      if (key === 'all') { DB.files = rows; _dbReindex(); }
+      else {
+        // the server's answer is authoritative for this scope: drop cached rows it
+        // owns but didn't return (deleted or moved out since we last looked)
+        if (def.keep) {
+          const fresh = new Set(rows.map(r => r.id));
+          dbRemove(DB.files.filter(f => def.keep(f) && !fresh.has(f.id)).map(f => f.id));
+        }
+        dbUpsertAll(rows);
+      }
+      if (def.after) def.after(rows);
+    } finally { _mergingScope = false; }
+    LOADED.add(key);
+  })().finally(() => _scopeFetches.delete(key));
+  _scopeFetches.set(key, p);
+  return p;
+}
+/* The most recent server-side search: its scope key plus the ids it returned. */
+let SEARCH = { key: null, ids: [] };
+/* Ensure several scopes concurrently. */
+function ensureScopes(keys) { return Promise.all(keys.map(ensureScope)); }
+/* Would this scope hit the network? (render() uses it to decide whether to show
+   the loading state — a cached scope must paint with no flicker at all.) */
+function scopeNeedsLoad(key) {
+  const def = _scopeDef(key);
+  if (!def) return false;
+  return !LOADED.has(key) || !!(def.stale && def.stale());
+}
+/* Pull specific rows we don't have yet (deep links, share targets, AI references). */
+async function ensureIds(ids) {
+  const miss = [...new Set(ids)].filter(id => id && !DBIDX.has(id));
+  if (!miss.length || SHARE.active) return;
+  for (let i = 0; i < miss.length; i += 200) {
+    const res = await fetch('/api/files?ids=' + miss.slice(i, i + 200).join(','));
+    if (res.ok) dbUpsertAll(await res.json());
+  }
+}
+/* Everything, for the few consumers that genuinely need the whole table (the AI
+   organizer, bulk tools). Kept explicit so nothing pays for it by accident. */
+function ensureAllFiles() { return ensureScope('all'); }
+/* Forget what we've loaded (not the rows) so the next view re-fetches its slice.
+   Called when the server tells us the table changed. */
+function invalidateScopes() { LOADED.clear(); }
+
+/* ---- storage stats (server-side aggregates; never derived from the cache) ---- */
+let STATS = {
+  quota: 0, used: 0, live: 0, files: 0, bytes: 0, folders: 0, rootItems: 0, starred: 0,
+  byType: {}, byExt: [], trash: { count: 0, files: 0, bytes: 0, oldest: null },
+  trashRetentionDays: 15, trashRetentionMax: 60, trashRetentionDefault: 15,
+};
+let _statsAt = 0, _statsInFlight = null;
+async function loadStats(force) {
+  if (SHARE.active) return STATS;
+  if (!force && _statsInFlight) return _statsInFlight;
+  if (!force && Date.now() - _statsAt < 1500) return STATS;
+  _statsInFlight = (async () => {
+    try {
+      const res = await fetch('/api/files/stats');
+      if (res.ok) { STATS = await res.json(); _statsAt = Date.now(); if (STATS.quota) TOTAL_BYTES = STATS.quota; }
+    } catch (e) {} finally { _statsInFlight = null; }
+    return STATS;
+  })();
+  return _statsInFlight;
+}
+
 async function loadDB() {
   if (SHARE.active) {
     const res = await fetch('/api/shares/' + SHARE.token);
-    if (!res.ok) { SHARE.invalid = true; DB = { files: [] }; return; }
+    if (!res.ok) { SHARE.invalid = true; DB = { files: [] }; _dbReindex(); return; }
     const data = await res.json();
     SHARE.root = data.root;
     SHARE.allowDownload = !!data.allowDownload;
     DB = { files: data.items };   // server already scoped + rewrote blob urls through the token
+    _dbReindex();
     return;
   }
-  const res = await fetch('/api/files');
-  if (res.status === 401) { const e = new Error('unauthorized'); e.code = 'AUTH'; throw e; }
-  DB = { files: await res.json() };
-  await loadTags();   // keep the tag dictionary in sync with the file list
+  if (!DB) DB = { files: [] };
+  invalidateScopes();
+  // the folder skeleton + the aggregates are all the first paint needs; file rows
+  // arrive per-view from ensureViewScopes()
+  await Promise.all([ensureScope('folders'), loadStats(true), loadTags()]);
 }
 function saveDB() {}   // no-op: server is source of truth
 function resetDB() {}  // no-op: managed server-side
@@ -296,7 +462,7 @@ function musicRemoveTrack(id) { return apiJSON('/api/music/tracks/' + id, { meth
 /* copy a shared track into the caller's own vault (parent = destination folder id or null) */
 async function musicSaveTrack(id, parent) {
   const data = await apiJSON('/api/music/tracks/' + id + '/save', _json({ parent: parent ?? null }));
-  if (data.file && typeof DB !== 'undefined' && DB && DB.files) DB.files.push(data.file);
+  if (data.file && typeof DB !== 'undefined' && DB && DB.files) dbUpsert(data.file);
   return data;
 }
 function musicPlaylists() { return apiJSON('/api/music/playlists'); }
@@ -413,7 +579,7 @@ function deleteNotification(id) { return apiJSON('/api/notifications/' + id, { m
 /* create a content-backed text document in the vault (editor/download read `content`) */
 async function createDoc({ name, content, parent, lang }) {
   const rec = await apiJSON('/api/files/doc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, content, parent: parent ?? null, lang }) });
-  DB.files.push(rec);
+  dbUpsert(rec);
   return rec;
 }
 /* stream a chat completion; onText(delta) per token, onError(msg) on in-band error.
@@ -428,10 +594,7 @@ function fileMetadata(id) { return apiJSON('/api/files/' + id + '/metadata'); }
    Used to backfill tracks uploaded before auto-extraction existed. Updates cache. */
 async function extractTags(id) {
   const data = await apiJSON('/api/files/' + id + '/extract-tags', { method: 'POST' });
-  if (data.file && typeof DB !== 'undefined' && DB && DB.files) {
-    const i = DB.files.findIndex(f => f.id === data.file.id);
-    if (i >= 0) DB.files[i] = data.file; else DB.files.push(data.file);
-  }
+  if (data.file && typeof DB !== 'undefined' && DB && DB.files) dbUpsert(data.file);
   return data;
 }
 /* overwrite a file's bytes in place (used by the .sav Save Editor). Updates cache. */
@@ -441,16 +604,13 @@ async function replaceFileBytes(id, bytes, name) {
   const res = await fetch('/api/files/' + id + '/replace', { method: 'POST', body: fd });
   if (!res.ok) { let msg = 'save failed'; try { msg = (await res.json()).error || msg; } catch (e) {} const err = new Error(msg); err.status = res.status; throw err; }
   const rec = await res.json();
-  if (typeof DB !== 'undefined' && DB && DB.files) { const i = DB.files.findIndex(f => f.id === id); if (i >= 0) DB.files[i] = rec; }
+  if (typeof DB !== 'undefined' && DB && DB.files) dbUpsert(rec);
   return rec;
 }
 /* strip non-essential embedded metadata in place; updates the cached record. */
 async function purgeMetadata(id) {
   const data = await apiJSON('/api/files/' + id + '/purge-metadata', { method: 'POST' });
-  if (data.file && typeof DB !== 'undefined' && DB && DB.files) {
-    const i = DB.files.findIndex(f => f.id === data.file.id);
-    if (i >= 0) DB.files[i] = data.file; else DB.files.push(data.file);
-  }
+  if (data.file && typeof DB !== 'undefined' && DB && DB.files) dbUpsert(data.file);
   return data;
 }
 /* Convert/compress a file already in the vault (no upload — dodges Cloudflare's
@@ -465,10 +625,7 @@ async function convertTool({ tool, fileId, format, preset, mode, value, output =
   const ct = res.headers.get('Content-Type') || '';
   if (ct.includes('application/json')) {
     const data = await res.json();
-    if (data.file && typeof DB !== 'undefined' && DB && DB.files) {
-      const i = DB.files.findIndex(f => f.id === data.file.id);
-      if (i >= 0) DB.files[i] = data.file; else DB.files.push(data.file);
-    }
+    if (data.file && typeof DB !== 'undefined' && DB && DB.files) dbUpsert(data.file);
     return { kind: 'saved', ...data };
   }
   const outSize = Number(res.headers.get('X-Output-Size')) || null;
@@ -486,17 +643,14 @@ async function mveExport({ project, output = 'save', replaceId, signal }) {
   });
   if (!res.ok) { let msg = 'export failed'; try { msg = (await res.json()).error || msg; } catch (e) {} const err = new Error(msg); err.status = res.status; throw err; }
   const data = await res.json();
-  if (data.file && typeof DB !== 'undefined' && DB && DB.files) {
-    const i = DB.files.findIndex(f => f.id === data.file.id);
-    if (i >= 0) DB.files[i] = data.file; else DB.files.push(data.file);
-  }
+  if (data.file && typeof DB !== 'undefined' && DB && DB.files) dbUpsert(data.file);
   return data;
 }
 /* awaitable save of a content-backed document's text; updates the cache + returns
    the fresh record. Used by the editor to persist a project .mve.json. */
 async function saveDocContent(id, content) {
   const rec = await apiJSON('/api/files/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content, size: (content || '').length, date: Date.now() }) });
-  if (typeof DB !== 'undefined' && DB && DB.files) { const i = DB.files.findIndex(f => f.id === id); if (i >= 0) DB.files[i] = rec; }
+  if (typeof DB !== 'undefined' && DB && DB.files) dbUpsert(rec);
   return rec;
 }
 
@@ -547,7 +701,7 @@ async function extractZip(id, parent) {
     throw e;
   }
   const data = await res.json();
-  (data.created || []).forEach(rec => DB.files.push(rec));
+  (data.created || []).forEach(rec => dbUpsert(rec));
   return data;
 }
 
@@ -580,18 +734,34 @@ async function setFileTags(id, ids) {
   const f = byId(id); if (f) f.tags = [...ids];
   try {
     const rec = await apiJSON('/api/files/' + id + '/tags', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tags: ids }) });
-    const i = DB.files.findIndex(x => x.id === id); if (i >= 0) DB.files[i] = rec;
+    dbUpsert(rec);
     return rec;
   } catch (e) { return null; }
 }
 
 /* ---- queries ---- */
 const TYPES = ['folder', 'video', 'audio', 'image', 'document', 'model3d', 'uasset'];
-function byId(id) { return DB.files.find(f => f.id === id); }
+function byId(id) { return DBIDX.get(id) || null; }
 function children(pid) { return DB.files.filter(f => f.parent === pid && !f.trashed); }
 function allOfType(t) { return DB.files.filter(f => f.type === t && !f.trashed); }
 function trashed() { return DB.files.filter(f => f.trashed); }
+/* age of a trashed item in days, and how long it has left before auto-deletion */
+function trashAgeDays(f) { const t = f && f.trashedAt; return t ? (Date.now() - t) / day : null; }
+function trashDaysLeft(f) {
+  const keep = STATS.trashRetentionDays;
+  if (!keep) return null;                       // auto-delete off
+  const age = trashAgeDays(f);
+  return age == null ? null : Math.max(0, Math.ceil(keep - age));
+}
 function starred() { return DB.files.filter(f => f.starred && !f.trashed); }
+/* How many live items a folder holds. The server ships this on folder rows (`kids`)
+   because the client no longer caches the whole table and so can't count for itself;
+   the cache is only a fallback for optimistically-created rows. */
+function childCount(f) {
+  if (!f) return 0;
+  if (typeof f.kids === 'number') return f.kids;
+  return children(f.id).length;
+}
 function descendants(id) {
   const out = [];
   const walk = (p) => DB.files.filter(f => f.parent === p).forEach(c => { out.push(c); if (c.type === 'folder') walk(c.id); });
@@ -613,12 +783,12 @@ async function addFile(o) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })).json();
-    DB.files.push(srv);
+    dbUpsert(srv);
     return srv;
   } catch (e) {
     // offline fallback: keep an optimistic local record
     const temp = { id: uid(), parent: null, size: 0, date: Date.now(), trashed: false, starred: false, ...o };
-    DB.files.push(temp);
+    dbUpsert(temp);
     return temp;
   }
 }
@@ -629,22 +799,28 @@ function renameFile(id, name) {
 }
 function trashFile(id) {
   const f = byId(id); if (!f) return;
-  f.trashed = true; if (f.type === 'folder') descendants(id).forEach(d => d.trashed = true);
+  const now = Date.now();
+  f.trashed = true; f.trashedAt = now;
+  if (f.type === 'folder') descendants(id).forEach(d => { d.trashed = true; d.trashedAt = now; });
   fetch('/api/files/' + id + '/trash', { method: 'POST' }).catch(() => {});
+  bumpStats();
 }
 function restoreFile(id) {
   const f = byId(id); if (!f) return;
-  f.trashed = false; if (f.type === 'folder') descendants(id).forEach(d => d.trashed = false);
+  f.trashed = false; delete f.trashedAt;
+  if (f.type === 'folder') descendants(id).forEach(d => { d.trashed = false; delete d.trashedAt; });
   fetch('/api/files/' + id + '/restore', { method: 'POST' }).catch(() => {});
+  bumpStats();
 }
 function deleteForever(id) {
-  const kill = new Set([id, ...descendants(id).map(d => d.id)]);
-  DB.files = DB.files.filter(f => !kill.has(f.id));
+  dbRemove(new Set([id, ...descendants(id).map(d => d.id)]));
   fetch('/api/files/' + id, { method: 'DELETE' }).catch(() => {});
+  bumpStats();
 }
 function emptyTrash() {
-  DB.files = DB.files.filter(f => !f.trashed);
+  dbRemove(DB.files.filter(f => f.trashed).map(f => f.id));
   fetch('/api/trash/empty', { method: 'POST' }).catch(() => {});
+  bumpStats();
 }
 function toggleStar(id) {
   const f = byId(id); if (!f) return;
@@ -759,7 +935,7 @@ async function copyItems(ids, parent) {
       continue;
     }
     const data = await res.json();
-    (data.created || []).forEach(rec => { DB.files.push(rec); created.push(rec); });
+    (data.created || []).forEach(rec => { dbUpsert(rec); created.push(rec); });
   }
   return created;
 }
@@ -820,7 +996,7 @@ async function uploadFile(file, parent, extra = {}, signal, onProgress) {
     throw err;
   }
   const rec = JSON.parse(res.responseText);
-  DB.files.push(rec);
+  dbUpsert(rec);
   return rec;
 }
 
@@ -965,7 +1141,7 @@ async function uploadFileChunked(file, parent, extra = {}, onProgress, signal) {
   }
   const rec = await compRes.json();
   log.add('complete-ok', {});
-  DB.files.push(rec);
+  dbUpsert(rec);
   return rec;
 }
 
@@ -1002,12 +1178,19 @@ async function uploadAny(file, parent, extra, onProgress, signal) {
 }
 
 /* ---- helpers ---- */
-function usedBytes() { return DB.files.filter(f => !f.trashed && f.type !== 'folder').reduce((s, f) => s + (f.size || 0), 0); }
+/* Storage totals come from the server's SQL aggregates (STATS), not from the
+   cache — the cache only holds the slices this session happened to open.
+   Trash is included in `usedBytes`: those bytes are still on disk and still
+   count against the account's limit until they're purged. */
+function usedBytes() { return STATS.used || 0; }
+function liveBytes() { return STATS.live || 0; }
+function trashBytes() { return (STATS.trash && STATS.trash.bytes) || 0; }
 function bytesByType() {
-  const m = { video: 0, audio: 0, image: 0, document: 0, model3d: 0 };
-  DB.files.filter(f => !f.trashed && m[f.type] != null).forEach(f => m[f.type] += f.size || 0);
+  const m = { video: 0, audio: 0, image: 0, document: 0, model3d: 0, uasset: 0 };
+  for (const t of Object.keys(m)) m[t] = (STATS.byType[t] && STATS.byType[t].bytes) || 0;
   return m;
 }
+function countByType(t) { return (STATS.byType[t] && STATS.byType[t].count) || 0; }
 function fmtSize(b) {
   if (!b) return '—';
   if (b >= 1e12) return (b / 1e12).toFixed(2) + ' TB';

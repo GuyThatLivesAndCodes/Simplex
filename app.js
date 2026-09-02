@@ -609,22 +609,22 @@ const SORTS = [
 const NAV = [
   { group: 'Vault', items: [
     { id: 'home', label: 'Home', icon: 'home' },
-    { id: 'files', label: 'All files', icon: 'files', count: () => children(null).length },
-    { id: 'starred', label: 'Starred', icon: 'star', count: () => starred().length },
+    { id: 'files', label: 'All files', icon: 'files', count: () => STATS.rootItems },
+    { id: 'starred', label: 'Starred', icon: 'star', count: () => STATS.starred },
     { id: 'tags', label: 'Tags', icon: 'tag', count: () => allTags().length },
     { id: 'docs', label: 'Guide', icon: 'info' },
   ]},
   { group: 'Library', items: [
-    { id: 'video', label: 'Films', icon: 'video', count: () => allOfType('video').length },
-    { id: 'audio', label: 'Music', icon: 'audio', count: () => allOfType('audio').length },
-    { id: 'image', label: 'Photos', icon: 'image', count: () => allOfType('image').length },
-    { id: 'document', label: 'Documents', icon: 'document', count: () => allOfType('document').length },
-    { id: 'model3d', label: 'Models', icon: 'model3d', count: () => allOfType('model3d').length },
-    { id: 'uasset', label: 'Game Assets', icon: 'uasset', count: () => allOfType('uasset').length },
+    { id: 'video', label: 'Films', icon: 'video', count: () => countByType('video') },
+    { id: 'audio', label: 'Music', icon: 'audio', count: () => countByType('audio') },
+    { id: 'image', label: 'Photos', icon: 'image', count: () => countByType('image') },
+    { id: 'document', label: 'Documents', icon: 'document', count: () => countByType('document') },
+    { id: 'model3d', label: 'Models', icon: 'model3d', count: () => countByType('model3d') },
+    { id: 'uasset', label: 'Game Assets', icon: 'uasset', count: () => countByType('uasset') },
   ]},
   { group: 'System', items: [
     { id: 'customapi', label: 'Custom API', icon: 'key' },
-    { id: 'trash', label: 'Trash', icon: 'trash', count: () => trashed().length },
+    { id: 'trash', label: 'Trash', icon: 'trash', count: () => STATS.trash.count },
   ]},
 ];
 
@@ -906,6 +906,10 @@ async function route(pathname) {
     if (top === 'dash') goDashboard();
     else if (top === 'database') {
       await openDatabase();
+      // a deep link names a row we may not have cached (the vault loads lazily) — fetch it
+      if ((seg[1] === 'folder' || seg[1] === 'file') && seg[2] && !byId(seg[2])) {
+        try { await ensureIds([seg[2]]); } catch (e) {}
+      }
       if (seg[1] === 'folder' && seg[2] && byId(seg[2])) go('browse', { folder: seg[2] });
       else if (seg[1] === 'tag' && seg[2] && tagById(seg[2])) go('tag', { tag: seg[2] });
       else if (seg[1] === 'file' && seg[2] && byId(seg[2])) { go('browse', { folder: byId(seg[2]).parent || null }); openFileById(seg[2]); }
@@ -1786,6 +1790,10 @@ function settingsHTML() {
         <label class="switch" title="Reduce motion"><input type="checkbox" id="setReduceMotion" ${PREFS.reduceMotion ? 'checked' : ''}><span class="switch-track"></span></label>
       </div>
       <div class="set-row">
+        <div class="sr-main"><div class="sr-title">Performance mode</div><div class="sr-sub mono">drops blurs, shadows, gradients, background effects &amp; animation — for low-end devices</div></div>
+        <label class="switch" title="Performance mode"><input type="checkbox" id="setPerfMode" ${PREFS.perfMode ? 'checked' : ''}><span class="switch-track"></span></label>
+      </div>
+      <div class="set-row">
         <div class="sr-main"><div class="sr-title">Reset appearance</div><div class="sr-sub mono">restore all appearance settings to their defaults</div></div>
         <button class="btn ghost" id="setResetAppearance">${svg('refresh', 14)} Reset to defaults</button>
       </div>
@@ -1795,6 +1803,26 @@ function settingsHTML() {
           <button class="btn ghost sm" id="apprRevert">Revert</button>
           <button class="btn primary sm" id="apprApply">Apply changes</button>
         </div>
+      </div>
+    </div>
+    <div class="set-section" id="setStorageSection">
+      <span class="eyebrow">Storage</span>
+      <div class="set-row">
+        <div class="sr-main">
+          <div class="sr-title">Storage used</div>
+          <div class="sr-sub mono" id="setStorageSub">${fmtSize(usedBytes())} of ${Math.round(TOTAL_BYTES / 1e9)} GB · trash included</div>
+        </div>
+        <button class="btn ghost" id="setStorageDetail">${svg('hdd', 14)} View breakdown</button>
+      </div>
+      <div class="set-row">
+        <div class="sr-main">
+          <div class="sr-title">Empty trash automatically</div>
+          <div class="sr-sub mono" id="setTrashSub">files in the Trash are deleted for good after this long — they take up space until then</div>
+        </div>
+        <select class="set-select" id="setTrashRetention">
+          ${[1, 3, 7, 15, 30, 45, 60].map(d => `<option value="${d}" ${Number(STATS.trashRetentionDays) === d ? 'selected' : ''}>${d} day${d === 1 ? '' : 's'}</option>`).join('')}
+          <option value="0" ${!STATS.trashRetentionDays ? 'selected' : ''}>Never</option>
+        </select>
       </div>
     </div>
     <div class="set-section" id="setOrgSection">
@@ -1891,6 +1919,7 @@ function wireSettings() {
     seg.querySelectorAll('button').forEach(x => x.classList.toggle('on', x.dataset.v === viewMode));
     toast('Default view updated', 'check');
   });
+  wireStorageSettings();
   wireAppearanceSettings();
   wireSafetySettings();
   wireKeySettings();
@@ -1905,6 +1934,33 @@ function wireSettings() {
       : '— engine binary not found';
   }).catch(() => {});
   wireOrgSettings();
+}
+
+/* ---------- STORAGE SETTINGS ----------
+   The trash retention window is a server-side policy (the sweep runs there), so it
+   saves immediately rather than riding the appearance apply/confirm bar. */
+function wireStorageSettings() {
+  const btn = document.getElementById('setStorageDetail');
+  if (btn) btn.onclick = () => openStorageDetail(null);
+  const sel = document.getElementById('setTrashRetention');
+  if (!sel) return;
+  loadStats(true).then(() => {
+    sel.value = String(STATS.trashRetentionDays || 0);
+    const sub = document.getElementById('setStorageSub');
+    if (sub) sub.textContent = `${fmtSize(usedBytes())} of ${Math.round(TOTAL_BYTES / 1e9)} GB · ${fmtSize(trashBytes())} in trash`;
+  }).catch(() => {});
+  sel.onchange = async () => {
+    const days = Number(sel.value) || 0;
+    setPrefs({ trashRetentionDays: days });
+    STATS.trashRetentionDays = days;
+    try {
+      await updateMe({ prefs: PREFS });                 // don't wait out the debounce — the sweep keys off this
+      await loadStats(true);
+      sel.value = String(STATS.trashRetentionDays || 0);   // reflect the server's clamp
+      renderStorage();
+    } catch (e) {}
+    toast(days ? `Trash empties after ${days} day${days === 1 ? '' : 's'}` : 'Trash auto-delete turned off', 'check');
+  };
 }
 
 /* ============================================================
@@ -1972,6 +2028,16 @@ function wireAppearanceSettings() {
   const asp = document.getElementById('setAlbumSpin'); if (asp) asp.onchange = () => apprStage({ albumSpin: asp.value });
   const bfx = document.getElementById('setBgFx'); if (bfx) bfx.onchange = () => apprStage({ bgFx: bfx.value });
   const rm = document.getElementById('setReduceMotion'); if (rm) rm.onchange = () => apprStage({ reduceMotion: rm.checked });
+  // Performance mode applies instantly — someone reaching for it is on a device that's
+  // already struggling, and making them sit through a preview/confirm dance is unkind.
+  const pm = document.getElementById('setPerfMode');
+  if (pm) pm.onchange = () => {
+    setPrefs({ perfMode: pm.checked });
+    if (_apprDraft) delete _apprDraft.perfMode;
+    if (_apprBaseline) _apprBaseline.perfMode = pm.checked;
+    _apprUpdateBar();
+    toast(pm.checked ? 'Performance mode on — visuals trimmed' : 'Performance mode off', 'check');
+  };
 
   // "Reset to defaults" stages the defaults as a preview (still needs Apply to keep).
   const resetA = document.getElementById('setResetAppearance');
@@ -2514,11 +2580,12 @@ const DEFAULT_PREFS = {
   textScale: 100,        // extra nudge to text size, %
   albumSpin: 'play',     // 'play' | 'always' | 'paused' | 'never' — now-playing cover rotation
   reduceMotion: false,   // reduce/disable animations & transitions
+  perfMode: false,       // low-end device mode: no blur/shadow/gradient/bg-fx/animation
   density: 'comfortable',// 'compact' | 'comfortable' | 'roomy'
   roundness: 100,        // corner roundness, % of the default radius (0 = square, 200 = very round)
   bgFx: 'aurora',        // background ambience: 'aurora' | 'glow' | 'grain' | 'none'
 };
-const APPEARANCE_KEYS = ['accent', 'theme', 'uiFont', 'monoFont', 'uiScale', 'textScale', 'albumSpin', 'reduceMotion', 'density', 'roundness', 'bgFx'];
+const APPEARANCE_KEYS = ['accent', 'theme', 'uiFont', 'monoFont', 'uiScale', 'textScale', 'albumSpin', 'reduceMotion', 'perfMode', 'density', 'roundness', 'bgFx'];
 function loadPrefsLocal() { try { return JSON.parse(localStorage.getItem('simplex.prefs')) || {}; } catch (e) { return {}; } }
 function savePrefsLocal() { try { localStorage.setItem('simplex.prefs', JSON.stringify(PREFS)); } catch (e) {} }
 let PREFS = { ...DEFAULT_PREFS, ...loadPrefsLocal() };
@@ -2668,9 +2735,13 @@ function applyPrefs(p) {
   const schemeMeta = document.querySelector('meta[name="color-scheme"]');
   if (schemeMeta) schemeMeta.setAttribute('content', themeDef.mode === 'light' ? 'light' : 'dark');
   // background ambience layer (body::before variants in simplex.css)
-  const fx = ['aurora', 'fire', 'glow', 'grain', 'none'].includes(prefs.bgFx) ? prefs.bgFx : 'aurora';
+  // Performance mode: the CSS does the heavy lifting (see [data-perf="on"]), but the
+  // JS-driven ambience has to be switched off here too or it keeps burning frames.
+  const perf = !!prefs.perfMode;
+  if (perf) root.setAttribute('data-perf', 'on'); else root.removeAttribute('data-perf');
+  const fx = perf ? 'none' : (['aurora', 'fire', 'glow', 'grain', 'none'].includes(prefs.bgFx) ? prefs.bgFx : 'aurora');
   if (fx !== 'none') root.setAttribute('data-bgfx', fx); else root.removeAttribute('data-bgfx');
-  FireFX.sync(fx === 'fire', !!prefs.reduceMotion);
+  FireFX.sync(fx === 'fire', !!prefs.reduceMotion || perf);
   const acc = normalizeHex(prefs.accent);
   if (acc) {
     root.style.setProperty('--acc', acc);
@@ -2699,7 +2770,7 @@ function applyPrefs(p) {
   root.style.setProperty('--radius', (11 * round).toFixed(2) + 'px');
   root.style.setProperty('--radius-sm', (7 * round).toFixed(2) + 'px');
   // ---- reduced motion + density as root attributes CSS keys off ----
-  if (prefs.reduceMotion) root.setAttribute('data-motion', 'reduce'); else root.removeAttribute('data-motion');
+  if (prefs.reduceMotion || perf) root.setAttribute('data-motion', 'reduce'); else root.removeAttribute('data-motion');
   const density = ['compact', 'comfortable', 'roomy'].includes(prefs.density) ? prefs.density : 'comfortable';
   if (density !== 'comfortable') root.setAttribute('data-density', density); else root.removeAttribute('data-density');
 }
@@ -3140,7 +3211,13 @@ async function persistAiChat() {
    here, and feeds the result back. Works with any text model (native function
    calling not required). Tools touch the same vault/data the rest of the app uses.
    ============================================================ */
-function ensureAiDB() { return (typeof DB !== 'undefined' && DB && DB.files) ? Promise.resolve() : loadDB(); }
+/* The assistant reasons over the WHOLE vault (find a file by name, list by type,
+   pick a target folder), so unlike the browsing views it genuinely needs every row.
+   Pull them once, on first use, instead of at boot. */
+async function ensureAiDB() {
+  if (typeof DB === 'undefined' || !DB || !DB.files) await loadDB();
+  await ensureAllFiles();
+}
 function aiFindFile(a) {
   if (!DB || !DB.files) return null;
   if (a.id) { const byId = DB.files.find(f => f.id === a.id); if (byId) return byId; }
@@ -3635,6 +3712,9 @@ async function convertImageInBrowser(f, format) {
 /* pick a name that doesn't collide with existing (non-trashed) files in a folder,
    appending " (2)", " (3)", … before the extension — mirroring the server's
    dedupeName so client-side saves don't quietly create same-named duplicates. */
+/* Note: this reads the cached listing for `parent`, which is loaded whenever the
+   user is looking at that folder. The server runs the same dedupe on write, so a
+   cold cache costs a differently-numbered suffix, never a silent overwrite. */
 function uniqueNameIn(parent, name) {
   const taken = new Set(children(parent).map(c => c.name.toLowerCase()));
   if (!taken.has(name.toLowerCase())) return name;
@@ -5341,17 +5421,156 @@ function navTo(id) {
   if (window.innerWidth <= 820) closeSidebar();
 }
 
-function renderStorage() {
-  const used = usedBytes(), pct = Math.min(100, (used / TOTAL_BYTES) * 100);
+/* ---------- STORAGE METER ----------
+   The sidebar panel: one stacked bar, a hover readout naming each band, and a
+   click-through to the full breakdown. Trash rides at the end of the bar as a
+   gray hatched band — those bytes are still on disk and still count against the
+   limit, they're just already on their way out. */
+/* Trash items carry a deadline. Anything inside 3 days of it is flagged so a
+   restore-worthy file doesn't quietly evaporate. */
+function _trashSoon(f) { const d = trashDaysLeft(f); return d != null && d <= 3; }
+function trashExpiryLabel(f) {
+  const d = trashDaysLeft(f);
+  if (d == null) return 'kept until you empty the trash';
+  if (d <= 0) return 'deleting today';
+  return `deleted in ${d} day${d === 1 ? '' : 's'}`;
+}
+const STORAGE_SEGS = [
+  { t: 'video', label: 'Films', color: 'var(--vid)' },
+  { t: 'audio', label: 'Music', color: 'var(--aud)' },
+  { t: 'image', label: 'Photos', color: 'var(--img)' },
+  { t: 'document', label: 'Documents', color: 'var(--doc)' },
+  { t: 'model3d', label: 'Models', color: 'var(--mdl)' },
+  { t: 'uasset', label: 'Game Assets', color: 'var(--uas)' },
+];
+function storageSegments() {
   const bt = bytesByType();
-  const segs = [['video', 'var(--vid)'], ['audio', 'var(--aud)'], ['image', 'var(--img)'], ['document', 'var(--doc)'], ['model3d', 'var(--mdl)'], ['uasset', 'var(--uas)']];
+  const segs = STORAGE_SEGS
+    .map(s => ({ ...s, bytes: bt[s.t] || 0, count: countByType(s.t) }))
+    .filter(s => s.bytes > 0);
+  // anything typed outside the six library kinds (or rounding drift) — one catch-all band
+  const other = Math.max(0, liveBytes() - segs.reduce((a, b) => a + b.bytes, 0));
+  if (other > 1) segs.push({ t: 'other', label: 'Other', color: 'var(--ink-faint)', bytes: other, count: 0 });
+  const tb = trashBytes();
+  if (tb > 0) segs.push({ t: 'trash', label: 'Trash', color: 'transparent', bytes: tb, count: STATS.trash.files, trash: true });
+  return segs;
+}
+function renderStorage() {
   const el = document.getElementById('storage');
+  if (!el) return;
+  const used = usedBytes(), pct = Math.min(100, (used / TOTAL_BYTES) * 100);
+  const segs = storageSegments();
+  const w = (b) => Math.max(b > 0 ? 0.6 : 0, (b / TOTAL_BYTES) * 100);   // keep tiny bands visible
   el.innerHTML = `
     <div class="top"><b>${fmtSize(used)}</b><span class="eyebrow">of ${Math.round(TOTAL_BYTES / 1e9)} GB</span></div>
-    <div class="bar">${segs.map(([t, c]) => `<i style="width:${(bt[t] / TOTAL_BYTES) * 100}%;background:${c}"></i>`).join('')}</div>
+    <div class="bar" id="storageBar">
+      ${segs.map(s => `<i class="${s.trash ? 'seg-trash' : ''}" data-seg="${s.t}"
+           style="width:${w(s.bytes)}%;${s.trash ? '' : `background:${s.color}`}"
+           title="${esc(s.label)} · ${fmtSize(s.bytes)}"></i>`).join('')}
+    </div>
+    <div class="sto-read" id="storageRead"><span class="dim mono">${pct < 0.1 && used ? '<0.1' : pct.toFixed(pct < 10 ? 1 : 0)}% used · click for details</span></div>
     <div class="legend">
-      ${segs.map(([t, c]) => `<span style="--c:${c}">${cap({ image: 'photos', document: 'docs', video: 'films', audio: 'music', model3d: 'models', uasset: 'assets' }[t] || t)}</span>`).join('')}
+      ${segs.map(s => `<span class="${s.trash ? 'lg-trash' : ''}" data-seg="${s.t}" style="--c:${s.color}">${esc(s.label)}</span>`).join('')}
     </div>`;
+  wireStoragePanel(el, segs);
+}
+function wireStoragePanel(el, segs) {
+  const read = el.querySelector('#storageRead');
+  const base = read.innerHTML;
+  const show = (t) => {
+    const s = segs.find(x => x.t === t);
+    if (!s) return;
+    const share = usedBytes() ? (s.bytes / usedBytes()) * 100 : 0;
+    read.innerHTML = `<span class="sto-name" style="--c:${s.color}">${esc(s.label)}</span>
+      <span class="mono">${fmtSize(s.bytes)}${s.count ? ` · ${s.count} file${s.count === 1 ? '' : 's'}` : ''} · ${share < 0.1 ? '<0.1' : share.toFixed(share < 10 ? 1 : 0)}%</span>`;
+  };
+  const clear = () => { read.innerHTML = base; };
+  el.querySelectorAll('[data-seg]').forEach(node => {
+    node.addEventListener('mouseenter', () => show(node.dataset.seg));
+    node.addEventListener('mouseleave', clear);
+  });
+  el.onclick = (e) => {
+    // hovering a band and clicking it opens the breakdown focused on that band
+    const seg = e.target.closest('[data-seg]');
+    openStorageDetail(seg ? seg.dataset.seg : null);
+  };
+  el.setAttribute('role', 'button');
+  el.setAttribute('tabindex', '0');
+  el.setAttribute('title', 'Storage breakdown');
+  el.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openStorageDetail(null); } };
+}
+
+/* ---------- STORAGE DETAIL ----------
+   The full picture: the same stacked bar at full width, a per-category table, and
+   the per-extension breakdown the server aggregates for us (so this stays cheap
+   no matter how many files the vault holds). */
+async function openStorageDetail(focusType) {
+  await loadStats(true);
+  const segs = storageSegments();
+  const used = usedBytes(), free = Math.max(0, TOTAL_BYTES - used);
+  const w = (b) => Math.max(b > 0 ? 0.6 : 0, (b / TOTAL_BYTES) * 100);
+  const keep = STATS.trashRetentionDays;
+  const rows = segs.map(s => {
+    const share = used ? (s.bytes / used) * 100 : 0;
+    return `<tr class="${s.t === focusType ? 'on' : ''}" data-row="${s.t}">
+      <td><span class="sd-dot ${s.trash ? 'sd-dot-trash' : ''}" style="--c:${s.color}"></span>${esc(s.label)}</td>
+      <td class="mono num">${s.count || '—'}</td>
+      <td class="mono num">${fmtSize(s.bytes)}</td>
+      <td class="mono num dim">${share < 0.1 ? '<0.1' : share.toFixed(1)}%</td>
+    </tr>`;
+  }).join('');
+  const exts = (STATS.byExt || []).filter(x => x.bytes > 0).slice(0, 24);
+  const extRows = exts.length ? exts.map(x => `<tr data-ext-type="${x.type}">
+      <td><span class="sd-dot" style="--c:${(STORAGE_SEGS.find(s => s.t === x.type) || {}).color || 'var(--ink-faint)'}"></span>
+        <span class="mono">${esc(x.ext || '—')}</span></td>
+      <td class="mono num">${x.count}</td>
+      <td class="mono num">${fmtSize(x.bytes)}</td>
+    </tr>`).join('')
+    : `<tr><td colspan="3" class="dim">Nothing stored yet.</td></tr>`;
+
+  const bg = document.createElement('div'); bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal sto-modal">
+    <h3>Storage</h3>
+    <div class="sto-detail">
+      <div class="sd-head">
+        <div><div class="sd-big mono">${fmtSize(used)}</div><div class="eyebrow">used of ${Math.round(TOTAL_BYTES / 1e9)} GB</div></div>
+        <div><div class="sd-big mono">${fmtSize(free)}</div><div class="eyebrow">free</div></div>
+        <div><div class="sd-big mono">${STATS.files}</div><div class="eyebrow">files · ${STATS.folders} folders</div></div>
+      </div>
+      <div class="bar sd-bar">${segs.map(s => `<i class="${s.trash ? 'seg-trash' : ''}" data-row="${s.t}" style="width:${w(s.bytes)}%;${s.trash ? '' : `background:${s.color}`}" title="${esc(s.label)} · ${fmtSize(s.bytes)}"></i>`).join('')}</div>
+      <table class="sd-table">
+        <thead><tr><th>Category</th><th class="num">Files</th><th class="num">Size</th><th class="num">Share</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="4" class="dim">Nothing stored yet.</td></tr>'}</tbody>
+      </table>
+      ${STATS.trash.bytes ? `<div class="sd-note">${svg('trash', 13)}<span>Trash holds ${fmtSize(STATS.trash.bytes)} across ${STATS.trash.files} file${STATS.trash.files === 1 ? '' : 's'} and counts toward your limit.${keep ? ` Items are deleted for good ${keep} day${keep === 1 ? '' : 's'} after you trash them.` : ' Auto-deletion is off.'}</span></div>` : ''}
+      <div class="sd-sub">By file type</div>
+      <div class="sd-scroll">
+        <table class="sd-table sd-ext">
+          <thead><tr><th>Extension</th><th class="num">Files</th><th class="num">Size</th></tr></thead>
+          <tbody>${extRows}</tbody>
+        </table>
+      </div>
+    </div>
+    <div class="acts"><button class="btn ghost" data-trashset>Trash settings</button><button class="btn primary" data-ok>Done</button></div>
+  </div>`;
+  document.body.appendChild(bg);
+  const close = () => bg.remove();
+  bg.querySelector('[data-ok]').onclick = close;
+  bg.onclick = e => { if (e.target === bg) close(); };
+  bg.querySelector('[data-trashset]').onclick = () => {
+    close();
+    openAppScreen({ id: 'settings', name: 'Settings', icon: 'gear' }, settingsHTML());
+    wireSettings();
+    const sec = document.getElementById('setStorageSection');
+    if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+  // clicking a category (in the bar or the table) jumps to that library view
+  bg.querySelectorAll('[data-row]').forEach(r => {
+    const t = r.dataset.row;
+    if (t === 'other') return;
+    r.classList.add('sd-jump');
+    r.onclick = (e) => { e.stopPropagation(); close(); t === 'trash' ? go('trash') : go('cat', { sub: t }); };
+  });
 }
 
 /* ---------- TOPBAR / CRUMBS ---------- */
@@ -5398,9 +5617,41 @@ function setViewMode(m) {
 }
 
 /* ---------- RENDER DISPATCH ---------- */
+/* Which server-side slices the current view needs. The cache is lazy, so a view
+   states its data dependency here and render() fetches it on the way in. */
+function viewScopes() {
+  if (SHARE.active) return [];
+  switch (state.view) {
+    case 'home':    return ['recent:12'];
+    case 'browse':  return ['p:' + (state.folder || '')];
+    case 'cat':     return ['t:' + state.sub];
+    case 'starred': return ['starred'];
+    case 'trash':   return ['trash'];
+    case 'tag':     return ['tag:' + state.tag];
+    case 'search':  return state.query.trim() ? ['q:' + state.query.toLowerCase().trim() + (state.scope != null ? '|' + state.scope : '')] : [];
+    default:        return [];
+  }
+}
+/* Guards against a slow fetch painting over a view the user has already left. */
+let _renderSeq = 0;
 function render() {
   const _t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
   if (currentApp === 'database') syncUrl();
+  // Paint immediately from whatever's cached, then top up from the server if this
+  // view's slice hasn't been loaded yet. Navigation stays instant; a first visit
+  // to a folder/category briefly shows what we have, then fills in.
+  const need = viewScopes().filter(scopeNeedsLoad);
+  if (need.length) {
+    const seq = ++_renderSeq;
+    document.body.classList.add('db-loading');
+    ensureScopes(need)
+      .then(() => { if (seq === _renderSeq) { document.body.classList.remove('db-loading'); _render(); } })
+      .catch(e => {
+        document.body.classList.remove('db-loading');
+        if (e && e.code === 'AUTH') { if (typeof relock === 'function') relock(); }
+        else toast('Could not load this view', 'close');
+      });
+  } else { _renderSeq++; document.body.classList.remove('db-loading'); }
   // mirror the current view onto window so the boot-guard watchdog can name WHERE a
   // freeze happened (it can't read these module-scoped vars otherwise -> reports app=?)
   try { window.currentApp = currentApp; window.state = state; } catch (e) {}
@@ -5417,7 +5668,8 @@ function render() {
 /* ---------- HOME ---------- */
 function homeHTML() {
   const used = usedBytes();
-  const recents = [...DB.files.filter(f => !f.trashed && f.type !== 'folder')].sort((a, b) => b.date - a.date).slice(0, 6);
+  // the 'recent:12' scope is fetched by render() before this paints
+  const recents = DB.files.filter(f => !f.trashed && f.type !== 'folder').sort((a, b) => b.date - a.date).slice(0, 6);
   const tiles = [
     { t: 'video', label: 'Films', icon: 'video' }, { t: 'audio', label: 'Music', icon: 'audio' },
     { t: 'image', label: 'Photos', icon: 'image' }, { t: 'document', label: 'Documents', icon: 'document' },
@@ -5429,7 +5681,7 @@ function homeHTML() {
     <div class="hero">
       <div>
         <div class="big">${greet}.</div>
-        <div class="greet-sub">optiplex-7070 · online · ${DB.files.filter(f=>!f.trashed&&f.type!=='folder').length} files on the vault</div>
+        <div class="greet-sub">optiplex-7070 · online · ${STATS.files} files on the vault</div>
       </div>
       <div class="stats">
         <div class="stat"><div class="v acc">${fmtSize(used)}</div><div class="k">Stored</div></div>
@@ -5442,7 +5694,7 @@ function homeHTML() {
       ${tiles.map(t => `<div class="tile" data-tile="${t.t}">
         <div class="ti bg-${t.t} t-${t.t}">${svg(t.icon, 22, 1.7)}</div>
         <div class="k">${t.label}</div>
-        <div class="c">${allOfType(t.t).length} items · ${fmtSize(bytesByType()[t.t])}</div>
+        <div class="c">${countByType(t.t)} items · ${fmtSize(bytesByType()[t.t])}</div>
       </div>`).join('')}
     </div>
     <div class="block-head"><h2>Recently added</h2><button data-allfiles>View all files →</button></div>
@@ -5476,14 +5728,23 @@ function _render() {
   if (state.view === 'tags') { content.innerHTML = tagsManagerHTML(); wireTagsManager(); return; }
   let items, title, sub;
   if (state.view === 'browse') { items = children(state.folder); title = state.folder ? byId(state.folder).name : 'All files'; sub = `${items.length} items`; }
-  else if (state.view === 'cat') { items = allOfType(state.sub); title = { video: 'Films', audio: 'Music', image: 'Photos', document: 'Documents', model3d: 'Models', uasset: 'Game Assets' }[state.sub]; sub = `${items.length} items · ${fmtSize(items.reduce((s, f) => s + (f.size || 0), 0))}`; }
+  else if (state.view === 'cat') { items = allOfType(state.sub); title = { video: 'Films', audio: 'Music', image: 'Photos', document: 'Documents', model3d: 'Models', uasset: 'Game Assets' }[state.sub]; sub = `${countByType(state.sub)} items · ${fmtSize(bytesByType()[state.sub] || 0)}`; }
   else if (state.view === 'starred') { items = starred(); title = 'Starred'; sub = `${items.length} items`; }
-  else if (state.view === 'trash') { items = trashed(); title = 'Trash'; sub = `${items.length} items`; }
+  else if (state.view === 'trash') {
+    items = trashed(); title = 'Trash';
+    const keep = STATS.trashRetentionDays;
+    sub = `${items.length} items · ${fmtSize(trashBytes())}`
+      + (keep ? ` · auto-deleted after ${keep} day${keep === 1 ? '' : 's'}` : ' · auto-delete off');
+  }
   else if (state.view === 'search') {
     items = searchItems(state.query, state.scope);
     const scoped = state.scope != null && byId(state.scope);
     title = 'Search';
-    sub = `${items.length} result${items.length === 1 ? '' : 's'} for "${state.query}"` + (scoped ? ` in ${scoped.name}` : '');
+    // the server caps a search at 500 hits so a broad query can't drag the whole
+    // vault across the wire — say so rather than implying the list is complete
+    const capped = items.length >= 500;
+    sub = `${capped ? 'first ' : ''}${items.length} result${items.length === 1 ? '' : 's'} for "${state.query}"`
+      + (scoped ? ` in ${scoped.name}` : '') + (capped ? ' · narrow the search to see more' : '');
   }
   else if (state.view === 'tag') {
     const t = tagById(state.tag);
@@ -5594,11 +5855,16 @@ function cardHTML(f) {
   const locLine = state.view === 'search'
     ? `<div class="det"><span class="loc" title="${esc(locationLabel(f))}">${svg('folder', 11, 1.6)} ${esc(locationLabel(f))}</span></div>` : '';
   const tagLine = (() => { const h = fileTagsHTML(f); return h ? `<div class="card-tags">${h}</div>` : ''; })();
+  // in the Trash, the second meta column becomes the auto-deletion countdown —
+  // when it goes matters more than when it was last modified
+  const dateCell = state.view === 'trash'
+    ? `<span class="${_trashSoon(f) ? 'trash-soon' : ''}">${trashExpiryLabel(f)}</span>`
+    : `<span>${fmtDate(f.date)}</span>`;
   if (f.type === 'folder') {
-    const n = children(f.id).length;
+    const n = childCount(f);
     return `<div class="card folder${selClasses(f.id)}" data-id="${f.id}">
       <div class="thumb">${selCheckbox()}<span class="fic">${svg('folder', 52, 1.3)}</span>${_looksLocked(f) ? `<span class="lock-badge">${svg('lock', 12)}</span>` : ''}</div>
-      <div class="meta"><div class="nm">${esc(f.name)}</div><div class="det"><span>${n} item${n !== 1 ? 's' : ''}</span><span>${fmtDate(f.date)}</span></div>${locLine}${tagLine}</div>
+      <div class="meta"><div class="nm">${esc(f.name)}</div><div class="det"><span>${n} item${n !== 1 ? 's' : ''}</span>${dateCell}</div>${locLine}${tagLine}</div>
     </div>`;
   }
   return `<div class="card${selClasses(f.id)}" data-id="${f.id}">
@@ -5610,7 +5876,7 @@ function cardHTML(f) {
       ${_looksLocked(f) ? `<span class="lock-badge">${svg('lock', 12)}</span>` : ''}
       ${(f.type === 'video' || f.type === 'audio') ? `<div class="play-ov"><div class="pbtn">${svg('play', 18)}</div></div>` : ''}
     </div>
-    <div class="meta"><div class="nm">${esc(f.name)}</div><div class="det"><span>${fmtSize(f.size)}</span><span>${fmtDate(f.date)}</span></div>${locLine}${tagLine}${uploadSuggestionChipsHTML(f.id)}</div>
+    <div class="meta"><div class="nm">${esc(f.name)}</div><div class="det"><span>${fmtSize(f.size)}</span>${dateCell}</div>${locLine}${tagLine}${uploadSuggestionChipsHTML(f.id)}</div>
   </div>`;
 }
 /* Thumbnails are LAZY and connection-limited.
@@ -5869,7 +6135,7 @@ function listHTML(items) {
   </div>`;
 }
 function rowHTML(f) {
-  const kind = f.type === 'folder' ? `${children(f.id).length} items` : (fileExt(f.name) || f.type);
+  const kind = f.type === 'folder' ? `${childCount(f)} items` : (fileExt(f.name) || f.type);
   // compact meta line shown under the name on mobile (where the columns are hidden)
   let sub = f.type === 'folder' ? esc(kind) : `${fmtSize(f.size)} · ${esc(kind)} · ${fmtDate(f.date)}`;
   // In search results, show where each match lives (File-Explorer style), so
@@ -5878,6 +6144,7 @@ function rowHTML(f) {
     const loc = locationLabel(f);
     sub = `${esc(loc)} · ${sub}`;
   }
+  if (state.view === 'trash') sub = `${sub} · ${trashExpiryLabel(f)}`;
   // executables show their own embedded icon (extracted server-side) in place of
   // the generic type glyph; falls back to the type glyph if none is extractable.
   const icoCell = f.iconUrl
@@ -5899,7 +6166,7 @@ function rowHTML(f) {
     </div>
     <div class="cell">${f.type === 'folder' ? '—' : fmtSize(f.size)}</div>
     <div class="cell">${esc(kind)}</div>
-    <div class="cell">${fmtDate(f.date)}</div>
+    <div class="cell">${state.view === 'trash' ? `<span class="${_trashSoon(f) ? 'trash-soon' : 'dim'}">${trashExpiryLabel(f)}</span>` : fmtDate(f.date)}</div>
     <div class="rowact"><button class="iconbtn" data-more="${f.id}">${svg('more', 16)}</button></div>
   </div>`;
 }
@@ -6119,8 +6386,7 @@ function openTagPicker(ids, pt) {
 /* merge a server file record back into the local cache + repaint. */
 function _applyFileRec(rec) {
   if (!rec || !rec.id) return;
-  const i = DB.files.findIndex(x => x.id === rec.id);
-  if (i >= 0) DB.files[i] = rec; else DB.files.push(rec);
+  dbUpsert(rec);
   render();
 }
 
@@ -6582,16 +6848,14 @@ function openFileById(id) { if (byId(id)) openItem(id); }
    File-Explorer style: searches the whole vault by name, but if `scope` is a
    folder id the results are limited to that folder's subtree (everything under
    it, at any depth). scope === null/undefined => the entire database. */
+/* Search runs on the SERVER (it holds the plaintext names, and the client only
+   caches the slices it has opened). ensureScope('q:…') fetches the hit list and
+   parks the matching ids in SEARCH; this just resolves them against the cache. */
 function searchItems(q, scope) {
-  q = q.toLowerCase().trim(); if (!q) return [];
-  const pool = (scope != null) ? descendants(scope) : DB.files;
-  // tags whose name matches the query — an item also matches if it carries one
-  const tagHits = new Set(allTags().filter(t => t.name.toLowerCase().includes(q)).map(t => t.id));
-  return pool.filter(f => {
-    if (f.trashed) return false;
-    if (f.name.toLowerCase().includes(q)) return true;
-    return tagHits.size && Array.isArray(f.tags) && f.tags.some(id => tagHits.has(id));
-  });
+  q = (q || '').toLowerCase().trim(); if (!q) return [];
+  const key = 'q:' + q + (scope != null ? '|' + scope : '');
+  if (SEARCH.key !== key) return [];        // results still in flight — render() re-runs when they land
+  return SEARCH.ids.map(byId).filter(f => f && !f.trashed);
 }
 /* Remember the view we entered search FROM, so clearing the box returns there
    instead of always bouncing to the Database home. */
@@ -7429,10 +7693,7 @@ function newFolderModal() {
 
 /* keep the in-memory DB row in sync after a server mutation, then repaint */
 function _replaceDbRow(updated) {
-  if (typeof DB !== 'undefined' && DB && DB.files && updated && updated.id) {
-    const idx = DB.files.findIndex(f => f.id === updated.id);
-    if (idx >= 0) DB.files[idx] = updated; else DB.files.push(updated);
-  }
+  if (typeof DB !== 'undefined' && DB && DB.files && updated && updated.id) dbUpsert(updated);
 }
 /* POST encrypted bytes + the public lockSpec; server stores the ciphertext blob
    and marks the row locked. Returns the updated row. */
@@ -7889,8 +8150,7 @@ function legacyModal(f, action) {
     const btn = bg.querySelector('#lgGo'); btn.disabled = true; btn.textContent = 'Re-encrypting…';
     try {
       const rec = await reencryptFile(f.id);
-      const i = DB.files.findIndex(x => x.id === f.id);
-      if (i >= 0) DB.files[i] = rec;
+      dbUpsert(rec);
       close(); render();
       toast('Re-encrypted under your key', 'check');
       if (action === 'download') downloadFile(f.id);
@@ -9466,9 +9726,15 @@ async function pollTick() {
   if (p.filesRev === lastFilesRev) return;          // nothing new
   // only the Database app renders the file list; other apps reload it on entry (openDatabase)
   if (currentApp !== 'database') return;
-  if (uiBusy()) { renderStorage(); return; }        // user is busy — keep the meter fresh, retry next tick
+  if (uiBusy()) { loadStats(true).then(renderStorage); return; }   // user is busy — keep the meter fresh, retry next tick
   lastFilesRev = p.filesRev;                         // only advance once we actually apply the change
-  try { await loadDB(); render(); } catch (e) { if (e.code === 'AUTH') relock(); }
+  // the table moved: drop the "already loaded" marks (not the cached rows) so the
+  // current view re-fetches just its own slice, and refresh the aggregates.
+  try {
+    invalidateScopes();
+    await Promise.all([ensureScope('folders'), loadStats(true)]);
+    render();
+  } catch (e) { if (e.code === 'AUTH') relock(); }
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden && ACCOUNT) pollTick(); });
 

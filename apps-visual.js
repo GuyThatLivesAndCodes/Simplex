@@ -2447,7 +2447,10 @@ function visUploadTextureDevice() {
 
 /* Vault picker: a grid of the account's image files; choosing one fetches its
    decrypted bytes (/api/files/:id/raw) and stores them inline as a texture. */
-function visUploadTextureVault() {
+async function visUploadTextureVault() {
+  // the cache only holds slices this session has opened — make sure the photo
+  // library is one of them before picking from it
+  try { if (typeof ensureScope === 'function') await ensureScope('t:image'); } catch (e) {}
   const files = (typeof DB !== 'undefined' && DB && Array.isArray(DB.files)) ? DB.files : [];
   const images = files.filter(f => f && f.type === 'image' && !f.trashed);
   const bg = document.createElement('div'); bg.className = 'modal-bg';
