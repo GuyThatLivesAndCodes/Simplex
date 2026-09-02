@@ -57,7 +57,7 @@ const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const vault = require('./crypto');
 
-const RESCUE_VERSION = '6';   // bump when commands are added; printed by every command
+const RESCUE_VERSION = '7';   // bump when commands are added; printed by every command
 const ROOT = __dirname;
 const VAULT_DIR = process.env.SIMPLEX_VAULT_DIR ? path.resolve(process.env.SIMPLEX_VAULT_DIR) : path.join(ROOT, 'vault');
 const ACCOUNTS_DIR = path.join(VAULT_DIR, 'accounts');
@@ -881,8 +881,178 @@ function cmdInspect() {
   console.log('\n  (both read from throwaway copies under ' + work + ')\n');
 }
 
+/* ============================================================
+   SALVAGE — pull account rows out of a database SQLite refuses to open
+   ------------------------------------------------------------
+   "database disk image is malformed" means a snapshot caught the file
+   mid-write: some pages are torn, and SQLite gives up on the whole file rather
+   than hand back a partial b-tree. But the rows we need are not spread thin —
+   an accounts table is a handful of records, and each one is almost certainly
+   sitting intact on some page that was never touched.
+
+   So we ignore the b-tree entirely and read the file as pages. Every table
+   leaf page (type 0x0D) has a cell pointer array; every cell holds one record;
+   every record starts with a header of serial types. A Simplex account id is a
+   distinctive TEXT value — 'a' plus 12 hex digits — so a record whose first
+   column looks like that, with enough columns after it, is an account row.
+   We do the same over the -wal, whose frames are just pages with a 24-byte
+   header, because the newest copy of a page usually lives there.
+
+   This is read-only and best-effort: it recovers what survived, and says so.
+   ============================================================ */
+function readVarint(buf, off) {
+  let val = 0n;
+  for (let i = 0; i < 8; i++) {
+    if (off + i >= buf.length) return null;
+    const b = buf[off + i];
+    val = (val << 7n) | BigInt(b & 0x7f);
+    if (!(b & 0x80)) return { value: val, len: i + 1 };
+  }
+  if (off + 8 >= buf.length) return null;
+  val = (val << 8n) | BigInt(buf[off + 8]);
+  return { value: val, len: 9 };
+}
+/* Decode one SQLite record into an array of JS values (Buffer for BLOBs). */
+function parseRecord(buf, off, end) {
+  const h = readVarint(buf, off);
+  if (!h) return null;
+  const headerLen = Number(h.value);
+  if (headerLen <= 0 || off + headerLen > end) return null;
+  const types = [];
+  let p = off + h.len;
+  const headerEnd = off + headerLen;
+  while (p < headerEnd) {
+    const t = readVarint(buf, p);
+    if (!t) return null;
+    types.push(Number(t.value));
+    p += t.len;
+  }
+  const out = [];
+  let d = headerEnd;
+  for (const t of types) {
+    let v, len = 0;
+    if (t === 0) v = null;
+    else if (t >= 1 && t <= 6) { len = [0, 1, 2, 3, 4, 6, 8][t]; if (d + len > end) return null; v = 0; for (let i = 0; i < len; i++) v = v * 256 + buf[d + i]; }
+    else if (t === 7) { len = 8; v = d + 8 <= end ? buf.readDoubleBE(d) : null; }
+    else if (t === 8) v = 0;
+    else if (t === 9) v = 1;
+    else if (t >= 12 && t % 2 === 0) { len = (t - 12) / 2; if (d + len > end) return null; v = buf.subarray(d, d + len); }
+    else if (t >= 13 && t % 2 === 1) { len = (t - 13) / 2; if (d + len > end) return null; v = buf.toString('utf8', d, d + len); }
+    else v = null;
+    out.push(v);
+    d += len;
+  }
+  return out;
+}
+const ACCT_ID_RE = /^a[0-9a-f]{12}$/;
+/* Walk one page's cells, collecting any record that looks like an account row. */
+function harvestPage(page, hits, pageBase) {
+  // page 1 carries the 100-byte file header before its b-tree header
+  const hdrOff = pageBase === 0 ? 100 : 0;
+  if (page[hdrOff] !== 0x0d) return;                    // table leaf pages only
+  const cellCount = page.readUInt16BE(hdrOff + 3);
+  if (!cellCount || cellCount > 4096) return;
+  const ptrArray = hdrOff + 8;
+  for (let i = 0; i < cellCount; i++) {
+    const po = ptrArray + i * 2;
+    if (po + 2 > page.length) return;
+    const cellOff = page.readUInt16BE(po);
+    if (cellOff < hdrOff || cellOff >= page.length) continue;
+    const pl = readVarint(page, cellOff);
+    if (!pl) continue;
+    const rid = readVarint(page, cellOff + pl.len);
+    if (!rid) continue;
+    const payloadStart = cellOff + pl.len + rid.len;
+    // records that overflow onto another page are skipped: the tail is elsewhere
+    const payloadEnd = Math.min(payloadStart + Number(pl.value), page.length);
+    const rec = parseRecord(page, payloadStart, payloadEnd);
+    if (!rec || rec.length < 9) continue;
+    if (typeof rec[0] !== 'string' || !ACCT_ID_RE.test(rec[0])) continue;
+    // keep the richest copy of each id: later pages/WAL frames win, and a row
+    // with more columns decoded is a more complete row
+    const prev = hits.get(rec[0]);
+    if (!prev || rec.length >= prev.length) hits.set(rec[0], rec);
+  }
+}
+function cmdSalvage() {
+  const src = positional[0];
+  if (!src) die('usage: node rescue.js salvage <path-to-system.sqlite> [--out <file.json>]');
+  if (!fs.existsSync(src)) die('no file at ' + src);
+  const walPath = src + '-wal';
+  const hits = new Map();
+
+  // --- the main database, page by page ---
+  const buf = fs.readFileSync(src);
+  let pageSize = 4096;
+  const w = fs.existsSync(walPath) ? readWalHeader(walPath) : null;
+  if (w && w.valid && w.pageSize) pageSize = w.pageSize;
+  else if (buf.length > 18 && buf.toString('latin1', 0, 15) === 'SQLite format 3') {
+    const ps = buf.readUInt16BE(16); pageSize = ps === 1 ? 65536 : ps;
+  }
+  console.log('\n  page size: ' + pageSize);
+  let pages = 0;
+  for (let off = 0; off + pageSize <= buf.length; off += pageSize) {
+    harvestPage(buf.subarray(off, off + pageSize), hits, off);
+    pages++;
+  }
+  console.log('  main db  : ' + pages + ' page(s) scanned, ' + hits.size + ' account row(s) so far');
+
+  // --- the WAL: 32-byte header, then frames of (24-byte header + one page) ---
+  if (fs.existsSync(walPath)) {
+    const wal = fs.readFileSync(walPath);
+    let frames = 0;
+    for (let off = 32; off + 24 + pageSize <= wal.length; off += 24 + pageSize) {
+      const pageNo = wal.readUInt32BE(off);
+      harvestPage(wal.subarray(off + 24, off + 24 + pageSize), hits, pageNo === 1 ? 0 : 1);
+      frames++;
+    }
+    console.log('  wal      : ' + frames + ' frame(s) scanned, ' + hits.size + ' account row(s) total');
+  }
+
+  if (!hits.size) {
+    console.log('\n  No account rows found. Try another snapshot.\n');
+    return;
+  }
+
+  // Column order follows the CREATE TABLE plus the ALTERs, in the order server.js
+  // applies them — deterministic, so position maps to name.
+  const COLS = ['id', 'username', 'display', 'pw_salt', 'pw_hash', 'is_admin', 'quota_bytes',
+    'avatar_color', 'created', 'prefs', 'can_code', 'can_ai', 'can_neural_backend',
+    'org_max_tier', 'security_tier', 'email', 'safety', 'totp_secret', 'totp_pending',
+    'key_enrolled', 'key_kek_salt', 'key_wrap_pw', 'key_rc_salt', 'key_wrap_rc',
+    'key_wrap_stale', 'key_rc_enc'];
+
+  const out = [];
+  console.log('\n  RECOVERED ACCOUNTS\n');
+  for (const [id, rec] of hits) {
+    const row = {};
+    rec.forEach((v, i) => {
+      const name = COLS[i] || ('col' + i);
+      row[name] = Buffer.isBuffer(v) ? { __blob: v.toString('base64') } : v;
+    });
+    out.push(row);
+    const dir = path.join(ACCOUNTS_DIR, id);
+    const here = fs.existsSync(dir);
+    const size = here ? dirStats(path.join(dir, 'files')).bytes : 0;
+    const wrapped = rec.length > 21 && Buffer.isBuffer(rec[21]);
+    console.log('    ' + id + '  ' + String(row.username || '?').padEnd(16)
+      + (rec.length) + ' cols'
+      + (wrapped ? '  WRAPPED KEY PRESENT' : '  no key wrap')
+      + '\n        folder here: ' + (here ? fmtSize(size) + ' of data' : 'NO'));
+  }
+
+  const dest = opt('out') || path.join(VAULT_DIR, 'rescue-backups', 'salvaged-accounts.json');
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.writeFileSync(dest, JSON.stringify(out, null, 2));
+  console.log('\n  written: ' + dest);
+  console.log('  BLOB columns are base64 under { "__blob": ... }.');
+  console.log('  A row showing WRAPPED KEY PRESENT still carries the per-user key wrap,');
+  console.log('  which is what unseals that account\'s v2 files.\n');
+}
+
 switch (cmd) {
   case 'scan': cmdScan(); break;
+  case 'salvage': cmdSalvage(); break;
   case 'inspect': cmdInspect(); break;
   case 'check-system': cmdCheckSystem(); break;
   case 'names': cmdNames(); break;
@@ -903,7 +1073,8 @@ switch (cmd) {
     console.log('  node rescue.js wal-check                    does the surviving -wal hold the old account rows?');
     console.log('  node rescue.js find-keys [dir...]           hunt for a master key on disk and test it');
     console.log('  node rescue.js check-system <path>          is this recovered system.sqlite the right one?');
-    console.log('  node rescue.js inspect <path>               what IS this file? size, header, tables\n');
+    console.log('  node rescue.js inspect <path>               what IS this file? size, header, tables');
+    console.log('  node rescue.js salvage <path>               rip account rows out of a MALFORMED database\n');
     console.log('  scan / try-key / orphan-blobs never write. adopt backs up system.sqlite first.');
     console.log('  Nothing in this tool deletes anything.\n');
 }
