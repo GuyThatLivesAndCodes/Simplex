@@ -57,7 +57,7 @@ const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const vault = require('./crypto');
 
-const RESCUE_VERSION = '8';   // bump when commands are added; printed by every command
+const RESCUE_VERSION = '9';   // bump when commands are added; printed by every command
 const ROOT = __dirname;
 const VAULT_DIR = process.env.SIMPLEX_VAULT_DIR ? path.resolve(process.env.SIMPLEX_VAULT_DIR) : path.join(ROOT, 'vault');
 const ACCOUNTS_DIR = path.join(VAULT_DIR, 'accounts');
@@ -268,18 +268,22 @@ function cmdScan() {
     if (newer) walNewer = true;
     console.log('  ' + suffix.slice(1) + '    : present, mtime ' + mtime(p) + (newer ? '   <- NEWER than the db itself' : ''));
   }
-  if (walNewer) {
-    console.log('');
-    console.log('  !! The -wal is NEWER than system.sqlite. That is the signature of a file');
-    console.log('     copy dropping a database in underneath a WAL the running server was');
-    console.log('     still writing — the two no longer belong together.');
-    console.log('     SQLite REPLAYS a WAL on open, and replaying a foreign one can leave the');
-    console.log('     database unreadable. Do not start the server until you have run:');
-    console.log('         node rescue.js wal-check');
-    console.log('     It tests both combinations on COPIES and tells you which is real.');
-  }
+  // NOTE: a -wal is ALWAYS newer than its database — it is where writes land
+  // between checkpoints. On its own that means nothing, and warning about it
+  // scared a user mid-recovery into thinking a good restore had gone wrong. The
+  // only signal worth acting on is the database failing to read, which is
+  // checked below once we have actually tried to open it.
   const accounts = new Map();
   const sysdb = openRO(SYSTEM_DB_PATH);
+  const sysStat = (sysdb && !sysdb._err) ? tableStatus(sysdb, 'accounts') : null;
+  if (sysStat && !sysStat.readable) {
+    console.log('');
+    console.log('  !! SQLite cannot read this database: "' + sysStat.err + '"');
+    console.log('     In WAL mode the newest pages — page 1 included — live in the -wal, so a');
+    console.log('     database copied WITHOUT its -wal reads as garbage. Make sure both files');
+    console.log('     travelled together, then:  node rescue.js inspect ' + SYSTEM_DB_PATH);
+    if (walNewer) console.log('     If they did, run: node rescue.js wal-check');
+  }
   if (sysdb && !sysdb._err && tableExists(sysdb, 'accounts')) {
     const cols = new Set(sysdb.prepare('PRAGMA table_info(accounts)').all().map(c => c.name));
     const rows = sysdb.prepare('SELECT * FROM accounts').all();
@@ -338,25 +342,48 @@ function cmdScan() {
   console.log('  logins pointing at a MISSING folder      : ' + ghosts.length);
   for (const g of ghosts) console.log('      ' + g + '  ' + (accounts.get(g) || {}).username);
 
-  const anyMismatch = orphanedFolders.some(o => o.inf.keyOpens && !o.inf.keyOpens.match);
+  // Which folders does the key have to open? The ones with a LOGIN. A folder with
+  // no login that fails the key test is data from the OTHER vault sitting in this
+  // directory — it is supposed to fail, and reading it as "wrong master key" told
+  // a user to undo a restore that had just worked.
+  const loggedIn = dirs.filter(id => accounts.has(id) && !id.startsWith('__'));
+  const brokenLogins = loggedIn
+    .map(id => ({ id, inf: inspectAccount(id, key, false) }))
+    .filter(x => x.inf.keyOpens && !x.inf.keyOpens.match);
+  const foreignOrphans = orphanedFolders.filter(o => o.inf.keyOpens && !o.inf.keyOpens.match);
+  if (foreignOrphans.length) {
+    console.log('\n  ' + foreignOrphans.length + ' folder(s) have no login AND do not decrypt with this key.');
+    console.log('  That combination means they belong to a DIFFERENT vault — leftovers from the');
+    console.log('  copy, not your data. Leave them alone; deleting them frees space but is');
+    console.log('  irreversible, and their own key/database may still be in rescue-backups.');
+  }
   console.log('\nWHAT TO DO NEXT');
   if (!key) {
     console.log('  1. Find your master key backup. Nothing else matters until then.');
-  } else if (anyMismatch) {
+  } else if (brokenLogins.length) {
+    console.log('  1. ' + brokenLogins.length + ' account(s) WITH a login cannot be decrypted by the installed key:');
+    for (const b of brokenLogins) console.log('       ' + b.id + '  ' + (accounts.get(b.id) || {}).username);
+    console.log('     The key and the accounts database disagree. Find the key that goes with');
+    console.log('     this database and test it without installing it:');
+    console.log('         node rescue.js try-key <hex-or-file>');
+  } else if (false) {
     console.log('  1. The installed master key does NOT match some of this data — the copy');
     console.log('     replaced vault/keys/master.key with the other vault\'s key.');
     console.log('     Find the ORIGINAL key (password manager, `key.js backup` output, an');
     console.log('     old server image) and test it WITHOUT installing it:');
     console.log('         node rescue.js try-key <hex-or-file>');
     console.log('     Until the right key is installed, do not adopt anything.');
-  } else if (orphanedFolders.length) {
+  } else if (orphanedFolders.filter(o => !(o.inf.keyOpens && !o.inf.keyOpens.match)).length) {
     console.log('  1. The master key is correct for this data — the files are readable.');
     console.log('     Rebuild each lost login (the id must stay the same, it is half the key):');
     console.log('         node rescue.js adopt <accountId> --username <name> --password <newpass> [--admin]');
     console.log('     Accounts that were "per-user key ENROLLED" also need their ORIGINAL');
     console.log('     system.sqlite for their v2 files; v1 files come back regardless.');
   } else {
-    console.log('  Every folder has a matching login. Nothing to adopt.');
+    console.log('  Every folder holding data has a matching login, and the installed key');
+    console.log('  decrypts everything it needs to. Nothing left to repair here.');
+    console.log('  Start the server and have each account sign in with their OWN password —');
+    console.log('  that is what unwraps their per-user key and unseals their v2 files.');
   }
   console.log('  Whatever you do next: copy the whole vault/ to a second disk FIRST.\n');
 }
