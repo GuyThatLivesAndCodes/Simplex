@@ -57,6 +57,7 @@ const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const vault = require('./crypto');
 
+const RESCUE_VERSION = '4';   // bump when commands are added; printed by every command
 const ROOT = __dirname;
 const VAULT_DIR = process.env.SIMPLEX_VAULT_DIR ? path.resolve(process.env.SIMPLEX_VAULT_DIR) : path.join(ROOT, 'vault');
 const ACCOUNTS_DIR = path.join(VAULT_DIR, 'accounts');
@@ -188,7 +189,7 @@ function inspectAccount(id, key, deep) {
 function cmdScan() {
   const deep = flags.has('--deep');
   console.log('\n==================================================================');
-  console.log('  SIMPLEX vault rescue — read-only scan');
+  console.log('  SIMPLEX vault rescue v' + RESCUE_VERSION + ' — read-only scan');
   console.log('  vault: ' + VAULT_DIR);
   console.log('==================================================================\n');
 
@@ -670,8 +671,79 @@ function cmdFindKeys() {
   else console.log('  Install the one that opens the folders you care about:\n      node key.js restore "<path>" --force\n');
 }
 
+/* ---------- check-system: does this candidate system.sqlite match the data on disk? ----------
+   Before swapping a recovered database in, confirm it is the RIGHT one: read its
+   accounts and see how many of them actually have a folder full of files sitting
+   in this vault. The original will cover the big orphaned folders; the wrong one
+   will not. Read-only, and it works on a file anywhere (a shadow copy, a backup).
+   The candidate is copied to a scratch dir first so replaying its WAL can never
+   touch the file you are evaluating. */
+function cmdCheckSystem() {
+  const src = positional[0];
+  if (!src) die('usage: node rescue.js check-system <path-to-system.sqlite>');
+  if (!fs.existsSync(src)) die('no file at ' + src);
+
+  const work = path.join(VAULT_DIR, 'rescue-backups', 'check-system-' + Date.now());
+  fs.mkdirSync(work, { recursive: true });
+  const dst = path.join(work, 'system.sqlite');
+  fs.copyFileSync(src, dst);
+  for (const suffix of ['-wal', '-shm']) {
+    if (fs.existsSync(src + suffix)) fs.copyFileSync(src + suffix, dst + suffix);
+  }
+
+  let db;
+  try { db = new Database(dst); } catch (e) { die('cannot open it: ' + e.message); }
+  if (!tableExists(db, 'accounts')) die('no accounts table — this is not a Simplex system database.');
+  const cols = new Set(db.prepare('PRAGMA table_info(accounts)').all().map(c => c.name));
+  const rows = db.prepare('SELECT * FROM accounts ORDER BY username').all();
+  db.close();
+
+  console.log('\n  candidate: ' + src);
+  console.log('  accounts : ' + rows.length + '\n');
+
+  let covered = 0, coveredBytes = 0;
+  for (const a of rows) {
+    const dir = path.join(ACCOUNTS_DIR, a.id);
+    const here = fs.existsSync(dir);
+    let size = 0, files = 0;
+    if (here) { const st = dirStats(path.join(dir, 'files')); size = st.bytes; files = st.files; }
+    if (here && size > 0) { covered++; coveredBytes += size; }
+    const enrolled = cols.has('key_enrolled') && a.key_enrolled;
+    console.log('    ' + a.id + '  ' + String(a.username).padEnd(16)
+      + (a.is_admin ? 'admin ' : 'member')
+      + (enrolled ? '  per-user key ENROLLED' : '  master-key only')
+      + '\n        folder here: ' + (here ? `yes — ${files} blob(s), ${fmtSize(size)}` : 'NO'));
+  }
+
+  // folders on disk this candidate does NOT account for
+  const known = new Set(rows.map(r => r.id));
+  const unmatched = fs.readdirSync(ACCOUNTS_DIR, { withFileTypes: true })
+    .filter(e => e.isDirectory() && !e.name.startsWith('__') && !known.has(e.name))
+    .map(e => ({ id: e.name, bytes: dirStats(path.join(ACCOUNTS_DIR, e.name, 'files')).bytes }))
+    .filter(f => f.bytes > 0);
+
+  console.log('\n  covers ' + covered + ' folder(s) holding ' + fmtSize(coveredBytes) + ' of data on this disk');
+  if (unmatched.length) {
+    console.log('  does NOT cover ' + unmatched.length + ' folder(s) that hold data:');
+    for (const u of unmatched) console.log('      ' + u.id + '  ' + fmtSize(u.bytes));
+  }
+  console.log('');
+  if (coveredBytes > 0) {
+    console.log('  If the covered folders are the ones you lost, this is the database you want.');
+    console.log('  BEFORE swapping it in (server stopped), keep what is there now — it is the');
+    console.log('  only copy of the other vault\'s accounts:');
+    console.log('      copy "vault\\system.sqlite*" "vault\\rescue-backups\\"');
+    console.log('  Then copy the candidate (AND its -wal/-shm, if any) into vault\\.');
+    console.log('  The master key must match it too — test that separately:');
+    console.log('      node rescue.js try-key <recovered master.key>\n');
+  } else {
+    console.log('  This database accounts for none of the data here. Wrong file.\n');
+  }
+}
+
 switch (cmd) {
   case 'scan': cmdScan(); break;
+  case 'check-system': cmdCheckSystem(); break;
   case 'names': cmdNames(); break;
   case 'wal-check': cmdWalCheck(); break;
   case 'find-keys': cmdFindKeys(); break;
@@ -679,7 +751,8 @@ switch (cmd) {
   case 'adopt': cmdAdopt(); break;
   case 'orphan-blobs': cmdOrphanBlobs(); break;
   default:
-    console.log('SIMPLEX vault rescue — recover accounts after a bad vault copy\n');
+    console.log('SIMPLEX vault rescue v' + RESCUE_VERSION + ' — recover accounts after a bad vault copy');
+    console.log('(if a command below is "not recognised", your copy of rescue.js is older than this list)\n');
     console.log('  node rescue.js scan [--deep]                 read-only report — START HERE');
     console.log('  node rescue.js try-key <hex|file>            test a candidate master key against the data');
     console.log('  node rescue.js adopt <id> --username <u> --password <p> [--admin]');
@@ -687,7 +760,8 @@ switch (cmd) {
     console.log('  node rescue.js orphan-blobs <id>            blobs the metadata db lost track of');
     console.log('  node rescue.js names <id> [--key <k>]        decrypt filenames — tells you WHICH vault a folder is');
     console.log('  node rescue.js wal-check                    does the surviving -wal hold the old account rows?');
-    console.log('  node rescue.js find-keys [dir...]           hunt for a master key on disk and test it\n');
+    console.log('  node rescue.js find-keys [dir...]           hunt for a master key on disk and test it');
+    console.log('  node rescue.js check-system <path>          is this recovered system.sqlite the right one?\n');
     console.log('  scan / try-key / orphan-blobs never write. adopt backs up system.sqlite first.');
     console.log('  Nothing in this tool deletes anything.\n');
 }
