@@ -57,7 +57,7 @@ const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const vault = require('./crypto');
 
-const RESCUE_VERSION = '5';   // bump when commands are added; printed by every command
+const RESCUE_VERSION = '6';   // bump when commands are added; printed by every command
 const ROOT = __dirname;
 const VAULT_DIR = process.env.SIMPLEX_VAULT_DIR ? path.resolve(process.env.SIMPLEX_VAULT_DIR) : path.join(ROOT, 'vault');
 const ACCOUNTS_DIR = path.join(VAULT_DIR, 'accounts');
@@ -89,9 +89,43 @@ function openRO(file) {
   try { return new Database(file, { readonly: true, fileMustExist: true }); }
   catch (e) { return { _err: e.message }; }
 }
-function tableExists(db, name) {
-  try { return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name); }
-  catch (e) { return false; }
+/* Careful here: a database that cannot be READ AT ALL ("file is not a database")
+   and one that reads fine but has no such table are completely different
+   situations — the first is a copy/recovery problem, the second means you have
+   the wrong file. Collapsing both into `false` reports a recoverable database as
+   junk, so callers that need to tell them apart use tableStatus(). */
+function tableStatus(db, name) {
+  try { return { readable: true, present: !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name) }; }
+  catch (e) { return { readable: false, present: false, err: e.message }; }
+}
+function tableExists(db, name) { return tableStatus(db, name).present; }
+
+/* Parse a -wal header. In WAL mode the newest copy of EVERY page — page 1, the
+   file header, included — can live here rather than in the .sqlite file, which is
+   why a database whose first page reads as zeroes still opens perfectly with its
+   WAL beside it, and why copying the .sqlite alone silently loses everything
+   written since the last checkpoint. If this header is damaged SQLite ignores the
+   whole WAL, and you are left with only what the main file happens to hold. */
+function readWalHeader(walPath) {
+  let fd;
+  try {
+    const size = fs.statSync(walPath).size;
+    if (size < 32) return { size, tooSmall: true };
+    fd = fs.openSync(walPath, 'r');
+    const h = Buffer.alloc(32);
+    fs.readSync(fd, h, 0, 32, 0);
+    const magic = h.readUInt32BE(0);
+    return {
+      size,
+      magic: '0x' + magic.toString(16),
+      valid: magic === 0x377f0682 || magic === 0x377f0683,
+      format: h.readUInt32BE(4),
+      pageSize: h.readUInt32BE(8),
+      checkpointSeq: h.readUInt32BE(12),
+      salt1: h.readUInt32BE(16), salt2: h.readUInt32BE(20),
+    };
+  } catch (e) { return { err: e.message }; }
+  finally { if (fd !== undefined) try { fs.closeSync(fd); } catch (e) {} }
 }
 
 /* Recursive size + file count of a directory (the blobs are the bulk). */
@@ -693,7 +727,17 @@ function cmdCheckSystem() {
 
   let db;
   try { db = new Database(dst); } catch (e) { die('cannot open it: ' + e.message); }
-  if (!tableExists(db, 'accounts')) die('no accounts table — this is not a Simplex system database.');
+  const stt = tableStatus(db, 'accounts');
+  if (!stt.readable) {
+    db.close();
+    die('SQLite cannot read this database: "' + stt.err + '"\n' +
+        '  That is a COPY problem, not proof the file is worthless. In WAL mode the\n' +
+        '  first page often lives in the -wal, so the .sqlite alone is unreadable.\n' +
+        '  Copy system.sqlite AND system.sqlite-wal together, then:\n' +
+        '      node rescue.js inspect <the system.sqlite>\n' +
+        '  which reports whether the WAL header is intact.');
+  }
+  if (!stt.present) die('readable, but it has no accounts table — this is not a Simplex system database.');
   const cols = new Set(db.prepare('PRAGMA table_info(accounts)').all().map(c => c.name));
   const rows = db.prepare('SELECT * FROM accounts ORDER BY username').all();
   db.close();
@@ -767,28 +811,49 @@ function cmdInspect() {
   const fd = fs.openSync(src, 'r');
   try { fs.readSync(fd, head, 0, head.length, 0); } finally { fs.closeSync(fd); }
   const isSqlite = head.toString('latin1').startsWith('SQLite format 3');
-  console.log('  header  : ' + JSON.stringify(head.toString('latin1')) + (isSqlite ? '   <- valid SQLite' : '   <- NOT a SQLite database'));
-  if (!isSqlite) {
-    if (st.size === 32) console.log('\n  32 bytes and not SQLite — this looks like a master KEY, not a database.\n');
-    else console.log('\n  Whatever this is, it is not a database. Check what you actually copied.\n');
+  const allZero = head.every(b => b === 0);
+  console.log('  header  : ' + (allZero ? '16 zero bytes' : JSON.stringify(head.toString('latin1')))
+    + (isSqlite ? '   <- valid SQLite' : '   <- not a SQLite header'));
+  if (!isSqlite && st.size === 32) {
+    console.log('\n  32 bytes and not SQLite — this is a master KEY, not a database.\n');
     return;
   }
 
+  const walPath = src + '-wal';
+  const hasWal = fs.existsSync(walPath);
   for (const suffix of ['-wal', '-shm']) {
     const p = src + suffix;
     console.log('  ' + suffix.slice(1) + '     : ' + (fs.existsSync(p) ? fs.statSync(p).size + ' bytes, mtime ' + mtime(p) : 'absent'));
+  }
+  if (hasWal) {
+    const w = readWalHeader(walPath);
+    if (w.err) console.log('  wal hdr : unreadable — ' + w.err);
+    else if (w.tooSmall) console.log('  wal hdr : file is only ' + w.size + ' bytes — no usable header');
+    else {
+      console.log('  wal hdr : magic ' + w.magic + (w.valid ? '  VALID' : '  INVALID — SQLite will ignore this WAL')
+        + ', page size ' + w.pageSize + ', checkpoint seq ' + w.checkpointSeq);
+    }
+  }
+  if (!isSqlite && !hasWal) {
+    console.log('\n  Not a database, and no WAL to recover a header from.\n');
+    return;
+  }
+  if (!isSqlite) {
+    console.log('\n  The main file has no header, but a WAL is present. In WAL mode page 1');
+    console.log('  lives in the WAL until a checkpoint, so this is normal for a snapshot of');
+    console.log('  a RUNNING server and is very often fully recoverable. Testing below.');
   }
 
   // Tables, read two ways: the db alone, then the db with whatever WAL sits beside
   // it. A database whose tables appear only in the second is one whose content is
   // stranded in the WAL — copy the pair or you copy nothing.
   const work = path.join(VAULT_DIR, 'rescue-backups', 'inspect-' + Date.now());
-  const listTables = (withSiblings, label) => {
+  const listTables = (siblings, label) => {
     const dir = path.join(work, label.replace(/\W+/g, '-'));
     fs.mkdirSync(dir, { recursive: true });
     const dst = path.join(dir, 'db.sqlite');
     fs.copyFileSync(src, dst);
-    if (withSiblings) for (const suffix of ['-wal', '-shm']) {
+    for (const suffix of siblings) {
       if (fs.existsSync(src + suffix)) fs.copyFileSync(src + suffix, dst + suffix);
     }
     let db;
@@ -808,9 +873,11 @@ function cmdInspect() {
     db.close();
   };
   console.log('\n  contents:');
-  listTables(false, 'db alone');
+  listTables([], 'db alone');
   console.log('');
-  listTables(true, 'db + its wal');
+  listTables(['-wal'], 'db + wal');
+  console.log('');
+  listTables(['-wal', '-shm'], 'db + wal + shm');
   console.log('\n  (both read from throwaway copies under ' + work + ')\n');
 }
 
