@@ -57,7 +57,7 @@ const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const vault = require('./crypto');
 
-const RESCUE_VERSION = '7';   // bump when commands are added; printed by every command
+const RESCUE_VERSION = '8';   // bump when commands are added; printed by every command
 const ROOT = __dirname;
 const VAULT_DIR = process.env.SIMPLEX_VAULT_DIR ? path.resolve(process.env.SIMPLEX_VAULT_DIR) : path.join(ROOT, 'vault');
 const ACCOUNTS_DIR = path.join(VAULT_DIR, 'accounts');
@@ -1050,8 +1050,117 @@ function cmdSalvage() {
   console.log('  which is what unseals that account\'s v2 files.\n');
 }
 
+/* ---------- install: put a recovered key + database back, with the checks ----------
+   The whole recovery comes down to two file copies, which is exactly the moment
+   a mistyped path or a forgotten -wal undoes hours of work. So: verify both
+   candidates FIRST (the database must open and hold accounts; the key must
+   actually decrypt folders on this disk), move the current files aside rather
+   than overwrite them, copy the new pair in together, then re-verify. Nothing is
+   deleted, and --yes is required before anything is written. */
+function cmdInstall() {
+  const sysSrc = opt('system'), keySrc = opt('key');
+  if (!sysSrc && !keySrc) die('usage: node rescue.js install --system <system.sqlite> --key <master.key> [--yes]');
+  if (sysSrc && !fs.existsSync(sysSrc)) die('no file at ' + sysSrc);
+  if (keySrc && !fs.existsSync(keySrc)) die('no file at ' + keySrc);
+
+  console.log('\n  ---- verifying the candidates (nothing written yet) ----\n');
+
+  // --- the key: does it decrypt anything actually on this disk? ---
+  let key = null;
+  if (keySrc) {
+    const buf = fs.readFileSync(keySrc);
+    key = buf.length === 32 ? buf : vault.decodeKeyString(buf.toString('utf8').trim());
+    if (!key || key.length !== 32) die('that key file is not a 32-byte key.');
+    const opens = [];
+    for (const id of fs.readdirSync(ACCOUNTS_DIR, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name)) {
+      const db = openRO(path.join(ACCOUNTS_DIR, id, 'simplex.sqlite'));
+      if (!db || db._err) continue;
+      const r = keyOpensAccount(key, id, db);
+      db.close();
+      if (r && r.match) opens.push(id);
+    }
+    console.log('  key ' + fingerprint(key) + ' opens ' + opens.length + ' folder(s): ' + (opens.join(', ') || 'NONE'));
+    if (!opens.length && !flags.has('--force')) die('that key decrypts nothing here. Refusing to install it.');
+  }
+
+  // --- the database: does it open, and does it account for the data on disk? ---
+  let accounts = null;
+  if (sysSrc) {
+    const work = path.join(VAULT_DIR, 'rescue-backups', 'install-check-' + Date.now());
+    fs.mkdirSync(work, { recursive: true });
+    const probe = path.join(work, 'system.sqlite');
+    fs.copyFileSync(sysSrc, probe);
+    if (fs.existsSync(sysSrc + '-wal')) fs.copyFileSync(sysSrc + '-wal', probe + '-wal');
+    let db;
+    try { db = new Database(probe); } catch (e) { die('the database will not open: ' + e.message); }
+    const stt = tableStatus(db, 'accounts');
+    if (!stt.readable) die('SQLite cannot read it: ' + stt.err + '\n  (did you copy system.sqlite-wal alongside it?)');
+    if (!stt.present) die('it opens but has no accounts table — wrong file.');
+    accounts = db.prepare('SELECT id, username, is_admin, key_enrolled FROM accounts ORDER BY username').all();
+    db.close();
+    let covered = 0, coveredBytes = 0;
+    console.log('  database holds ' + accounts.length + ' account(s):');
+    for (const a of accounts) {
+      const dir = path.join(ACCOUNTS_DIR, a.id);
+      const bytes = fs.existsSync(dir) ? dirStats(path.join(dir, 'files')).bytes : 0;
+      if (bytes > 0) { covered++; coveredBytes += bytes; }
+      console.log('      ' + a.id + '  ' + String(a.username).padEnd(16)
+        + (a.key_enrolled ? 'per-user key' : 'master key  ')
+        + '  ' + (fs.existsSync(dir) ? fmtSize(bytes) + ' on disk' : 'NO FOLDER'));
+    }
+    console.log('  covers ' + covered + ' folder(s) holding ' + fmtSize(coveredBytes));
+    if (!coveredBytes && !flags.has('--force')) die('this database accounts for none of the data here. Refusing to install it.');
+  }
+
+  if (!flags.has('--yes')) {
+    console.log('\n  Looks right? Re-run with --yes to install. The current files are moved');
+    console.log('  into vault\\rescue-backups first — nothing is overwritten or deleted.\n');
+    return;
+  }
+
+  // --- install ---
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const bak = path.join(VAULT_DIR, 'rescue-backups', 'replaced-' + stamp);
+  fs.mkdirSync(bak, { recursive: true });
+  const stash = (p, name) => { if (fs.existsSync(p)) { fs.copyFileSync(p, path.join(bak, name)); fs.rmSync(p); console.log('    moved aside: ' + name); } };
+
+  console.log('\n  ---- installing ----');
+  if (sysSrc) {
+    // all three go, together: a leftover -wal or -shm belongs to the database
+    // being replaced, and SQLite would try to replay it against the new one
+    stash(SYSTEM_DB_PATH, 'system.sqlite');
+    stash(SYSTEM_DB_PATH + '-wal', 'system.sqlite-wal');
+    stash(SYSTEM_DB_PATH + '-shm', 'system.sqlite-shm');
+    fs.copyFileSync(sysSrc, SYSTEM_DB_PATH);
+    if (fs.existsSync(sysSrc + '-wal')) fs.copyFileSync(sysSrc + '-wal', SYSTEM_DB_PATH + '-wal');
+    console.log('    installed: system.sqlite' + (fs.existsSync(sysSrc + '-wal') ? ' + system.sqlite-wal' : ''));
+  }
+  if (keySrc) {
+    const kp = vault.keyFilePath(VAULT_DIR);
+    stash(kp, 'master.key');
+    fs.mkdirSync(path.dirname(kp), { recursive: true });
+    fs.copyFileSync(keySrc, kp);
+    console.log('    installed: master.key');
+  }
+
+  // --- re-verify what is now live ---
+  console.log('\n  ---- verifying what is now installed ----');
+  const db = openRO(SYSTEM_DB_PATH);
+  if (db && !db._err) {
+    const stt = tableStatus(db, 'accounts');
+    console.log('  accounts readable: ' + (stt.readable && stt.present ? db.prepare('SELECT COUNT(*) c FROM accounts').get().c + ' row(s)' : 'NO — ' + (stt.err || 'no table')));
+    db.close();
+  }
+  console.log('\n  Now run:  node rescue.js scan');
+  console.log('  Every folder that matters should show a login and "key test: OK".');
+  console.log('  Then start the server and sign in — each account\'s per-user key');
+  console.log('  unwraps from its own password at sign-in, which is what unseals v2 files.');
+  console.log('\n  Previous files kept in: ' + bak + '\n');
+}
+
 switch (cmd) {
   case 'scan': cmdScan(); break;
+  case 'install': cmdInstall(); break;
   case 'salvage': cmdSalvage(); break;
   case 'inspect': cmdInspect(); break;
   case 'check-system': cmdCheckSystem(); break;
@@ -1074,7 +1183,9 @@ switch (cmd) {
     console.log('  node rescue.js find-keys [dir...]           hunt for a master key on disk and test it');
     console.log('  node rescue.js check-system <path>          is this recovered system.sqlite the right one?');
     console.log('  node rescue.js inspect <path>               what IS this file? size, header, tables');
-    console.log('  node rescue.js salvage <path>               rip account rows out of a MALFORMED database\n');
+    console.log('  node rescue.js salvage <path>               rip account rows out of a MALFORMED database');
+    console.log('  node rescue.js install --system <db> --key <k> [--yes]');
+    console.log('                                              verify + install a recovered key/database\n');
     console.log('  scan / try-key / orphan-blobs never write. adopt backs up system.sqlite first.');
     console.log('  Nothing in this tool deletes anything.\n');
 }
