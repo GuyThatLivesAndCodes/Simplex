@@ -210,7 +210,12 @@ function cmdScan() {
     console.log('  source      : ' + keySource);
     console.log('  fingerprint : ' + fingerprint(key));
     const kp = vault.keyFilePath(VAULT_DIR);
-    if (fs.existsSync(kp)) console.log('  file mtime  : ' + mtime(kp) + '   <- if this is the time of the copy, the key was REPLACED');
+    if (fs.existsSync(kp)) {
+      console.log('  file mtime  : ' + mtime(kp));
+      console.log('                (NOT proof of anything on Windows: Explorer preserves the');
+      console.log('                 SOURCE file\'s timestamp on copy, so a replaced key keeps');
+      console.log('                 the other vault\'s date. Trust the key tests below instead.)');
+    }
     if (process.env.SIMPLEX_MASTER_KEY) console.log('  note        : SIMPLEX_MASTER_KEY is set and overrides the file.');
   }
   console.log('');
