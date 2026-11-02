@@ -100,6 +100,7 @@ const UDK_KEYS = new Map();    // accountId -> { ctr1, ctr2, txt1, txt2 } (v2 su
 const UDK_RAW = new Map();     // accountId -> Buffer(32) — kept for re-wrapping (swap / recovery)
 function cacheUdk(accountId, udk) { UDK_RAW.set(accountId, udk); UDK_KEYS.set(accountId, vault.udkSubkeys(udk)); }
 function udkResident(accountId) { return UDK_KEYS.has(accountId); }
+let passkeys = null;   // passkey (WebAuthn) module — mounted with the login routes below
 
 function persistEnrollment(accountId, kekSalt, wrapPw, rcSalt, wrapRc, rcEnc) {
   sys.prepare('UPDATE accounts SET key_enrolled = ?, key_kek_salt = ?, key_wrap_pw = ?, key_rc_salt = ?, key_wrap_rc = ?, key_rc_enc = ?, key_wrap_stale = 0 WHERE id = ?')
@@ -1225,6 +1226,7 @@ function acctToApi(a) {
     // (the wraps/salts themselves are NEVER exposed)
     keys_enrolled: !!a.key_enrolled,
     key_stale: !!a.key_wrap_stale,
+    passkeys: passkeys ? passkeys.countFor(a.id) : 0,
     // Terms of Service: current version + whether THIS account accepted it, so
     // every client knows to raise the agreement before the next upload.
     tos_version: tosVersion(),
@@ -2573,6 +2575,9 @@ function isPublicApi(req) {
   // Two-auth step 2 of a sign-in: no session exists yet by definition. The tk
   // ticket (bound to a password check from this IP minutes ago) is the auth.
   if (req.method === 'POST' && req.path === '/api/login/2fa') return true;
+  // Passkey sign-in: challenge issuance + assertion check. No session yet; the
+  // signed, IP-bound, single-use challenge is the auth (see passkeys.js).
+  if (req.method === 'POST' && (req.path === '/api/login/passkey/options' || req.path === '/api/login/passkey')) return true;
   // Forgot password: both halves are for people who can't sign in. Write-only,
   // rate-limited, enumeration-safe; complete() needs the admin-emailed code.
   if (req.method === 'POST' && (req.path === '/api/reset/request' || req.path === '/api/reset/complete')) return true;
@@ -2886,6 +2891,13 @@ app.post('/api/logout', (req, res) => {
   } catch (e) {}
   clearSessionCookie(req, res);
   res.json({ ok: true });
+});
+
+/* ---------- passkeys (WebAuthn) — see passkeys.js ---------- */
+passkeys = require('./passkeys')(app, {
+  sys, sysStmt, vault, MASTER_KEY, clientIp, recordLoginFailure, clearIpBan,
+  finishLogin, totpVerify, cacheUdk, udkResident, UDK_RAW, notifyAccount,
+  VALID_TIERS, bumpAccounts, requireAuth,
 });
 
 /* ---------- forgot password (public, admin-mediated email loop) ----------
@@ -3920,6 +3932,7 @@ app.delete('/api/accounts/:id', requireAdmin, (req, res) => {
   sysStmt.delApiKeysForAcct.run(target.id);
   ipsSys.delAcct.run(target.id);
   resetSys.delForAcct.run(target.id);
+  passkeys.deleteForAccount(target.id);
   sysStmt.delAcct.run(target.id);
   dropStore(target.id);
   bumpAccounts();
