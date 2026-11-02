@@ -1,8 +1,9 @@
 /* ui2-boot.js — picks which Simplex interface this browser gets.
  *
- * Loaded synchronously in the classic page's <head> (index.html), before any of
- * the classic app's scripts run. The new interface lives at /next.html (code in
- * /next/); the classic one is this page. The choice is per browser:
+ * Loaded synchronously in the classic page's <head> (old.html), before any of
+ * the classic app's scripts run. The new interface is the default at / (index.html,
+ * code in /next/); the classic one is this page, served at /old.html and for
+ * classic deep links (/dash, /database/…). The choice is per browser:
  *
  *   localStorage 'simplex.ui' = 'next' | 'classic'   (unset → DEFAULT_UI)
  *   ?ui=classic / ?ui=next on any URL sets it (that's how the two link to each other)
@@ -29,10 +30,13 @@
     try { params.delete('ui'); var s = params.toString(); history.replaceState(history.state, '', location.pathname + (s ? '?' + s : '') + location.hash); } catch (e) {}
   }
 
+  // Opening /old.html directly is an explicit choice of the classic interface.
+  if (/^\/old(\.html)?$/.test(location.pathname) && q !== 'next') lsSet(KEY, 'classic');
+
   var mode = lsGet(KEY) || DEFAULT_UI;
   window.SimplexUI = {
     mode: mode,
-    useNext: function () { lsSet(KEY, 'next'); location.href = '/next.html'; },
+    useNext: function () { lsSet(KEY, 'next'); location.href = '/'; },
   };
   if (mode !== 'next') return;
 
@@ -47,5 +51,5 @@
   else if (/^\/database\/starred/.test(p)) hash = '#/starred';
   else if (/^\/database\/trash/.test(p)) hash = '#/trash';
   else if (/^\/database/.test(p)) hash = '#/files';
-  location.replace('/next.html' + hash);
+  location.replace('/' + hash);
 })();
