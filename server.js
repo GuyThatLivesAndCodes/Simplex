@@ -11834,9 +11834,12 @@ app.use(express.static(ROOT, {
   setHeaders: (res, filePath) => {
     // App source (html/js/jsx/css) must NEVER be served stale — a cached copy in an
     // open tab is how a fix or instrumentation change silently fails to take effect.
-    // `no-store` forces the browser to fetch fresh bytes on every load (no 304
-    // reuse), so a plain reload always runs the latest code.
-    if (/\.(html|js|jsx|css)$/i.test(filePath)) res.setHeader('Cache-Control', 'no-store, must-revalidate');
+    // `no-cache` makes the browser revalidate EVERY load (ETag/Last-Modified → 304
+    // when unchanged, fresh bytes the moment a file changes), so a plain reload
+    // still always runs the latest code. Unlike `no-store` it lets the browser keep
+    // the bytes and its compiled-code cache — the new UI is ~25 ES modules, and a
+    // low-end phone was re-downloading and re-compiling all of them on every visit.
+    if (/\.(html|js|jsx|css)$/i.test(filePath)) res.setHeader('Cache-Control', 'no-cache');
   },
 }));
 app.use((req, res) => {

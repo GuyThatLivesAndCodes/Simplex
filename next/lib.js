@@ -73,16 +73,26 @@ export function fmtDur(s) {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
   return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0');
 }
+/* Intl formatters are expensive to build, and toLocale*String(…, options) builds a
+   fresh one on EVERY call — formatting dates for a 240-card batch was the single
+   hottest function when opening a big folder. Build each formatter once. */
+const DTF = {
+  time: new Intl.DateTimeFormat([], { hour: 'numeric', minute: '2-digit' }),
+  wday: new Intl.DateTimeFormat([], { weekday: 'short' }),
+  md: new Intl.DateTimeFormat([], { month: 'short', day: 'numeric' }),
+  mdy: new Intl.DateTimeFormat([], { month: 'short', day: 'numeric', year: 'numeric' }),
+};
+const NF = new Intl.NumberFormat();
 export function fmtDate(t) {
   if (!t) return '';
   const d = new Date(t), now = new Date();
   const days = Math.floor((now - d) / 864e5);
-  if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  if (days < 7) return d.toLocaleDateString([], { weekday: 'short' });
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
+  if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) return DTF.time.format(d);
+  if (days < 7) return DTF.wday.format(d);
+  return (d.getFullYear() === now.getFullYear() ? DTF.md : DTF.mdy).format(d);
 }
 export function ext(name) { const m = /\.([^.]+)$/.exec(name || ''); return m ? m[1].toLowerCase() : ''; }
-export function plural(n, word, many) { return Number(n).toLocaleString() + ' ' + (n === 1 ? word : many || word + 's'); }
+export function plural(n, word, many) { return NF.format(Number(n)) + ' ' + (n === 1 ? word : many || word + 's'); }
 
 /* ---------- icons (drawn for the new UI; 24px grid, stroke) ---------- */
 const P = {

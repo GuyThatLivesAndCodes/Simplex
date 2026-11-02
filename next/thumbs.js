@@ -73,6 +73,6 @@ export function lazy(container, onFail) {
     io.unobserve(e.target);
     loadThumb(e.target, onFail);
   }), { rootMargin: '300px' });
-  container.querySelectorAll('img[data-src]').forEach(i => io.observe(i));
+  container.querySelectorAll('img[data-src]:not([data-lz])').forEach(i => { i.setAttribute('data-lz', ''); io.observe(i); });
   return io;
 }

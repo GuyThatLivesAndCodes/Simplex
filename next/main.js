@@ -227,7 +227,7 @@ function parse() {
   if (name === 'search') return { name, q: [arg, ...rest].join('/') };
   return { name: name || 'home', arg: arg || null, sub: rest.join('/') || null };
 }
-let lastKey = null, lastSig = null, settleUntil = 0, deferred = null, wired = false;
+let lastKey = null, lastSig = null, settleUntil = 0, deferred = null, wired = false, homeIO = null;
 /* what the current page shows, as a string — equal strings mean nothing visible changed */
 function signature(r) {
   if (r.name === 'ai') return 'ai/' + (r.arg || '');
@@ -312,7 +312,8 @@ function renderHome() {
     else if (app) { e.preventDefault(); const a = APPS.find(x => x.id === app.dataset.app); menu(a.ready ? [{ label: 'Open ' + a.name, ic: a.ic, run: () => { location.hash = appHref(a); } }] : [{ label: a.name + ' (classic only)', ic: 'lock', run: () => lockedApp(a) }, { label: 'Open in classic', ic: 'swap', run: () => openClassic('/' + a.id) }], { x: e.clientX, y: e.clientY }); }
   });
   const recBox = stage.querySelector('.recent');
-  if (recBox) lazy(recBox, img => img.replaceWith(el(html`<span class="big tint t-video">${icon('video', 28, 1.6)}</span>`.s)));
+  if (homeIO) homeIO.disconnect();
+  if (recBox) homeIO = lazy(recBox, img => img.replaceWith(el(html`<span class="big tint t-video">${icon('video', 28, 1.6)}</span>`.s)));
   requestAnimationFrame(() => { const v = stage.querySelector('.ring .val'); if (v) v.style.strokeDashoffset = String(C * (1 - pct)); });
   stage.querySelector('.recent') && stage.querySelector('.recent').addEventListener('click', e => { const c = e.target.closest('[data-rid]'); if (c) openViewer(store.byId(c.dataset.rid), rec); });
   const appsBox = stage.querySelector('.apps');

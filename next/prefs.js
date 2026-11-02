@@ -18,7 +18,7 @@ export const DEFAULTS = {
   font: 'inter',             // inter | system | rounded
   density: 'comfortable',    // compact | comfortable | spacious
   // performance
-  perf: 'auto',              // auto | full | light — light effects for low-power graphics (perf.js)
+  perf: 'auto',              // auto | full | light | saver — per DEVICE: never synced to the account (perf.js)
   // motion
   motion: 'full',            // full | reduced | off
   speed: 'normal',           // relaxed | normal | snappy
@@ -80,19 +80,22 @@ export function reset() { P = { ...DEFAULTS }; lsSet(LS, JSON.stringify(P)); app
 export function adoptFromAccount(account) {
   const nx = account && account.prefs && account.prefs.nx;
   if (!nx || typeof nx !== 'object') { queueSync(); return; }   // first time: push ours up
-  P = { ...DEFAULTS, ...nx };
+  // performance is a property of THIS device (a phone and a desktop on one account
+  // need different settings), so the account copy never overrides it
+  P = { ...DEFAULTS, ...nx, perf: P.perf };
   lsSet(LS, JSON.stringify(P));
   apply();
   subs.forEach(fn => fn(P, P));
 }
 
 let syncTimer = null;
+const LOCAL_ONLY = new Set(['perf']);   // device settings: stay in this browser
 function queueSync() {
   clearTimeout(syncTimer);
   syncTimer = setTimeout(() => {
     // only non-default values go up — keeps the shared prefs blob small (server caps it at 4KB)
     const diff = {};
-    for (const k in P) if (P[k] !== DEFAULTS[k]) diff[k] = P[k];
+    for (const k in P) if (P[k] !== DEFAULTS[k] && !LOCAL_ONLY.has(k)) diff[k] = P[k];
     api('/api/accounts/me', { method: 'PATCH', json: { prefs: { nx: diff } } }).catch(() => {});
   }, 900);
 }
@@ -120,7 +123,10 @@ export function apply() {
   s.setProperty('--card-w', ({ s: 140, m: 176, l: 236 }[P.thumbSize] || 176) + 'px');
   r.toggleAttribute('data-hide-ext', !P.showExt);
   // light effects: chosen, or decided automatically on this device (perf.js)
-  r.toggleAttribute('data-lite', P.perf === 'light' || (P.perf !== 'full' && String(lsGet('nx.perf.auto', '')).startsWith('lite:')));
+  const autoLvl = String(lsGet('nx.perf.auto', '') || '').split(':')[0];   // '' | full | lite | saver
+  const saver = P.perf === 'saver' || (P.perf === 'auto' && autoLvl === 'saver');
+  r.toggleAttribute('data-lite', saver || P.perf === 'light' || (P.perf === 'auto' && autoLvl === 'lite'));
+  r.toggleAttribute('data-saver', saver);
 }
 function clamp(v, lo, hi) { v = Number(v); return isFinite(v) ? Math.min(hi, Math.max(lo, v)) : lo; }
 const loadedFonts = new Set();

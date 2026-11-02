@@ -5,7 +5,7 @@ import { api } from './lib.js';
 
 const listeners = new Map();
 export function on(evt, fn) { if (!listeners.has(evt)) listeners.set(evt, new Set()); listeners.get(evt).add(fn); return () => listeners.get(evt).delete(fn); }
-export function emit(evt, data) { (listeners.get(evt) || []).forEach(fn => { try { fn(data); } catch (e) { console.error(e); } }); }
+export function emit(evt, data) { if (evt === 'change') bump(); (listeners.get(evt) || []).forEach(fn => { try { fn(data); } catch (e) { console.error(e); } }); }
 
 export const S = {
   account: null,
@@ -33,20 +33,37 @@ export async function loadFiles() {
   setFiles(rows);
 }
 function setFiles(rows) {
-  S.files = rows; S.byId = new Map(rows.map(r => [r.id, r])); S.loaded = true;
+  S.files = rows; S.byId = new Map(rows.map(r => [r.id, r])); S.loaded = true; bump();
   emit('change');
 }
 function upsert(row) {
   if (!row || !row.id) return;
   const i = S.files.findIndex(f => f.id === row.id);
   if (i >= 0) S.files[i] = row; else S.files.push(row);
-  S.byId.set(row.id, row);
+  S.byId.set(row.id, row); bump();
+}
+
+/* Derived lists are cached per revision. Every mutation either goes through
+   setFiles/upsert or ends with emit('change'), and both bump the revision, so a
+   cached list is never stale by the time a view reads it. Callers get a fresh
+   array copy where they might sort/modify it. */
+let rev = 0, liveCache = null, liveRev = -1, kidsCache = null, kidsRev = -1;
+function bump() { rev++; }
+function liveList() { if (liveRev !== rev) { liveCache = S.files.filter(f => !f.trashed); liveRev = rev; } return liveCache; }
+function kidsIndex() {
+  if (kidsRev !== rev) {
+    kidsCache = new Map();
+    for (const f of liveList()) { const p = f.parent ?? null; let a = kidsCache.get(p); if (!a) kidsCache.set(p, a = []); a.push(f); }
+    kidsRev = rev;
+  }
+  return kidsCache;
 }
 
 /* ---------- derived views ---------- */
-export const live = () => S.files.filter(f => !f.trashed);
+export const live = () => liveList().slice();
 export const byId = id => S.byId.get(id);
-export const children = parent => live().filter(f => (f.parent ?? null) === (parent ?? null));
+export const children = parent => (kidsIndex().get(parent ?? null) || []).slice();
+export const childCount = parent => (kidsIndex().get(parent ?? null) || []).length;
 export function pathOf(id) {
   const out = []; let f = byId(id), guard = 0;
   while (f && guard++ < 64) { out.unshift(f); f = f.parent ? byId(f.parent) : null; }
@@ -65,15 +82,15 @@ export const CATEGORIES = [
   { id: 'model3d', label: '3D models', ic: 'model3d', path: 'models' },
   { id: 'uasset', label: 'Game assets', ic: 'uasset', path: 'assets' },
 ];
-export const ofType = t => live().filter(f => f.type === t);
-export const starred = () => live().filter(f => f.starred);
-export const recent = (n = 18) => live().filter(f => f.type !== 'folder').sort((a, b) => (b.date || 0) - (a.date || 0)).slice(0, n);
+export const ofType = t => liveList().filter(f => f.type === t);
+export const starred = () => liveList().filter(f => f.starred);
+export const recent = (n = 18) => liveList().filter(f => f.type !== 'folder').sort((a, b) => (b.date || 0) - (a.date || 0)).slice(0, n);
 /* trash shows only the top of each trashed subtree (children ride along with their folder) */
 export const trashed = () => S.files.filter(f => f.trashed && !(f.parent && byId(f.parent) && byId(f.parent).trashed));
 export function search(q, limit = 60) {
   q = q.trim().toLowerCase(); if (!q) return [];
   const scored = [];
-  for (const f of live()) {
+  for (const f of liveList()) {
     const n = (f.name || '').toLowerCase(); const i = n.indexOf(q);
     if (i < 0) continue;
     scored.push([f, (i === 0 ? 100 : 60 - Math.min(i, 50)) + (f.type === 'folder' ? 5 : 0)]);

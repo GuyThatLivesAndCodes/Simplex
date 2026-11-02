@@ -111,10 +111,18 @@ a { color: inherit; text-decoration: none; }
    BACKDROP — two slow light fields + grain behind everything
    ============================================================ */
 #bg { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; }
-#bg i { position: absolute; border-radius: 50%; filter: blur(110px); will-change: transform; }
-#bg i:nth-child(1) { width: 70vmax; height: 70vmax; left: -25vmax; top: -35vmax; background: oklch(from var(--acc) 0.45 c h / calc(0.38 * var(--bg-o, 1))); animation: drift 38s ease-in-out infinite alternate; }
-#bg i:nth-child(2) { width: 60vmax; height: 60vmax; right: -25vmax; bottom: -30vmax; background: oklch(from var(--acc) 0.45 calc(c * 0.75) calc(h - 65) / calc(0.30 * var(--bg-o, 1))); animation: drift 46s ease-in-out infinite alternate-reverse; }
-#bg i:nth-child(3) { width: 40vmax; height: 40vmax; left: 35vw; top: 40vh; background: oklch(from var(--acc) 0.40 c calc(h + 45) / calc(0.16 * var(--bg-o, 1))); animation: drift 54s ease-in-out infinite alternate; }
+/* The glow fields used to be solid circles under `filter: blur(110px)`. On a
+   composited, animated layer the browser re-applies that filter EVERY frame, and a
+   110px blur over three viewport-sized layers was the single biggest cost in the
+   new UI (measured: ~6 fps idle on a throttled laptop, 60 fps without it). A
+   radial gradient draws the same soft falloff natively, is rasterized once, and the
+   drift animation is then pure compositing. Each box is grown by the old blur's
+   reach (--sp) so the glow extends as far as the blurred circle did. */
+#bg i { --sp: 160px; position: absolute; border-radius: 50%; will-change: transform; margin: calc(var(--sp) * -1); width: calc(var(--d) + var(--sp) * 2); height: calc(var(--d) + var(--sp) * 2);
+  background: radial-gradient(closest-side, var(--c) 0%, var(--c) 34%, oklch(from var(--c) l c h / calc(alpha * 0.68)) 60%, oklch(from var(--c) l c h / calc(alpha * 0.24)) 82%, transparent 100%); }
+#bg i:nth-child(1) { --d: 70vmax; left: -25vmax; top: -35vmax; --c: oklch(from var(--acc) 0.45 c h / calc(0.38 * var(--bg-o, 1))); animation: drift 38s ease-in-out infinite alternate; }
+#bg i:nth-child(2) { --d: 60vmax; right: -25vmax; bottom: -30vmax; --c: oklch(from var(--acc) 0.45 calc(c * 0.75) calc(h - 65) / calc(0.30 * var(--bg-o, 1))); animation: drift 46s ease-in-out infinite alternate-reverse; }
+#bg i:nth-child(3) { --d: 40vmax; left: 35vw; top: 40vh; --c: oklch(from var(--acc) 0.40 c calc(h + 45) / calc(0.16 * var(--bg-o, 1))); animation: drift 54s ease-in-out infinite alternate; }
 #bg::after {
   content: ""; position: absolute; inset: 0; opacity: 0.08; mix-blend-mode: overlay;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
@@ -1190,6 +1198,50 @@ select.in option { background: #16171e; }
 :root[data-lite] .p-bar { background: rgb(14 15 20 / 0.82); }
 :root[data-lite] .p-big { background: rgb(44 46 58 / 0.72); }
 :root[data-lite] .ai-pop, :root[data-lite] .menu, :root[data-lite] .pal, :root[data-lite] .toast { -webkit-backdrop-filter: none; backdrop-filter: none; }
+/* Light, continued: the small frosted chips repeat on EVERY file card (type tag,
+   select ring, more button) — a 240-card grid meant hundreds of live blur layers
+   re-rendered on every scroll frame. Same for the spinner/seek flash that sit on
+   top of a playing video (blurred again for each video frame). */
+:root[data-lite] .fcard .tag, :root[data-lite] .fcard .mo, :root[data-lite] .p-spin, :root[data-lite] .p-flash { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+:root[data-lite] .fcard .tag { background: rgb(0 0 0 / 0.72); }
+:root[data-lite] .fcard .mo, :root[data-lite] .p-flash { background: rgb(0 0 0 / 0.62); }
+:root[data-lite] .p-spin { background: rgb(0 0 0 / 0.55); }
+/* the full-screen film grain blends (mix-blend-mode) with everything above it on
+   every composite; a plain low-opacity layer looks the same on a still backdrop */
+:root[data-lite] #bg::after { mix-blend-mode: normal; opacity: 0.035; }
+/* page / sign-in entrances animate a blur filter on the whole page — keep the
+   motion, drop the per-frame blur */
+@keyframes page-in-lite { from { opacity: 0; transform: translateY(14px) scale(0.99); } }
+@keyframes auth-in-lite { from { opacity: 0; transform: translateY(24px) scale(0.96); } }
+:root[data-lite] .page-enter { animation-name: page-in-lite; }
+:root[data-lite] .auth-card { animation-name: auth-in-lite; }
+
+/* Video, in EVERY mode: a live backdrop blur over or around a playing <video>
+   has to be recomputed for each new video frame. Measured on a throttled laptop in
+   Full mode: the viewer's full-screen blur plus the frosted control bar dropped
+   ~66% of video frames; without them, none. So a viewer holding a video uses a
+   dense tint (it covers the app anyway) and the on-video controls use solid
+   glass. Images, documents and audio keep the frosted look. */
+.vw:has(.player.is-video) { -webkit-backdrop-filter: none; backdrop-filter: none; background: rgb(6 7 10 / 0.95); }
+.player.is-video .p-bar, .player.is-video .p-big, .player.is-video .p-spin, .player.is-video .p-flash, .player.is-video .p-note { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+.player.is-video .p-bar { background: rgb(14 15 20 / 0.84); }
+.player.is-video .p-big { background: rgb(44 46 58 / 0.78); }
+.player.is-video .p-spin { background: rgb(0 0 0 / 0.55); }
+.player.is-video .p-flash { background: rgb(0 0 0 / 0.62); }
+.player.is-video .p-note { background: rgb(28 29 39 / 0.95); }
+
+/* Saver (data-saver, always together with data-lite): weakest devices. No
+   backdrop at all, no frosted glass anywhere, no staggered entrances, flatter
+   shadows. The layout and colors stay exactly the same. */
+:root[data-saver] #bg { display: none; }
+:root[data-saver] body { background: var(--canvas); }
+:root[data-saver] *, :root[data-saver] *::before, :root[data-saver] *::after { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+:root[data-saver] .drop { background: rgb(7 8 12 / 0.86); }
+:root[data-saver] .p-big { background: rgb(44 46 58 / 0.85); }
+:root[data-saver] { --sh-3: 0 6px 18px rgb(0 0 0 / 0.45); }
+:root[data-saver] .fcard, :root[data-saver] .frow, :root[data-saver] .ttile, :root[data-saver] .srcard,
+:root[data-saver] .ai-m, :root[data-saver] .ai-act { animation-delay: 0s !important; animation-duration: calc(var(--d2) * 0.8); }
+:root[data-saver] .page-enter { animation-duration: var(--d2); }
 
 /* ============================================================ virtual machines (#/vms) */
 .vms { min-height: 100%; display: flex; flex-direction: column; }

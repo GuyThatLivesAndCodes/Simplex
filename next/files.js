@@ -10,7 +10,7 @@ import * as prefs from './prefs.js';
 import { lazy, cancelThumbs } from './thumbs.js';
 import { queueDownload, canConvert, convertDialog, canAiEdit, aiEditDialog } from './jobs.js';
 
-const PAGE = 240;   // cards rendered per batch; more stream in as you scroll
+const PAGE = 120;   // cards rendered per batch; more stream in as you scroll (smaller = shorter hitches on slow CPUs)
 let sort = JSON.parse(lsGet('nx.sort', '{"key":"name","dir":"asc"}'));
 const sel = new Set();
 let anchor = null;     // last clicked id, for shift-range selection
@@ -53,6 +53,7 @@ export function signature(route) {
 }
 
 export function renderFiles(root, route) {
+  dropObservers();   // a quiet re-render replaces the page: release the old one's watchers
   const d = describe(route);
   const items = ordered(d);
   ctx = { route, items, root, d };
@@ -108,15 +109,21 @@ function paint(body, items, d) {
       <div class="lh"><span></span>${['name', 'size', 'type', 'date'].map(k => html`<button data-sort="${k}" class="${sort.key === k ? 'on' : ''}">${({ name: 'Name', size: 'Size', type: 'Kind', date: 'Modified' })[k]}${sort.key === k ? icon(sort.dir === 'asc' ? 'arrowup' : 'arrowdown', 12, 2) : ''}</button>`)}<span></span></div></div>`.s);
   body.appendChild(box);
   let shown = 0;
+  // first batch: just enough to fill the screen (with margin), so a big folder
+  // paints immediately; the rest streams in by PAGE as you scroll
+  const cardW = view() === 'grid' ? (parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--card-w')) || 176) : 0;
+  const first = cardW ? Math.ceil((innerWidth / (cardW + 16)) * (innerHeight / (cardW * 0.95 + 16)) * 1.6) : Math.ceil(innerHeight / 52 * 1.6);
+  let batch = Math.max(36, Math.min(PAGE, first));
   const more = () => {
-    const chunk = items.slice(shown, shown + PAGE);
+    const chunk = items.slice(shown, shown + batch);
+    batch = PAGE;
     box.insertAdjacentHTML('beforeend', chunk.map((f, i) => (view() === 'grid' ? cardHTML : rowHTML)(f, shown + i, d)).join(''));
     shown += chunk.length;
-    lazy(box, thumbFail);
+    observers.push(lazy(box, thumbFail));
     if (shown < items.length) {
       const s = el('<div style="height:1px;grid-column:1/-1"></div>'); box.appendChild(s);
       const io = new IntersectionObserver(es => { if (es[0].isIntersecting) { io.disconnect(); s.remove(); more(); } }, { rootMargin: '800px' });
-      io.observe(s);
+      io.observe(s); observers.push(io);
     }
   };
   more();
@@ -124,7 +131,7 @@ function paint(body, items, d) {
 }
 
 function sub(f, d) {
-  if (f.type === 'folder') return plural(store.children(f.id).length, 'item');
+  if (f.type === 'folder') return plural(store.childCount(f.id), 'item');
   const bits = [fmtSize(f.size)];
   if (d.search || d.flat) { const p = store.pathOf(f.id).slice(0, -1).pop(); bits.push(p ? p.name : 'All files'); }
   else bits.push(fmtDate(f.date));
@@ -459,5 +466,9 @@ export function onKey(e) {
   if (e.key === 'F2' && sel.size === 1) { e.preventDefault(); renameItem([...sel][0]); return true; }
   return false;
 }
-export function leave() { if (ctx && ctx.root) cancelThumbs(ctx.root); sel.clear(); syncSelbar(); ctx = null; }
+/* IntersectionObservers keep their targets (and so the whole old page) alive until
+   disconnected; without this every folder visit leaked its DOM and listeners. */
+let observers = [];
+function dropObservers() { observers.forEach(o => { try { o.disconnect(); } catch (e) {} }); observers = []; }
+export function leave() { dropObservers(); if (ctx && ctx.root) cancelThumbs(ctx.root); sel.clear(); syncSelbar(); ctx = null; }
 export function currentFolder() { return ctx && ctx.route.name === 'files' ? (ctx.route.arg || null) : null; }
