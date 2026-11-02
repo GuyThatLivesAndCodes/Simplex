@@ -993,13 +993,17 @@ function mvePreviewPlay() {
   _mve.playing = true; mveSetPlayIcon(true);
   const vc0 = mveTopVideoClipAt(_mve.playhead); const v = mveVideoEl();
   if (vc0) { try { v.play().catch(() => {}); } catch (e) {} }
-  let last = performance.now();
+  let last = performance.now(), lastComp = 0;
   const tick = (now) => {
     if (!_mve || !_mve.playing) return;
     const dt = (now - last) / 1000; last = now;
     _mve.playhead += dt;
     if (_mve.playhead >= mveComputeDuration() - 0.01) { mvePreviewStop(); _mve.playhead = mveComputeDuration(); mveCompositeAt(_mve.playhead); return; }
-    mveCompositeAt(_mve.playhead);
+    // the playhead advances every frame (timing stays exact), but the compositor
+    // pass (clip lookup, audio sync, playline/time DOM writes) runs at the perf
+    // tier's rate on low-end devices — the <video> itself keeps playing natively.
+    const hz = Math.max(15, (window.SxPerf && SxPerf.hz()) || 60);
+    if (hz >= 60 || now - lastComp >= 1000 / hz) { lastComp = now; mveCompositeAt(_mve.playhead); }
     _mve.raf = requestAnimationFrame(tick);
   };
   _mve.raf = requestAnimationFrame(tick);

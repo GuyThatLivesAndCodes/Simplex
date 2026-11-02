@@ -1797,6 +1797,7 @@ function settingsHTML() {
         </div>
       </div>
     </div>
+    ${perfSettingsHTML()}
     <div class="set-section" id="setOrgSection">
       <span class="eyebrow">AI Organization</span>
       <div class="set-row">
@@ -1892,6 +1893,7 @@ function wireSettings() {
     toast('Default view updated', 'check');
   });
   wireAppearanceSettings();
+  wirePerfSettings();
   wireSafetySettings();
   wireKeySettings();
   const aiBtn = document.getElementById('setAi'); if (aiBtn) aiBtn.onclick = openAiConfig;
@@ -1941,6 +1943,78 @@ function apprRevert() {
   if (typeof reflectPlayState === 'function') reflectPlayState();
   // re-render the panel so every control snaps back to the saved values
   openAppScreen({ id: 'settings', name: 'Settings', icon: 'gear' }, settingsHTML()); wireSettings();
+}
+
+/* ---------- Settings → Performance (per device; see perf.js) ----------
+   Not part of the Appearance draft/apply flow: it's a device setting, stored
+   locally and applied instantly so the user can feel the difference. */
+const PERF_MODES = [
+  ['auto', 'Auto', 'picks the right level for this device and adapts if video stutters'],
+  ['quality', 'Quality', 'every effect on — best for fast computers'],
+  ['balanced', 'Balanced', 'freezes background motion and full-screen blurs'],
+  ['saver', 'Saver', 'no blur or ambience, lighter UI refresh — smoothest on older phones & laptops'],
+];
+const PERF_TIER_LABEL = { high: 'Quality', mid: 'Balanced', low: 'Saver' };
+function _perfMetaHTML() {
+  if (!window.SxPerf) return '';
+  const i = SxPerf.info(), hw = i.hw, chips = [];
+  if (hw.mem != null) chips.push(`<span class="perf-chip"><b>${hw.mem >= 8 ? '8+' : hw.mem} GB</b> RAM</span>`);
+  if (hw.cores) chips.push(`<span class="perf-chip"><b>${hw.cores}</b> CPU threads</span>`);
+  if (hw.fps) chips.push(`<span class="perf-chip"><b>${hw.fps}</b> fps idle</span>`);
+  if (hw.softGpu) chips.push(`<span class="perf-chip warn">no GPU acceleration</span>`);
+  if (hw.saveData) chips.push(`<span class="perf-chip">Data Saver on</span>`);
+  if (i.mode === 'auto' && i.learned) chips.push(`<span class="perf-chip warn">lowered after ${i.learnedWhy === 'dropped-frames' ? 'video stutter' : 'slow frames'}</span>`);
+  return chips.join('');
+}
+function _perfSubText() {
+  if (!window.SxPerf) return '';
+  const m = SxPerf.mode(), t = SxPerf.tier();
+  const desc = (PERF_MODES.find(x => x[0] === m) || PERF_MODES[0])[2];
+  return esc(desc) + (m === 'auto' ? `<span class="perf-tier">using ${PERF_TIER_LABEL[t]}</span>` : '');
+}
+function perfSettingsHTML() {
+  if (!window.SxPerf) return '';
+  const m = SxPerf.mode();
+  return `<div class="set-section" id="setPerfSection">
+      <span class="eyebrow">Performance · this device</span>
+      <div class="set-row">
+        <div class="sr-main"><div class="sr-title">Performance mode</div>
+          <div class="sr-sub mono" id="setPerfSub">${_perfSubText()}</div>
+          <div class="perf-meta" id="setPerfMeta">${_perfMetaHTML()}</div></div>
+        <div class="seg set-seg perf-seg" id="setPerfMode">
+          ${PERF_MODES.map(([v, l]) => `<button data-perf-mode="${v}" class="${m === v ? 'on' : ''}">${l}</button>`).join('')}
+        </div>
+      </div>
+      <div class="set-row">
+        <div class="sr-main"><div class="sr-title">Re-check this device</div><div class="sr-sub mono">measure frame rate again &amp; clear any automatic downgrade</div></div>
+        <button class="btn ghost" id="setPerfRecheck">${svg('refresh', 14)} Re-check</button>
+      </div>
+    </div>`;
+}
+function _perfRefreshSettings() {
+  const sub = document.getElementById('setPerfSub'); if (!sub || !window.SxPerf) return;
+  sub.innerHTML = _perfSubText();
+  const meta = document.getElementById('setPerfMeta'); if (meta) meta.innerHTML = _perfMetaHTML();
+  const seg = document.getElementById('setPerfMode');
+  if (seg) seg.querySelectorAll('[data-perf-mode]').forEach(b => b.classList.toggle('on', b.dataset.perfMode === SxPerf.mode()));
+}
+function wirePerfSettings() {
+  if (!window.SxPerf) return;
+  const seg = document.getElementById('setPerfMode');
+  if (seg) seg.querySelectorAll('[data-perf-mode]').forEach(b => b.onclick = () => {
+    SxPerf.setMode(b.dataset.perfMode);
+    _perfRefreshSettings();
+    toast('Performance: ' + b.textContent.trim(), 'check');
+  });
+  const re = document.getElementById('setPerfRecheck');
+  if (re) re.onclick = () => {
+    re.disabled = true; re.innerHTML = `${svg('refresh', 14)} Measuring…`;
+    SxPerf.recheck(r => {
+      re.disabled = false; re.innerHTML = `${svg('refresh', 14)} Re-check`;
+      _perfRefreshSettings();
+      toast(r ? `Measured ${r.fps} fps · using ${PERF_TIER_LABEL[SxPerf.tier()]}` : 'Keep this tab visible to measure', 'info');
+    });
+  };
 }
 
 function wireAppearanceSettings() {
@@ -2609,7 +2683,11 @@ const FireFX = (() => {
     clearTimeout(rsT);
     rsT = setTimeout(() => { if (cv) { size(); if (still) render(performance.now() - t0); } }, 200);
   }
-  function onVis() { if (!active || still) return; if (document.hidden) stop(); else start(); }
+  function onVis() { if (!active || still) return; if (document.hidden || held) stop(); else start(); }
+  // held = a video is playing (perf.js → sx-vplay): stop simulating smoke nobody
+  // can see behind the opaque viewer, so the CPU/GPU is free for decoding.
+  let held = false;
+  function hold(on) { held = !!on; onVis(); }
 
   function render(tms) {
     const t = tms / 1000;
@@ -2652,9 +2730,9 @@ const FireFX = (() => {
     if (!active) { unmount(); return; }
     mount();
     if (still) { stop(); render(performance.now() - t0); }
-    else if (!document.hidden) start();
+    else if (!document.hidden && !held) start();
   }
-  return { sync };
+  return { sync, hold };
 })();
 
 function applyPrefs(p) {
@@ -2670,7 +2748,9 @@ function applyPrefs(p) {
   // background ambience layer (body::before variants in simplex.css)
   const fx = ['aurora', 'fire', 'glow', 'grain', 'none'].includes(prefs.bgFx) ? prefs.bgFx : 'aurora';
   if (fx !== 'none') root.setAttribute('data-bgfx', fx); else root.removeAttribute('data-bgfx');
-  FireFX.sync(fx === 'fire', !!prefs.reduceMotion);
+  // perf tier (perf.js): 'mid' freezes the fire to a still frame, 'low' drops it
+  const perfTier = (window.SxPerf && SxPerf.tier()) || 'high';
+  FireFX.sync(fx === 'fire' && perfTier !== 'low', !!prefs.reduceMotion || perfTier === 'mid');
   const acc = normalizeHex(prefs.accent);
   if (acc) {
     root.style.setProperty('--acc', acc);
@@ -2712,6 +2792,14 @@ function setPrefs(patch) {
   _savePrefsTimer = setTimeout(() => { updateMe({ prefs: PREFS }).then(r => { if (r && r.account) ACCOUNT = r.account; }).catch(() => {}); }, 500);
 }
 applyPrefs(PREFS);   // theme the page immediately, before login
+// perf tier changed (auto-detect, dropped frames, or Settings → Performance):
+// re-apply so tier-dependent effects (Fire ambience) follow. Uses the live
+// appearance draft if one is being previewed, else the saved prefs.
+window.addEventListener('sx-perf', () => {
+  try { applyPrefs((typeof _apprDraft === 'object' && _apprDraft && Object.keys(_apprDraft).length) ? { ...PREFS, ..._apprDraft } : PREFS); } catch (e) {}
+  try { if (typeof _perfRefreshSettings === 'function') _perfRefreshSettings(); } catch (e) {}
+});
+window.addEventListener('sx-vplay', (e) => { try { FireFX.hold(e.detail && e.detail.on); } catch (er) {} });
 
 /* NOTES + CODE apps extracted to apps-editors.js (lazy via openLazyApp). */
 
