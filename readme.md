@@ -518,6 +518,16 @@ can't be abused to flood the table. Body fields and a worked example are documen
 
 ---
 
+## Passkeys (WebAuthn)
+
+Settings → Safety → **Passkeys** lets each account add up to 10 passkeys (Face ID, Touch ID, Windows Hello, Android, security keys). The login screen gets a **Sign in with a passkey** button and browser autofill suggestions.
+
+- **Adding** a passkey needs the current password (+ a two-auth code if two-auth is on), so a stolen session can't plant one.
+- **Signing in** requires user verification (biometric/PIN), which counts as two factors, so two-auth codes are skipped. Failed attempts count toward the IP-ban tiers.
+- **Vault keys:** passkeys that support the WebAuthn PRF extension (modern iCloud Keychain, Google Password Manager, Windows Hello, recent security keys) also unlock your per-user encryption key, even right after a restart. Passkeys without PRF are marked **sign-in only**: they work while your keys are loaded, but after a restart you sign in with your password once.
+- Code: `passkeys.js` (server, uses `@simplewebauthn/server`), passkey section in `app.js` (client).
+- **Production:** set `SIMPLEX_RP_ID=data.guythatlives.net` and `SIMPLEX_ORIGIN=https://data.guythatlives.net` to pin the relying party. Without them it's taken from the request host (works for localhost and behind Cloudflare). Passkeys only work over HTTPS or on `localhost`.
+
 ## Cloudflare deployment notes
 
 Domain via **Spaceship**, DNS + tunnel via **Cloudflare**, all safety protocols on.

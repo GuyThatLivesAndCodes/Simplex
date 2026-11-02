@@ -44,7 +44,7 @@
   <form id="loginForm" class="login-card" autocomplete="off">
     <label class="login-field">
       <span class="eyebrow">Account</span>
-      <input id="loginUser" type="text" name="username" placeholder="username" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" />
+      <input id="loginUser" type="text" name="username" placeholder="username" autocomplete="username webauthn" autocapitalize="off" autocorrect="off" spellcheck="false" />
     </label>
     <label class="login-field">
       <span class="eyebrow">Password</span>
@@ -55,6 +55,13 @@
     </label>
     <div class="lock-hint" id="lockHint"></div>
     <button type="submit" class="btn primary login-btn" id="loginBtn">Sign in</button>
+    <div class="login-pk-wrap" id="passkeyWrap" hidden>
+      <div class="login-or"><span>or</span></div>
+      <button type="button" class="btn ghost login-btn login-pk" id="passkeyBtn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7.5" r="3.5"/><path d="M3 20v-.5A5.5 5.5 0 0 1 11.6 15"/><circle cx="17.5" cy="13.5" r="2.5"/><path d="M17.5 16v5.5M17.5 19.5h2"/></svg>
+        <span>Sign in with a passkey</span>
+      </button>
+    </div>
     <div class="login-alt">
       <span>Don't have an account?</span>
       <button type="button" class="login-signup-link" id="signupBtn">Request one</button>

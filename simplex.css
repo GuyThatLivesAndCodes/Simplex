@@ -200,6 +200,13 @@ input, textarea { font-family: inherit; }
 .login-btn { height: 42px; justify-content: center; font-size: 14px; }
 .login-btn:disabled { opacity: 0.6; pointer-events: none; }
 .login-alt { display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: 14px; font-size: 12px; color: var(--ink-ghost); }
+/* passkey sign-in: "or" divider + secondary button */
+.login-pk-wrap { display: flex; flex-direction: column; gap: 12px; }
+.login-pk-wrap[hidden] { display: none; }
+.login-or { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-ghost); }
+.login-or::before, .login-or::after { content: ""; flex: 1; height: 1px; background: var(--line-soft); }
+.login-pk { gap: 8px; }
+.login-pk svg { flex: none; color: var(--acc); }
 .login-signup-link { background: none; border: none; padding: 0; color: var(--acc); font-size: 12px; font-weight: 600; cursor: pointer; letter-spacing: 0.01em; }
 .login-signup-link:hover { text-decoration: underline; }
 
@@ -4289,4 +4296,34 @@ img.mu-cover.lazy { background: var(--card); }
 
 @media (max-width: 820px) {
   .mat-preview { width: 260px; }
+}
+
+/* ---------- passkeys (Settings → Safety) ---------- */
+.pk-list { display: flex; flex-direction: column; gap: 8px; margin-top: -4px; }
+.pk-list:empty { display: none; }
+.pk-item { display: flex; align-items: center; gap: 12px; padding: 11px 14px 11px 16px; margin-left: 18px;
+  background: var(--card); border: 1px solid var(--line-soft); border-radius: var(--radius-sm); position: relative; }
+.pk-item::before { content: ""; position: absolute; left: -12px; top: 50%; width: 8px; height: 1px; background: var(--line); }
+.pk-ic { width: 32px; height: 32px; border-radius: 9px; flex: none; display: flex; align-items: center; justify-content: center;
+  background: color-mix(in oklch, var(--acc) 12%, transparent); color: var(--acc); }
+.pk-main { flex: 1; min-width: 0; }
+.pk-name { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 13.5px; font-weight: 600; }
+.pk-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.pk-sub { font-size: 11px; color: var(--ink-faint); margin-top: 2px; }
+.pk-chip { font-family: var(--mono); font-size: 9px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 999px; background: var(--raised); color: var(--ink-faint); border: 1px solid var(--line-soft); }
+.pk-chip.ok { background: oklch(0.72 0.15 145 / 0.14); color: oklch(0.78 0.15 145); border-color: transparent; }
+.pk-chip.warn { background: oklch(0.75 0.13 85 / 0.16); color: oklch(0.8 0.14 85); border-color: transparent; cursor: help; }
+.pk-acts { display: flex; align-items: center; gap: 6px; flex: none; }
+.pk-acts .btn.icon-only { width: 30px; height: 30px; padding: 0; justify-content: center; }
+.pk-acts .btn.danger { background: transparent; color: var(--ink-faint); border: 1px solid var(--line); box-shadow: none; }
+.pk-acts .btn.danger:hover { background: oklch(0.55 0.17 28 / 0.14); color: oklch(0.7 0.17 28); border-color: oklch(0.55 0.17 28 / 0.4); }
+.pk-empty { font-size: 11px; color: var(--ink-faint); padding: 4px 18px; }
+@media (max-width: 560px) {
+  .pk-item { margin-left: 0; flex-wrap: wrap; }
+  .pk-item::before { display: none; }
+  .pk-main { flex: 1 1 0; }
+  /* icon-only actions stay inline; a row with "Enable unlock" drops to its own line */
+  .pk-acts:has(.btn:not(.icon-only)) { width: 100%; }
+  .pk-acts .btn:not(.icon-only) { flex: 1 1 auto; }
 }
