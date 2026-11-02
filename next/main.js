@@ -70,7 +70,15 @@ function showLogin(note) {
     const ctl = pkCtl = new AbortController();
     pkTimer = setTimeout(pkAutofill, 4 * 60_000);
     try { pkDone(await passkeys.signIn({ conditional: true, signal: ctl.signal })); }
-    catch (ex) { if (pkCtl === ctl && card.isConnected) { pkFail(ex); if (!pkBusy) pkTimer = setTimeout(pkAutofill, 3000); } }
+    catch (ex) {
+      // background autofill is best-effort: never show its errors (the user didn't
+      // ask for anything yet), and stop for good when this browser/device can't do
+      // it, instead of re-asking the server every few seconds
+      if (pkCtl !== ctl || !card.isConnected || pkBusy) return;
+      const name = ex && ex.name;
+      if (name === 'NotSupportedError' || name === 'SecurityError' || name === 'InvalidStateError' || (ex && ex.status)) { pkStop(); return; }
+      pkTimer = setTimeout(pkAutofill, 3000);
+    }
   }
   if (pkBtn) {
     pkBtn.onclick = async () => {
