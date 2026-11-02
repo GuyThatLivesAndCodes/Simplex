@@ -564,6 +564,11 @@ textarea.in { height: auto; padding: 12px 16px; resize: vertical; line-height: 1
 .auth-card .alt { margin-top: 18px; text-align: center; font-size: 12.5px; color: var(--t3); }
 .auth-card .alt button { color: var(--t2); text-decoration: underline; text-underline-offset: 3px; }
 .auth-card .alt button:hover { color: var(--t1); }
+/* passkey sign-in: "or" divider + secondary button */
+.auth-card .pk-or { display: flex; align-items: center; gap: 12px; margin: 14px 0 12px; font-size: 11px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--t4); }
+.auth-card .pk-or::before, .auth-card .pk-or::after { content: ""; flex: 1; height: 1px; background: var(--edge); }
+.auth-card .pk-signin { width: 100%; height: 46px; gap: 9px; font-size: 14px; }
+.auth-card .pk-signin .ic { color: var(--acc); flex: none; }
 .shake { animation: shake 420ms var(--smooth); }
 @keyframes shake { 15%, 85% { transform: translateX(-3px); } 30%, 70% { transform: translateX(7px); } 50% { transform: translateX(-9px); } }
 .code-in { letter-spacing: 0.5em; text-align: center; font-family: var(--mono); font-size: 20px; }
@@ -1500,3 +1505,33 @@ select.in { appearance: none; background-image: linear-gradient(45deg, transpare
 .ai-plevel .seg { margin-top: 10px; }
 .ai-pldesc { margin: 10px 0 0; font-size: 13px; color: var(--t2); line-height: 1.5; }
 .ai-pldesc b { color: var(--t1); font-weight: 600; }
+
+/* ============================================================
+   PASSKEYS (Settings → Security)
+   ============================================================ */
+.pk-list:empty { display: none; }
+.pk-list { border-top: 1px solid var(--edge); }
+.pk-item { display: flex; align-items: center; gap: 12px; padding: 12px 16px 12px 22px; }
+.pk-item + .pk-item { border-top: 1px solid var(--edge); }
+.pk-ic { width: 34px; height: 34px; flex: none; border-radius: 11px; display: grid; place-items: center; background: var(--acc-soft); color: var(--acc); }
+.pk-main { flex: 1; min-width: 0; }
+.pk-name { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.pk-name b { font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.pk-main small { display: block; color: var(--t3); font-size: 12px; margin-top: 2px; }
+.pk-name .chip { height: 19px; padding: 0 8px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+.chip.pk-ok { background: oklch(0.72 0.15 150 / 0.16); color: oklch(0.84 0.13 150); }
+.chip.pk-warn { background: oklch(0.78 0.14 80 / 0.16); color: oklch(0.86 0.13 80); cursor: help; }
+.pk-acts { display: flex; align-items: center; gap: 4px; flex: none; }
+.pk-acts .pk-ib { width: 32px; padding: 0; justify-content: center; }
+.pk-acts .pk-ib.danger { background: transparent; box-shadow: none; color: var(--t3); }
+.pk-acts .pk-ib.danger:hover { background: oklch(0.68 0.19 25 / 0.18); color: oklch(0.82 0.12 25); }
+.pk-note { padding: 10px 22px; color: var(--t3); font-size: 12.5px; }
+.pk-form { display: flex; flex-direction: column; gap: 10px; text-align: left; }
+.pk-form label { display: flex; flex-direction: column; gap: 6px; }
+.pk-form label span { font-size: 12px; font-weight: 600; color: var(--t3); }
+@media (max-width: 560px) {
+  .pk-item { flex-wrap: wrap; padding-left: 16px; }
+  .pk-main { flex: 1 1 0; }
+  .pk-acts:has(.b:not(.pk-ib)) { width: 100%; justify-content: flex-end; }
+  .pk-acts .b:not(.pk-ib) { flex: 1 1 auto; }
+}

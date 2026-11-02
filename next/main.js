@@ -18,6 +18,7 @@ import { renderSeries, leaveSeries } from './series.js';
 import { itemMenuItems } from './files.js';
 import { menu } from './ui.js';
 import { toggle as toggleActivity } from './tasks.js';
+import * as passkeys from './passkeys.js';
 
 const root = document.getElementById('root');
 
@@ -44,16 +45,52 @@ function showLogin(note) {
     <h1>Welcome back</h1>
     <p class="lead">${note || 'Sign in to your private workspace.'}</p>
     <form autocomplete="on" novalidate>
-      <input class="in" name="username" placeholder="Username" autocomplete="username" autocapitalize="off" spellcheck="false" required>
+      <input class="in" name="username" placeholder="Username" autocomplete="username webauthn" autocapitalize="off" spellcheck="false" required>
       <input class="in" name="password" type="password" placeholder="Password" autocomplete="current-password" required>
       <div class="err" role="alert"></div>
       <button class="b pri" type="submit">Sign in</button>
     </form>
+    ${passkeys.supported() ? html`<div class="pk-or"><span>or</span></div>
+    <button class="b pk-signin" type="button" data-passkey>${icon('passkey', 17)}<span>Sign in with a passkey</span></button>` : ''}
     <div class="alt">No account? <button data-c>Request one</button> · <button data-c>Forgot password</button></div>
   </div></main>`.s;
   const card = root.querySelector('.auth-card'), form = card.querySelector('form'), err = card.querySelector('.err'), btn = form.querySelector('button');
   $$('[data-c]', card).forEach(b => b.onclick = () => openClassic('/'));
   form.username.focus();
+  // passkeys: an explicit button, plus the browser's autofill suggestions on the
+  // username field (conditional mediation), renewed before the 5-minute challenge lapses
+  let pkCtl = null, pkTimer = null, pkBusy = false;
+  const pkBtn = card.querySelector('[data-passkey]');
+  const pkStop = () => { clearTimeout(pkTimer); if (pkCtl) { try { pkCtl.abort(); } catch (e) {} pkCtl = null; } };
+  const pkDone = r => { pkStop(); afterLogin(r); };
+  const pkFail = ex => { const m = passkeys.signInError(ex); if (m) fail(m); };
+  async function pkAutofill() {
+    pkStop();
+    if (!card.isConnected || pkBusy || !(await passkeys.conditionalAvailable())) return;
+    const ctl = pkCtl = new AbortController();
+    pkTimer = setTimeout(pkAutofill, 4 * 60_000);
+    try { pkDone(await passkeys.signIn({ conditional: true, signal: ctl.signal })); }
+    catch (ex) {
+      // background autofill is best-effort: never show its errors (the user didn't
+      // ask for anything yet), and stop for good when this browser/device can't do
+      // it, instead of re-asking the server every few seconds
+      if (pkCtl !== ctl || !card.isConnected || pkBusy) return;
+      const name = ex && ex.name;
+      if (name === 'NotSupportedError' || name === 'SecurityError' || name === 'InvalidStateError' || (ex && ex.status)) { pkStop(); return; }
+      pkTimer = setTimeout(pkAutofill, 3000);
+    }
+  }
+  if (pkBtn) {
+    pkBtn.onclick = async () => {
+      if (pkBusy) return;
+      pkStop(); pkBusy = true; err.textContent = '';
+      pkBtn.disabled = true; pkBtn.querySelector('span').textContent = 'Waiting for your passkey…';
+      try { pkDone(await passkeys.signIn()); }
+      catch (ex) { pkFail(ex); }
+      finally { pkBusy = false; if (card.isConnected) { pkBtn.disabled = false; pkBtn.querySelector('span').textContent = 'Sign in with a passkey'; pkAutofill(); } }
+    };
+    pkAutofill();
+  }
   form.onsubmit = async e => {
     e.preventDefault();
     const u = form.username.value.trim(), p = form.password.value;
@@ -61,6 +98,7 @@ function showLogin(note) {
     btn.disabled = true; btn.innerHTML = '<span class="spin"></span>'; err.textContent = '';
     try {
       const r = await store.login(u, p);
+      pkStop();
       if (r.need2fa) return showCode(r.tk);
       afterLogin(r);
     } catch (ex) {
@@ -72,6 +110,7 @@ function showLogin(note) {
   };
   function fail(msg) { err.textContent = msg; card.classList.remove('shake'); void card.offsetWidth; card.classList.add('shake'); }
   function showCode(tk) {
+    card.querySelectorAll('.pk-or, [data-passkey]').forEach(n => n.remove());
     card.querySelector('h1').textContent = 'Two-step sign-in';
     card.querySelector('.lead').textContent = 'Enter the 6-digit code from your authenticator app.';
     form.innerHTML = html`<input class="in code-in" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="••••••"><div class="err" role="alert"></div><button class="b pri" type="submit">Verify</button>`.s;
