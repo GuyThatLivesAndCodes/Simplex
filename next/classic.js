@@ -9,7 +9,9 @@ export const UI_KEY = 'simplex.ui';
 /* leave for the classic interface (and stay there until the user switches back) */
 export function openClassic(path = '/') {
   lsSet(UI_KEY, 'classic');
-  const p = String(path || '/');
+  // `/` is the new interface now — the classic home lives at /old.html
+  let p = String(path || '/');
+  if (p === '/' || p.startsWith('/?') || p.startsWith('/#')) p = '/old.html' + p.slice(1);
   location.href = p + (p.includes('?') ? '&' : '?') + 'ui=classic';
 }
 

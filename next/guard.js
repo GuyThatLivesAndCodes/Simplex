@@ -1,11 +1,11 @@
 /* guard.js — safety net for the new interface (classic script, no modules).
-   Loaded as both a regular and a `nomodule` script by next.html:
+   Loaded as both a regular and a `nomodule` script by index.html (the new interface at /):
    - browsers that can't run ES modules get sent straight to the classic interface
    - if the app hasn't drawn anything 8s after load (a script failed, an old
      browser choked), a fallback card offers the classic interface instead of a
      blank page */
 (function () {
-  function toClassic() { try { localStorage.setItem('simplex.ui', 'classic'); } catch (e) {} location.href = '/?ui=classic'; }
+  function toClassic() { try { localStorage.setItem('simplex.ui', 'classic'); } catch (e) {} location.href = '/old.html?ui=classic'; }
   var isNoModule = document.currentScript && document.currentScript.hasAttribute('nomodule');
   if (isNoModule) { toClassic(); return; }
   window.addEventListener('load', function () {
