@@ -11469,15 +11469,22 @@ app.get('/api/shares/:token/files/:id/cover', (req, res) => {
    HTML. We inject per-file Open Graph + Twitter tags so a shared link unfurls into
    a rich card, and for video/audio a `twitter:player` so it plays inline without
    opening the link. The app shell itself still boots normally for real visitors. */
-let _indexHtmlCache = null;
-function indexHtml(nonce) {
-  if (_indexHtmlCache == null) _indexHtmlCache = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+/* Two app shells (Nov 2026): index.html is the NEW interface (formerly next.html)
+   and the default at /; old.html is the deprecated classic interface, kept working
+   at /old.html, for public share pages (/s/:token, which need its OG tags) and for
+   classic extensionless routes (/dash, /database/…) — its ui2-boot.js forwards
+   browsers that use the new interface to the matching /#/… route. */
+const _shellCache = {};
+function shellHtml(file, nonce) {
+  if (_shellCache[file] == null) _shellCache[file] = fs.readFileSync(path.join(ROOT, file), 'utf8');
   // Stamp the per-request CSP nonce into every `nonce="__CSP_NONCE__"` placeholder
-  // so the inline importmap + tweaks-boot script match the script-src nonce. A
+  // so inline importmap + tweaks-boot scripts match the script-src nonce. A
   // missing nonce (token left unreplaced) would silently block those scripts, so
   // fall back to empty — but in practice the header middleware always provides one.
-  return _indexHtmlCache.replace(/__CSP_NONCE__/g, nonce || '');
+  return _shellCache[file].replace(/__CSP_NONCE__/g, nonce || '');
 }
+const indexHtml = (nonce) => shellHtml('index.html', nonce);   // new interface
+const oldHtml = (nonce) => shellHtml('old.html', nonce);       // classic interface
 
 /* Simplex Visual — the lean standalone Play page. Stamps the CSP nonce onto its
    inline boot script and injects the project id. Auth is the normal session
@@ -11591,12 +11598,12 @@ app.get('/s/:token', (req, res) => {
   const scope = shareScope(req.params.token);
   // asleep (owner's keys not resident) renders the app shell too — the client's
   // share API call gets the 503 + SHARE_ASLEEP and explains it in place
-  if (!scope || scope.asleep) return res.type('html').send(indexHtml(res.locals.cspNonce));
+  if (!scope || scope.asleep) return res.type('html').send(oldHtml(res.locals.cspNonce));
   let head = '';
   try { head = ogTagsForShare(scope, req.params.token, originFor(req)); } catch (e) { head = ''; }
   const name = scope.store.decName(scope.root);
   // inject OG tags + a descriptive <title> right after <head>
-  const html = indexHtml(res.locals.cspNonce).replace(
+  const html = oldHtml(res.locals.cspNonce).replace(
     /<title>.*?<\/title>/i,
     `<title>${htmlAttr(name)} · SIMPLEX</title>\n${head}`
   );
@@ -11615,6 +11622,17 @@ app.get('/visual/play/:id', (req, res) => {
 app.get(['/', '/index.html'], (req, res) => {
   res.setHeader('Cache-Control', 'no-store, must-revalidate');
   res.type('html').send(indexHtml(res.locals.cspNonce));
+});
+// Deprecated classic interface.
+app.get(['/old.html', '/old'], (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, must-revalidate');
+  res.type('html').send(oldHtml(res.locals.cspNonce));
+});
+// The new interface used to live at /next.html — keep old links/bookmarks working
+// (browsers carry the #/route fragment across the redirect).
+app.get('/next.html', (req, res) => {
+  const q = req.originalUrl.indexOf('?');
+  res.redirect(301, '/' + (q >= 0 ? req.originalUrl.slice(q) : ''));
 });
 /* ---------- static allow-list (SECURITY) ----------
    express.static(ROOT) below serves the app folder, and that folder also holds
@@ -11653,8 +11671,8 @@ app.use(express.static(ROOT, {
   // Never let the static handler serve the raw index.html — it would bypass the
   // per-request CSP-nonce stamping in indexHtml() and ship an un-noncED page whose
   // inline importmap/tweaks-boot scripts the CSP then blocks. All HTML delivery
-  // (`/`, `/index.html`, `/s/:token`, and the SPA fallback below) goes through
-  // indexHtml() instead.
+  // (`/`, `/index.html`, `/old.html`, `/s/:token`, and the SPA fallback below) goes
+  // through shellHtml() instead.
   index: false,
   etag: true, lastModified: true,
   setHeaders: (res, filePath) => {
@@ -11672,7 +11690,8 @@ app.use((req, res) => {
   // (paths with a file extension) still 404.
   if (req.method === 'GET' && !path.extname(req.path)) {
     res.setHeader('Cache-Control', 'no-store, must-revalidate');   // never serve a stale app shell
-    return res.type('html').send(indexHtml(res.locals.cspNonce));
+    // classic routes → classic shell; its ui2-boot.js forwards new-UI browsers to /#/…
+    return res.type('html').send(oldHtml(res.locals.cspNonce));
   }
   res.status(404).sendFile(path.join(ROOT, '404.html'));
 });

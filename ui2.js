@@ -4,7 +4,7 @@
  *   - a small floating "New Simplex" pill (bottom-left) once signed in
  *   - an "Interface" row at the top of classic Settings
  * Both call SimplexUI.useNext() (ui2-boot.js), which remembers the choice and
- * opens /next.html. Never touches classic app state; failures are swallowed.
+ * opens the new interface at /. Never touches classic app state; failures are swallowed.
  */
 (function () {
   'use strict';
