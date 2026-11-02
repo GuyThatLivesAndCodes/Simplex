@@ -100,6 +100,7 @@ const UDK_KEYS = new Map();    // accountId -> { ctr1, ctr2, txt1, txt2 } (v2 su
 const UDK_RAW = new Map();     // accountId -> Buffer(32) — kept for re-wrapping (swap / recovery)
 function cacheUdk(accountId, udk) { UDK_RAW.set(accountId, udk); UDK_KEYS.set(accountId, vault.udkSubkeys(udk)); }
 function udkResident(accountId) { return UDK_KEYS.has(accountId); }
+let passkeys = null;   // passkey (WebAuthn) module — mounted with the login routes below
 
 function persistEnrollment(accountId, kekSalt, wrapPw, rcSalt, wrapRc, rcEnc) {
   sys.prepare('UPDATE accounts SET key_enrolled = ?, key_kek_salt = ?, key_wrap_pw = ?, key_rc_salt = ?, key_wrap_rc = ?, key_rc_enc = ?, key_wrap_stale = 0 WHERE id = ?')
@@ -1225,6 +1226,7 @@ function acctToApi(a) {
     // (the wraps/salts themselves are NEVER exposed)
     keys_enrolled: !!a.key_enrolled,
     key_stale: !!a.key_wrap_stale,
+    passkeys: passkeys ? passkeys.countFor(a.id) : 0,
     // Terms of Service: current version + whether THIS account accepted it, so
     // every client knows to raise the agreement before the next upload.
     tos_version: tosVersion(),
@@ -2573,6 +2575,9 @@ function isPublicApi(req) {
   // Two-auth step 2 of a sign-in: no session exists yet by definition. The tk
   // ticket (bound to a password check from this IP minutes ago) is the auth.
   if (req.method === 'POST' && req.path === '/api/login/2fa') return true;
+  // Passkey sign-in: challenge issuance + assertion check. No session yet; the
+  // signed, IP-bound, single-use challenge is the auth (see passkeys.js).
+  if (req.method === 'POST' && (req.path === '/api/login/passkey/options' || req.path === '/api/login/passkey')) return true;
   // Forgot password: both halves are for people who can't sign in. Write-only,
   // rate-limited, enumeration-safe; complete() needs the admin-emailed code.
   if (req.method === 'POST' && (req.path === '/api/reset/request' || req.path === '/api/reset/complete')) return true;
@@ -2886,6 +2891,13 @@ app.post('/api/logout', (req, res) => {
   } catch (e) {}
   clearSessionCookie(req, res);
   res.json({ ok: true });
+});
+
+/* ---------- passkeys (WebAuthn) — see passkeys.js ---------- */
+passkeys = require('./passkeys')(app, {
+  sys, sysStmt, vault, MASTER_KEY, clientIp, recordLoginFailure, clearIpBan,
+  finishLogin, totpVerify, cacheUdk, udkResident, UDK_RAW, notifyAccount,
+  VALID_TIERS, bumpAccounts, requireAuth,
 });
 
 /* ---------- forgot password (public, admin-mediated email loop) ----------
@@ -3920,6 +3932,7 @@ app.delete('/api/accounts/:id', requireAdmin, (req, res) => {
   sysStmt.delApiKeysForAcct.run(target.id);
   ipsSys.delAcct.run(target.id);
   resetSys.delForAcct.run(target.id);
+  passkeys.deleteForAccount(target.id);
   sysStmt.delAcct.run(target.id);
   dropStore(target.id);
   bumpAccounts();
@@ -7306,6 +7319,149 @@ app.post('/api/ai/local/unload', (req, res) => {
 app.post('/api/ai/local/thermal/reset', requireAdmin, (req, res) => {
   localAI.thermalReset();
   res.json({ ok: true, thermal: localAI.thermalState() });
+});
+
+/* ============================================================
+   MODEL LAB — raw GGUF inference for researchers
+   ------------------------------------------------------------
+   Separate from /api/ai/chat on purpose: NO persona, memory, tools or system
+   prompt is ever injected. The client sends either a verbatim prompt string or
+   explicit token ids, and gets back every generated token with its top-K
+   probability distribution so it can step, force tokens and spot NaNs.
+   ============================================================ */
+function labModelId(req, res, raw) {
+  if (!requireAi(req, res)) return null;
+  const id = String(raw || '').trim();
+  if (!localAI.isLocalModel(id)) { res.status(400).json({ error: 'not a local model' }); return null; }
+  if (!localAI.engineAvailable()) { res.status(503).json({ error: 'Local AI engine is not available on this server' }); return null; }
+  // must be one of the models THIS account can see (server folder or own vault)
+  let ok = false;
+  try { ok = localAI.listModels(req.store).some(m => m.id === id); } catch (e) {}
+  if (!ok) { res.status(404).json({ error: 'model not found' }); return null; }
+  return id;
+}
+const labNum = (v, lo, hi, d) => { const n = +v; return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+const labErr = (res, e) => res.status(e && /not found/i.test(e.message) ? 404 : 500).json({ error: (e && e.message) || 'model error' });
+
+app.get('/api/ai/lab/meta', async (req, res) => {
+  const id = labModelId(req, res, req.query.id); if (!id) return;
+  try { res.json({ meta: await localAI.modelMeta(id, req.store), loaded: localAI.isLoaded(id) }); }
+  catch (e) { labErr(res, e); }
+});
+
+/* Load (or confirm loaded) — can take a while on a cold start; client disables its timeout. */
+app.post('/api/ai/lab/load', async (req, res) => {
+  const id = labModelId(req, res, req.body && req.body.id); if (!id) return;
+  try { res.json({ ok: true, props: await localAI.labProps(id, req.store) }); }
+  catch (e) { labErr(res, e); }
+});
+
+app.post('/api/ai/lab/tokenize', async (req, res) => {
+  const b = req.body || {};
+  const id = labModelId(req, res, b.id); if (!id) return;
+  const text = String(b.text ?? '');
+  if (text.length > 400_000) return res.status(413).json({ error: 'prompt too long' });
+  try {
+    const j = await localAI.labJSON(id, req.store, 'tokenize', {
+      content: text, add_special: b.add_special !== false, parse_special: b.parse_special !== false, with_pieces: true,
+    });
+    res.json({ tokens: Array.isArray(j.tokens) ? j.tokens : [] });
+  } catch (e) { labErr(res, e); }
+});
+
+app.post('/api/ai/lab/template', async (req, res) => {
+  const b = req.body || {};
+  const id = labModelId(req, res, b.id); if (!id) return;
+  const messages = (Array.isArray(b.messages) ? b.messages : []).slice(0, 200)
+    .filter(m => m && ['system', 'user', 'assistant'].includes(m.role))
+    .map(m => ({ role: m.role, content: String(m.content ?? '').slice(0, 200_000) }));
+  if (!messages.length) return res.status(400).json({ error: 'add at least one message' });
+  try {
+    const j = await localAI.labJSON(id, req.store, 'apply-template', { messages, add_generation_prompt: b.add_generation_prompt !== false });
+    res.json({ prompt: String(j.prompt ?? '') });
+  } catch (e) { labErr(res, e); }
+});
+
+app.get('/api/ai/lab/log', (req, res) => {
+  const id = labModelId(req, res, req.query.id); if (!id) return;
+  res.json({ lines: localAI.labLogTail(id) || [] });
+});
+
+/* Streamed raw generation. SSE events:
+     {type:'stage',stage}                                  model loading progress
+     {type:'token', id, text, bytes, logprob|prob, top:[{id,text,bytes,logprob|prob}], ms}
+     {type:'done', stop_type, truncated, timings, tokens_evaluated, tokens_cached}
+     {type:'error', error}                                                       */
+app.post('/api/ai/lab/generate', async (req, res) => {
+  const b = req.body || {};
+  const id = labModelId(req, res, b.id); if (!id) return;
+  let prompt;
+  if (Array.isArray(b.prompt)) {
+    if (b.prompt.length > 131072 || !b.prompt.every(t => Number.isInteger(t) && t >= 0 && t < 4_000_000)) return res.status(400).json({ error: 'bad token ids' });
+    prompt = b.prompt;
+  } else {
+    prompt = String(b.prompt ?? '');
+    if (prompt.length > 400_000) return res.status(413).json({ error: 'prompt too long' });
+  }
+  const post = !!b.post_sampling_probs;
+  const body = {
+    prompt,
+    n_predict: Math.round(labNum(b.n_predict, 1, 4096, 1)),
+    n_probs: Math.round(labNum(b.n_probs, 1, 50, 10)),
+    temperature: labNum(b.temperature, 0, 5, 0.7),
+    top_k: Math.round(labNum(b.top_k, 0, 1000, 40)),
+    top_p: labNum(b.top_p, 0, 1, 0.95),
+    min_p: labNum(b.min_p, 0, 1, 0.05),
+    repeat_penalty: labNum(b.repeat_penalty, 0.5, 3, 1),
+    seed: Number.isInteger(+b.seed) && +b.seed >= 0 ? +b.seed : -1,
+    ignore_eos: !!b.ignore_eos,
+    post_sampling_probs: post,
+    return_tokens: true,
+    cache_prompt: true,
+  };
+  try { logAnalytics(req.store, 'ai_message', { provider: 'local' }); } catch (e) {}
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders && res.flushHeaders();
+  const send = (obj) => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
+  const ac = new AbortController();
+  let closed = false;
+  res.on('close', () => { if (!res.writableEnded) { closed = true; try { ac.abort(); } catch (e) {} } });
+  const beat = setInterval(() => { try { if (!res.writableEnded) res.write(': ping\n\n'); } catch (e) {} }, 15_000);
+  const pick = (p) => p == null ? null : ({ id: p.id, text: p.token, bytes: p.bytes, logprob: p.logprob, prob: p.prob });
+  let last = Date.now(), sent = 0;
+  try {
+    await localAI.labStream(id, req.store, body, {
+      signal: ac.signal,
+      onStage: (stage) => { if (!closed) { send({ type: 'stage', stage }); last = Date.now(); } },
+      onChunk: (c) => {
+        if (closed) return;
+        const probs = Array.isArray(c.completion_probabilities) ? c.completion_probabilities : [];
+        for (const p of probs) {
+          const now = Date.now();
+          const top = (post ? p.top_probs : p.top_logprobs) || p.probs || [];
+          send({ type: 'token', ...pick(p), top: top.map(pick), ms: now - last });
+          last = now; sent++;
+        }
+        // a token chunk without probabilities (shouldn't happen with n_probs) — still surface the id
+        if (!probs.length && Array.isArray(c.tokens) && c.tokens.length && !c.stop) {
+          for (const t of c.tokens) { send({ type: 'token', id: t, text: c.content || '', top: [], ms: Date.now() - last, noProbs: true }); last = Date.now(); sent++; }
+        }
+        if (c.stop) send({
+          type: 'done', stop_type: c.stop_type || null, truncated: !!c.truncated, timings: c.timings || null,
+          tokens_evaluated: c.tokens_evaluated ?? null, tokens_cached: c.tokens_cached ?? null, sent,
+        });
+      },
+    });
+  } catch (e) {
+    if (!closed) send({ type: 'error', error: (e && e.name === 'AbortError') ? 'stopped' : ((e && e.message) || 'generation failed') });
+  } finally {
+    clearInterval(beat);
+    if (!closed) { try { res.end(); } catch (e) {} }
+  }
 });
 
 /* per-account saved conversations (encrypted) */
@@ -11469,15 +11625,22 @@ app.get('/api/shares/:token/files/:id/cover', (req, res) => {
    HTML. We inject per-file Open Graph + Twitter tags so a shared link unfurls into
    a rich card, and for video/audio a `twitter:player` so it plays inline without
    opening the link. The app shell itself still boots normally for real visitors. */
-let _indexHtmlCache = null;
-function indexHtml(nonce) {
-  if (_indexHtmlCache == null) _indexHtmlCache = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+/* Two app shells (Nov 2026): index.html is the NEW interface (formerly next.html)
+   and the default at /; old.html is the deprecated classic interface, kept working
+   at /old.html, for public share pages (/s/:token, which need its OG tags) and for
+   classic extensionless routes (/dash, /database/…) — its ui2-boot.js forwards
+   browsers that use the new interface to the matching /#/… route. */
+const _shellCache = {};
+function shellHtml(file, nonce) {
+  if (_shellCache[file] == null) _shellCache[file] = fs.readFileSync(path.join(ROOT, file), 'utf8');
   // Stamp the per-request CSP nonce into every `nonce="__CSP_NONCE__"` placeholder
-  // so the inline importmap + tweaks-boot script match the script-src nonce. A
+  // so inline importmap + tweaks-boot scripts match the script-src nonce. A
   // missing nonce (token left unreplaced) would silently block those scripts, so
   // fall back to empty — but in practice the header middleware always provides one.
-  return _indexHtmlCache.replace(/__CSP_NONCE__/g, nonce || '');
+  return _shellCache[file].replace(/__CSP_NONCE__/g, nonce || '');
 }
+const indexHtml = (nonce) => shellHtml('index.html', nonce);   // new interface
+const oldHtml = (nonce) => shellHtml('old.html', nonce);       // classic interface
 
 /* Simplex Visual — the lean standalone Play page. Stamps the CSP nonce onto its
    inline boot script and injects the project id. Auth is the normal session
@@ -11591,12 +11754,12 @@ app.get('/s/:token', (req, res) => {
   const scope = shareScope(req.params.token);
   // asleep (owner's keys not resident) renders the app shell too — the client's
   // share API call gets the 503 + SHARE_ASLEEP and explains it in place
-  if (!scope || scope.asleep) return res.type('html').send(indexHtml(res.locals.cspNonce));
+  if (!scope || scope.asleep) return res.type('html').send(oldHtml(res.locals.cspNonce));
   let head = '';
   try { head = ogTagsForShare(scope, req.params.token, originFor(req)); } catch (e) { head = ''; }
   const name = scope.store.decName(scope.root);
   // inject OG tags + a descriptive <title> right after <head>
-  const html = indexHtml(res.locals.cspNonce).replace(
+  const html = oldHtml(res.locals.cspNonce).replace(
     /<title>.*?<\/title>/i,
     `<title>${htmlAttr(name)} · SIMPLEX</title>\n${head}`
   );
@@ -11616,12 +11779,56 @@ app.get(['/', '/index.html'], (req, res) => {
   res.setHeader('Cache-Control', 'no-store, must-revalidate');
   res.type('html').send(indexHtml(res.locals.cspNonce));
 });
+// Deprecated classic interface.
+app.get(['/old.html', '/old'], (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, must-revalidate');
+  res.type('html').send(oldHtml(res.locals.cspNonce));
+});
+// The new interface used to live at /next.html — keep old links/bookmarks working
+// (browsers carry the #/route fragment across the redirect).
+app.get('/next.html', (req, res) => {
+  const q = req.originalUrl.indexOf('?');
+  res.redirect(301, '/' + (q >= 0 ? req.originalUrl.slice(q) : ''));
+});
+/* ---------- static allow-list (SECURITY) ----------
+   express.static(ROOT) below serves the app folder, and that folder also holds
+   the vault (keys + databases), server source, models, logs and scripts. Only
+   browser-facing files may be fetched: top-level html/js/jsx/css/images (minus
+   server-only modules) and the new UI under /next/. Everything else 404s here,
+   before static can see it. */
+const STATIC_SERVER_ONLY = new Set([
+  'server.js', 'run.js', 'passkeys.js', 'crypto.js', 'key.js', 'migrate.js', 'rescue.js',
+  'discord-bot.js', 'trading-engine.js', 'stuckwatch.js', 'peicon.js', 'unzip.js', 'inspect.js',
+]);
+const STATIC_TOP_OK = /^[\w.-]+\.(?:html|js|jsx|css|ico|png|svg|webp|jpe?g|gif|woff2?)$/i;
+const STATIC_NEXT_OK = /^next\/(?:[\w-]+\/)*[\w.-]+\.(?:js|css|svg|png|webp|jpe?g|gif|woff2?|json)$/i;
+function staticAllowed(urlPath) {
+  let rel;
+  try { rel = decodeURIComponent(urlPath).replace(/^\/+/, ''); } catch (e) { return false; }
+  if (!rel || rel.includes('\\') || rel.includes('\0') || /(^|\/)\.{1,2}(\/|$)/.test(rel) || /(^|\/)\./.test(rel)) return false;
+  if (!rel.includes('/')) return STATIC_TOP_OK.test(rel) && !STATIC_SERVER_ONLY.has(rel.toLowerCase());
+  return STATIC_NEXT_OK.test(rel);
+}
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+  if (req.path.startsWith('/api/')) return next();
+  if (!path.extname(req.path)) {
+    // extensionless → SPA fallback (app shell) — unless it names a real file on
+    // disk (e.g. an extensionless key under vault/), which must never be served
+    let isFile = false;
+    try { isFile = fs.statSync(path.join(ROOT, path.normalize(decodeURIComponent(req.path)).replace(/^([/\\])+/, ''))).isFile(); } catch (e) {}
+    if (!isFile) return next();
+    return res.status(404).sendFile(path.join(ROOT, '404.html'));
+  }
+  if (staticAllowed(req.path)) return next();
+  res.status(404).sendFile(path.join(ROOT, '404.html'));
+});
 app.use(express.static(ROOT, {
   // Never let the static handler serve the raw index.html — it would bypass the
   // per-request CSP-nonce stamping in indexHtml() and ship an un-noncED page whose
   // inline importmap/tweaks-boot scripts the CSP then blocks. All HTML delivery
-  // (`/`, `/index.html`, `/s/:token`, and the SPA fallback below) goes through
-  // indexHtml() instead.
+  // (`/`, `/index.html`, `/old.html`, `/s/:token`, and the SPA fallback below) goes
+  // through shellHtml() instead.
   index: false,
   etag: true, lastModified: true,
   setHeaders: (res, filePath) => {
@@ -11642,7 +11849,8 @@ app.use((req, res) => {
   // (paths with a file extension) still 404.
   if (req.method === 'GET' && !path.extname(req.path)) {
     res.setHeader('Cache-Control', 'no-store, must-revalidate');   // never serve a stale app shell
-    return res.type('html').send(indexHtml(res.locals.cspNonce));
+    // classic routes → classic shell; its ui2-boot.js forwards new-UI browsers to /#/…
+    return res.type('html').send(oldHtml(res.locals.cspNonce));
   }
   res.status(404).sendFile(path.join(ROOT, '404.html'));
 });

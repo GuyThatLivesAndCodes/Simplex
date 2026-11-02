@@ -714,7 +714,7 @@ async function ensureSession() {
   if (ACCOUNT && ACCOUNT.prefs) { PREFS = { ...PREFS, ...ACCOUNT.prefs }; savePrefsLocal(); applyPrefs(PREFS); }
 }
 
-function targetPath() { const p = location.pathname; return (!p || p === '/' || p === '/index.html') ? '/dash' : p; }
+function targetPath() { const p = location.pathname; return (!p || p === '/' || p === '/index.html' || p === '/old.html' || p === '/old') ? '/dash' : p; }
 async function bootDashboard() {
   SimplexBoot.stage('bootDashboard');
   try {

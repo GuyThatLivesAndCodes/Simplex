@@ -573,3 +573,12 @@ icons.js      inline SVG icon set
 index.html / simplex.css   shell + styling
 vault/        (gitignored) keys/, system.sqlite, accounts/<id>/{simplex.sqlite, files/}
 ```
+
+## Passkeys (WebAuthn)
+
+Settings → Security → **Passkeys** (new UI) lets each account add up to 10 passkeys. The sign-in screen has a **Sign in with a passkey** button, and browsers that support autofill suggest passkeys in the username field.
+
+- Adding a passkey needs the current password, plus a two-step code if that's on. Sign-in always requires biometric/PIN, so the two-step code is skipped. Failed attempts count toward the IP-ban tiers.
+- Passkeys with the PRF extension also unlock the per-user vault key, even right after a restart. Others are marked "sign-in only".
+- Code: `passkeys.js` (server, `@simplewebauthn/server`) and `next/passkeys.js` (UI).
+- Production: set `SIMPLEX_RP_ID=data.guythatlives.net` and `SIMPLEX_ORIGIN=https://data.guythatlives.net`.

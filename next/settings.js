@@ -6,9 +6,11 @@ import * as prefs from './prefs.js';
 import { toast, confirm, seg } from './ui.js';
 import { openClassic, lockedApp, APPS } from './classic.js';
 import * as perf from './perf.js';
+import * as passkeys from './passkeys.js';
 
 const SECTIONS = [
   ['account', 'Account', 'logout'],
+  ['security', 'Security', 'passkey'],
   ['appearance', 'Appearance', 'eye'],
   ['motion', 'Motion', 'spark'],
   ['home', 'Home', 'home'],
@@ -55,6 +57,8 @@ export function renderSettings(stage) {
         ${row('Display name', 'How you appear to other members', html`<input class="in sm" data-display value="${a.display || ''}" maxlength="40" spellcheck="false">`)}
         ${row('Password & two-step sign-in', 'Still in the classic interface', html`<button class="b sm" data-classic="/settings">${icon('lock', 14)} Open</button>`)}
         ${row('Sign out', 'Ends this session on this device', html`<button class="b sm danger" data-signout>${icon('logout', 14)} Sign out</button>`)}`)}
+
+      ${section('security', 'Security', passkeys.settingsRows())}
 
       ${section('appearance', 'Appearance', html`
         ${row('Accent', 'Buttons, highlights and the background glow', html`<div class="swatches">${prefs.ACCENTS.map(x => html`<button class="swatch" data-accent="${x.id}" title="${x.label}" style="--sw:${x.c}"></button>`)}<label class="swatch custom" title="Custom color"><input type="color" data-accent-custom value="${/^#/.test(P.accent) ? P.accent : '#8b7cff'}"></label></div>`)}
@@ -120,6 +124,7 @@ export function renderSettings(stage) {
   });
   $$('input[type=range]', page).forEach(paintRange);
   markAccent();
+  passkeys.wireSettings(page);
   page.addEventListener('click', async e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.jump) { const t = page.querySelector('#set-' + b.dataset.jump); t && t.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
