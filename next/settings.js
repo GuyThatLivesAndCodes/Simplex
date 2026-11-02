@@ -30,6 +30,7 @@ function perfLine() {
   const p = prefs.get('perf');
   if (p === 'full') return 'Live blur and moving backdrop everywhere — best on dedicated graphics';
   if (p === 'light') return 'Same look, computed once — smooth video and scrolling on laptop graphics';
+  if (p === 'saver') return 'No glow or frosted glass, quicker animations — for older phones and laptops';
   return 'Auto: ' + perf.autoReason();
 }
 
@@ -60,7 +61,7 @@ export function renderSettings(stage) {
         ${row('Backdrop', 'What sits behind everything', segCtl('backdrop', [['aurora', 'Aurora'], ['calm', 'Still'], ['solid', 'Plain']]))}
         ${row('Backdrop intensity', null, range('backdropLevel', 0, 150, 10, '%'))}
         ${row('Glass', 'How frosted panels, menus and the dock look', segCtl('glass', [['off', 'Solid'], ['light', 'Light'], ['normal', 'Normal'], ['heavy', 'Heavy']]))}
-        ${row('Performance', html`<span data-perf-why>${perfLine()}</span>`, html`<div class="perf-ctl">${segCtl('perf', [['auto', 'Auto'], ['full', 'Full effects'], ['light', 'Light']])}<button class="b sm flat" data-perf-recheck title="Detect again on this device">${icon('restore', 14)} Check again</button></div>`)}
+        ${row('Performance', html`<span data-perf-why>${perfLine()}</span><br><span class="dim">This device only</span>`, html`<div class="perf-ctl">${segCtl('perf', [['auto', 'Auto'], ['full', 'Full effects'], ['light', 'Light'], ['saver', 'Saver']])}<button class="b sm flat" data-perf-recheck title="Detect again on this device">${icon('restore', 14)} Check again</button></div>`)}
         ${row('Corners', null, segCtl('corners', [['sharp', 'Sharp'], ['round', 'Round'], ['extra', 'Extra round']]))}
         ${row('Font', null, segCtl('font', [['inter', 'Inter'], ['system', 'System'], ['rounded', 'Rounded']]))}
         ${row('Interface size', 'Scales text, icons and spacing together', range('scale', 90, 115, 5, '%'))}

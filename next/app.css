@@ -1185,6 +1185,36 @@ select.in option { background: #16171e; }
 :root[data-lite] .p-bar { background: rgb(14 15 20 / 0.82); }
 :root[data-lite] .p-big { background: rgb(44 46 58 / 0.72); }
 :root[data-lite] .ai-pop, :root[data-lite] .menu, :root[data-lite] .pal, :root[data-lite] .toast { -webkit-backdrop-filter: none; backdrop-filter: none; }
+/* Light, continued: the small frosted chips repeat on EVERY file card (type tag,
+   select ring, more button) — a 240-card grid meant hundreds of live blur layers
+   re-rendered on every scroll frame. Same for the spinner/seek flash that sit on
+   top of a playing video (blurred again for each video frame). */
+:root[data-lite] .fcard .tag, :root[data-lite] .fcard .mo, :root[data-lite] .p-spin, :root[data-lite] .p-flash { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+:root[data-lite] .fcard .tag { background: rgb(0 0 0 / 0.72); }
+:root[data-lite] .fcard .mo, :root[data-lite] .p-flash { background: rgb(0 0 0 / 0.62); }
+:root[data-lite] .p-spin { background: rgb(0 0 0 / 0.55); }
+/* the full-screen film grain blends (mix-blend-mode) with everything above it on
+   every composite; a plain low-opacity layer looks the same on a still backdrop */
+:root[data-lite] #bg::after { mix-blend-mode: normal; opacity: 0.035; }
+/* page / sign-in entrances animate a blur filter on the whole page — keep the
+   motion, drop the per-frame blur */
+@keyframes page-in-lite { from { opacity: 0; transform: translateY(14px) scale(0.99); } }
+@keyframes auth-in-lite { from { opacity: 0; transform: translateY(24px) scale(0.96); } }
+:root[data-lite] .page-enter { animation-name: page-in-lite; }
+:root[data-lite] .auth-card { animation-name: auth-in-lite; }
+
+/* Saver (data-saver, always together with data-lite): weakest devices. No
+   backdrop at all, no frosted glass anywhere, no staggered entrances, flatter
+   shadows. The layout and colors stay exactly the same. */
+:root[data-saver] #bg { display: none; }
+:root[data-saver] body { background: var(--canvas); }
+:root[data-saver] *, :root[data-saver] *::before, :root[data-saver] *::after { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+:root[data-saver] .drop { background: rgb(7 8 12 / 0.86); }
+:root[data-saver] .p-big { background: rgb(44 46 58 / 0.85); }
+:root[data-saver] { --sh-3: 0 6px 18px rgb(0 0 0 / 0.45); }
+:root[data-saver] .fcard, :root[data-saver] .frow, :root[data-saver] .ttile, :root[data-saver] .srcard,
+:root[data-saver] .ai-m, :root[data-saver] .ai-act { animation-delay: 0s !important; animation-duration: calc(var(--d2) * 0.8); }
+:root[data-saver] .page-enter { animation-duration: var(--d2); }
 
 /* ============================================================ virtual machines (#/vms) */
 .vms { min-height: 100%; display: flex; flex-direction: column; }
