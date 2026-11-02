@@ -11634,6 +11634,39 @@ app.get('/next.html', (req, res) => {
   const q = req.originalUrl.indexOf('?');
   res.redirect(301, '/' + (q >= 0 ? req.originalUrl.slice(q) : ''));
 });
+/* ---------- static allow-list (SECURITY) ----------
+   express.static(ROOT) below serves the app folder, and that folder also holds
+   the vault (keys + databases), server source, models, logs and scripts. Only
+   browser-facing files may be fetched: top-level html/js/jsx/css/images (minus
+   server-only modules) and the new UI under /next/. Everything else 404s here,
+   before static can see it. */
+const STATIC_SERVER_ONLY = new Set([
+  'server.js', 'run.js', 'passkeys.js', 'crypto.js', 'key.js', 'migrate.js', 'rescue.js',
+  'discord-bot.js', 'trading-engine.js', 'stuckwatch.js', 'peicon.js', 'unzip.js', 'inspect.js',
+]);
+const STATIC_TOP_OK = /^[\w.-]+\.(?:html|js|jsx|css|ico|png|svg|webp|jpe?g|gif|woff2?)$/i;
+const STATIC_NEXT_OK = /^next\/(?:[\w-]+\/)*[\w.-]+\.(?:js|css|svg|png|webp|jpe?g|gif|woff2?|json)$/i;
+function staticAllowed(urlPath) {
+  let rel;
+  try { rel = decodeURIComponent(urlPath).replace(/^\/+/, ''); } catch (e) { return false; }
+  if (!rel || rel.includes('\\') || rel.includes('\0') || /(^|\/)\.{1,2}(\/|$)/.test(rel) || /(^|\/)\./.test(rel)) return false;
+  if (!rel.includes('/')) return STATIC_TOP_OK.test(rel) && !STATIC_SERVER_ONLY.has(rel.toLowerCase());
+  return STATIC_NEXT_OK.test(rel);
+}
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+  if (req.path.startsWith('/api/')) return next();
+  if (!path.extname(req.path)) {
+    // extensionless → SPA fallback (app shell) — unless it names a real file on
+    // disk (e.g. an extensionless key under vault/), which must never be served
+    let isFile = false;
+    try { isFile = fs.statSync(path.join(ROOT, path.normalize(decodeURIComponent(req.path)).replace(/^([/\\])+/, ''))).isFile(); } catch (e) {}
+    if (!isFile) return next();
+    return res.status(404).sendFile(path.join(ROOT, '404.html'));
+  }
+  if (staticAllowed(req.path)) return next();
+  res.status(404).sendFile(path.join(ROOT, '404.html'));
+});
 app.use(express.static(ROOT, {
   // Never let the static handler serve the raw index.html — it would bypass the
   // per-request CSP-nonce stamping in indexHtml() and ship an un-noncED page whose
