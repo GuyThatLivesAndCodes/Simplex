@@ -21,6 +21,9 @@
 <!-- Boot guard + crash reporter: loaded FIRST, no deps. Guarantees the page never
      sits on an endless blank/loading screen — see boot-guard.js. -->
 <script src="/boot-guard.js"></script>
+<!-- Adaptive performance tier (data-perf on <html>) — tiny, sync, before first
+     paint so slow devices never render the heavy blur/ambience layer at all. -->
+<script src="/perf.js"></script>
 <!-- Import map so three.js's example loaders (GLTF/OBJ/FBX/STL/OrbitControls),
      which `import ... from "three"`, can resolve that bare specifier. three.js is
      loaded lazily from unpkg ONLY when a 3D model is first opened (see the 3D model
@@ -166,19 +169,15 @@
        · neural-engine.js + neural.js → the Neural app   (opening the app)
      Keeping these ~200KB out of the boot path is the main first-load win. -->
 
-<!-- React + Babel power only the optional "tweaks" panel. They come from a CDN
-     (unpkg) and have historically been the slowest part of the load. They are
-     loaded LAST and are non-fatal: tweaks-boot.js records any load failure (via a
-     listener, not an inline handler — our CSP forbids inline event handlers) so
-     the core app (login + vault) keeps working without them.
-     tweaks-boot.js loads FIRST here so its error listeners are attached before the
-     CDN scripts below can finish (or fail) loading. -->
+<!-- React + Babel power only the optional "tweaks" panel, which only exists when
+     the page is framed by the design host. tweaks-boot.js decides whether to load
+     them at all and records any CDN failure (non-fatal: core app never needs them). -->
 <script src="/tweaks-boot.js" nonce="__CSP_NONCE__"></script>
-<script id="dep-react" data-dep="react" src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
-<script id="dep-react-dom" data-dep="react-dom" src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
-<script id="dep-babel" data-dep="babel" src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
-<!-- nonce here is read by @babel/standalone and copied onto the inline <script> it
-     injects with the transpiled output, so that generated script passes the CSP. -->
+<!-- The React/Babel deps are injected by tweaks-boot.js ONLY when the page runs
+     framed inside the design host (the only place the panel can show). For normal
+     visitors this skips ~4MB of CDN JS + in-browser JSX transpiling at every load —
+     the biggest CPU/RAM cost on low-end devices. The text/babel tags below are inert
+     until Babel is loaded. -->
 <script type="text/babel" src="/tweaks-panel.jsx" nonce="__CSP_NONCE__"></script>
 <script type="text/babel" src="/tweaks.jsx" nonce="__CSP_NONCE__"></script>
 </body>
