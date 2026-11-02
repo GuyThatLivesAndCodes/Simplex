@@ -1,0 +1,345 @@
+/* ============================================================
+   MODEL LAB — raw GGUF inference UI (lazy-loaded with model-lab.js)
+   Maps the classic token names onto the new UI's tokens (scoped to .mlab).
+   Kept deliberately cheap to paint: no backdrop blur, no infinite animations
+   besides spinners, and token chips are plain inline spans.
+   ============================================================ */
+.mlab, .mlab-pop, .mlab-modal-bg {
+  /* classic names → new-UI tokens, so the lab follows Settings → Accent */
+  --bg: #0c0d12; --bg-deep: var(--canvas); --raised: var(--l1); --card: var(--l2); --card-hi: var(--l3);
+  --line: var(--edge-hi); --line-soft: var(--edge);
+  --ink: var(--t1); --ink-dim: var(--t2); --ink-faint: var(--t3); --ink-ghost: var(--t4);
+  --acc-glow: var(--acc-soft); --radius: var(--r-m); --radius-sm: var(--r-s); --ease: var(--smooth);
+  --safe-top: var(--safe-t); --safe-right: var(--safe-r); --safe-bottom: var(--safe-b); --safe-left: var(--safe-l);
+  font-family: var(--sans); color: var(--ink);
+}
+/* zero-specificity reset so every .mlab-* rule below wins */
+:where(.mlab, .mlab-pop, .mlab-modal-bg) :where(button) { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; text-align: inherit; }
+.mlab .mono, .mlab-modal-bg .mono { font-family: var(--mono); }
+.mlab .dim { color: var(--ink-faint); }
+.mlab .spacer, .mlab-modal-bg .spacer { flex: 1; }
+.mlab .hidden { display: none !important; }
+.mlab code, .mlab-modal-bg code { font-family: var(--mono); font-size: 0.92em; background: var(--l2); padding: 0 4px; border-radius: 4px; }
+/* buttons */
+.mlab .mb, .mlab-modal-bg .mb { display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px; border-radius: var(--r-s); font-size: 12px; font-weight: 500; background: var(--l2); border: 1px solid var(--edge); color: var(--t1); white-space: nowrap; transition: background var(--d1), border-color var(--d1); }
+.mlab .mb:hover, .mlab-modal-bg .mb:hover { background: var(--l3); border-color: var(--edge-hi); }
+.mlab .mb.pri, .mlab-modal-bg .mb.pri { background: var(--acc-grad); color: var(--acc-ink); border-color: transparent; }
+.mlab .mb.pri:hover, .mlab-modal-bg .mb.pri:hover { filter: brightness(1.08); }
+.mlab .mb.big { padding: 0 14px; font-size: 13px; }
+.mlab .mb:disabled { opacity: 0.45; pointer-events: none; }
+.mlab .mib { width: 30px; height: 30px; border-radius: var(--r-s); display: inline-flex; align-items: center; justify-content: center; color: var(--t3); flex: none; }
+.mlab .mib:hover { background: var(--l2); color: var(--t1); }
+.mlab .mib.sm { width: 26px; height: 26px; }
+.mlab .mseg { display: flex; background: var(--l1); border: 1px solid var(--edge); border-radius: var(--r-s); padding: 2px; }
+.mlab .mseg button { padding: 6px 10px; border-radius: calc(var(--r-s) - 3px); color: var(--t3); display: flex; align-items: center; transition: background var(--d1), color var(--d1); }
+.mlab .mseg button.on { background: var(--l3); color: var(--t1); }
+.mlab select { font: inherit; }
+.mlab {
+  position: fixed; inset: 0; z-index: 205;
+  display: grid; grid-template-rows: auto auto minmax(0, 1fr);
+  background: var(--bg-deep); color: var(--ink);
+  padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+  animation: mlabIn 0.16s var(--ease);
+  contain: strict;
+}
+.mlab.closing { opacity: 0; transition: opacity 0.15s; }
+@keyframes mlabIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ---- top bar ---- */
+.mlab-bar { grid-row: 1; display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--line-soft); background: var(--bg); min-width: 0; }
+.mlab-title { display: flex; align-items: center; gap: 8px; flex: none; }
+.mlab-title b { font-weight: 600; font-size: 14px; letter-spacing: 0.01em; }
+.mlab-logo { width: 26px; height: 26px; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; background: var(--acc-glow); color: var(--acc); }
+.mlab-sub { font-size: 10.5px; color: var(--ink-faint); }
+.mlab-mode { flex: none; }
+.mlab-mode button { gap: 5px; font-size: 12px; }
+.mlab .spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--l3); border-top-color: var(--acc); animation: mlabRot 0.8s linear infinite; display: inline-block; flex: none; }
+@keyframes mlabRot { to { transform: rotate(360deg); } }
+.mlab-chips { display: flex; gap: 6px; align-items: center; min-width: 0; overflow-x: auto; scrollbar-width: none; flex: 1 1 auto; padding: 2px 0; }
+.mlab-chips::-webkit-scrollbar { display: none; }
+.mlab-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px 4px 9px; border-radius: 999px; border: 1px solid var(--line-soft); background: var(--raised); font-size: 12px; color: var(--ink-dim); cursor: pointer; flex: none; max-width: 210px; transition: border-color 0.12s, background 0.12s; }
+.mlab-chip:hover { border-color: var(--line); }
+.mlab-chip.on { color: var(--ink); border-color: color-mix(in oklch, var(--acc) 55%, var(--line)); background: var(--card); }
+.mlab-chip .spin { width: 10px; height: 10px; border-width: 1.5px; }
+.mlab-chip-n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mlab-chip-q { font-size: 10px; color: var(--ink-faint); padding: 1px 5px; border-radius: 4px; background: var(--bg-deep); }
+.mlab-chip-x { width: 18px; height: 18px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: var(--ink-faint); }
+.mlab-chip-x:hover { background: var(--card-hi); color: var(--ink); }
+.mlab-chip:not(:has(.mlab-chip-x)) { padding-right: 10px; }
+.mlab-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--c, var(--ink-ghost)); box-shadow: 0 0 0 2px color-mix(in oklch, var(--c, var(--ink-ghost)) 25%, transparent); }
+.mlab-dot.idle { opacity: 0.45; }
+.mlab-dot.error { background: oklch(0.65 0.19 28); }
+.mlab-add { display: inline-flex; align-items: center; gap: 4px; padding: 5px 10px; border-radius: 999px; border: 1px dashed var(--line); color: var(--ink-faint); font-size: 12px; flex: none; }
+.mlab-add:hover { color: var(--ink); border-color: var(--ink-ghost); }
+
+.mlab-pop { position: fixed; z-index: 225; min-width: 240px; max-width: min(360px, calc(100vw - 16px)); max-height: 60vh; overflow: auto; background: var(--card-hi); border: 1px solid var(--line); border-radius: 10px; padding: 5px; box-shadow: 0 16px 44px oklch(0 0 0 / 0.45); }
+.mlab-pop-h { font-size: 10.5px; color: var(--ink-faint); padding: 6px 8px 4px; text-transform: uppercase; letter-spacing: 0.06em; }
+.mlab-pop button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px; border-radius: 6px; font-size: 13px; color: var(--ink); text-align: left; }
+.mlab-pop button:hover { background: var(--raised); }
+.mlab-pop button span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mlab-pop button em { font-style: normal; font-size: 11px; color: var(--ink-faint); }
+.mlab-pop-empty { padding: 10px; font-size: 12.5px; }
+
+/* ---- mobile tabs (hidden on desktop) ---- */
+.mlab-tabs { display: none; grid-row: 2; }
+
+/* ---- body grid ---- */
+.mlab-body { grid-row: 3; display: grid; grid-template-columns: 300px minmax(0, 1fr) 340px; min-height: 0; }
+.mlab-body.mode-compare { grid-template-columns: 280px minmax(0, 1fr) 320px; }
+.mlab-left, .mlab-right { min-height: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--bg); }
+.mlab-left { border-right: 1px solid var(--line-soft); padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.mlab-right { border-left: 1px solid var(--line-soft); padding: 12px; }
+.mlab-center { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+
+/* ---- left panel ---- */
+.mlab-sec { background: var(--raised); border: 1px solid var(--line-soft); border-radius: var(--radius); padding: 10px; }
+.mlab-sec-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11.5px; font-weight: 600; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
+details.mlab-sec > summary { list-style: none; cursor: pointer; margin-bottom: 0; }
+details.mlab-sec > summary::-webkit-details-marker { display: none; }
+details.mlab-sec > summary::after { content: ''; width: 7px; height: 7px; border-right: 1.5px solid var(--ink-faint); border-bottom: 1.5px solid var(--ink-faint); transform: rotate(-45deg); transition: transform 0.15s; flex: none; margin-left: 4px; }
+details.mlab-sec[open] > summary::after { transform: rotate(45deg); }
+details.mlab-sec[open] > summary { margin-bottom: 10px; }
+.mlab-sum { font-size: 10.5px; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--ink-faint); margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mlab-kind button { padding: 4px 10px; font-size: 11.5px; text-transform: none; letter-spacing: 0; font-weight: 500; }
+.mlab-ta { width: 100%; resize: vertical; background: var(--bg-deep); color: var(--ink); border: 1px solid var(--line-soft); border-radius: var(--radius-sm); padding: 8px 9px; font: 13px/1.5 var(--mono); outline: none; min-height: 38px; }
+.mlab-ta:focus { border-color: color-mix(in oklch, var(--acc) 60%, var(--line)); }
+.mlab-raw { min-height: 140px; }
+.mlab-hint { font-size: 11.5px; color: var(--ink-faint); line-height: 1.45; margin: 2px 0 8px; }
+.mlab-hint b { color: var(--ink-dim); font-weight: 600; }
+.mlab-hint svg { vertical-align: -2px; margin-right: 3px; }
+.mlab-check { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink-dim); margin-top: 8px; cursor: pointer; user-select: none; }
+.mlab-check.sm { margin: 0; font-size: 11.5px; white-space: nowrap; }
+.mlab-check input { accent-color: var(--acc); }
+.mlab-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.mlab-msgs { display: flex; flex-direction: column; gap: 8px; }
+.mlab-msg { position: relative; display: flex; flex-direction: column; gap: 4px; }
+.mlab-role { align-self: flex-start; background: var(--bg-deep); color: var(--ink-dim); border: 1px solid var(--line-soft); border-radius: 5px; font: 11px var(--mono); padding: 2px 4px; }
+.mlab-msg-x { position: absolute; top: 0; right: 0; width: 20px; height: 20px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; color: var(--ink-faint); }
+.mlab-msg-x:hover { background: var(--card-hi); color: var(--ink); }
+.mlab-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.mlab-num { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--ink-faint); min-width: 0; }
+.mlab-num input { width: 100%; min-width: 0; background: var(--bg-deep); color: var(--ink); border: 1px solid var(--line-soft); border-radius: 6px; padding: 5px 7px; font: 12.5px var(--mono); outline: none; }
+.mlab-num input:focus { border-color: color-mix(in oklch, var(--acc) 60%, var(--line)); }
+.mlab-kv { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; padding: 3px 0; border-bottom: 1px dashed var(--line-soft); }
+.mlab-kv:last-child { border-bottom: 0; }
+.mlab-kv span { color: var(--ink-faint); flex: none; }
+.mlab-kv b { font-weight: 500; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.mlab-mix { display: flex; height: 7px; border-radius: 4px; overflow: hidden; margin: 10px 0 6px; gap: 1px; }
+.mlab-mix span, .mlab-mix-l i { background: oklch(0.72 0.12 calc(74 + var(--i) * 62)); }
+.mlab-mix-l { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 10.5px; color: var(--ink-faint); }
+.mlab-mix-l span { display: inline-flex; align-items: center; gap: 4px; }
+.mlab-mix-l i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
+.mlab-pad { padding: 6px 0; display: flex; gap: 8px; align-items: center; font-size: 12px; }
+
+/* ---- center: token stream ---- */
+.mlab-stream { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 16px 18px 10px; outline: none; }
+.mlab-ptoks { margin-bottom: 12px; }
+.mlab-ptoks-h { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink-faint); padding: 3px 7px; border-radius: 5px; background: var(--raised); border: 1px solid var(--line-soft); }
+.mlab-ptoks-h:hover { color: var(--ink); }
+.mlab-ptoks-h svg { transition: transform 0.15s; }
+.mlab-ptoks.open .mlab-ptoks-h svg { transform: rotate(90deg); }
+.mlab-ptoks-b { margin-top: 8px; padding: 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line-soft); max-height: 220px; overflow: auto; font: 12.5px/1.9 var(--mono); }
+.mlab-ptok { white-space: pre; padding: 1px 1px; margin-right: 1px; border-radius: 3px; background: var(--raised); color: var(--ink-dim); box-shadow: inset 0 -1px 0 var(--line); }
+.mlab-genwrap { position: relative; }
+.mlab-gen { font: 14px/2 var(--mono); word-break: break-word; overflow-wrap: anywhere; }
+.mlab-tok {
+  white-space: pre-wrap; padding: 2px 1px; margin-right: 1px; border-radius: 3px; cursor: pointer;
+  background: oklch(0.62 0.15 calc(25 + var(--p) * 125) / 0.26);
+  box-shadow: inset 0 -2px 0 oklch(0.68 0.16 calc(25 + var(--p) * 125) / 0.85);
+  transition: background 0.1s;
+}
+.mlab-tok:hover { background: oklch(0.62 0.15 calc(25 + var(--p) * 125) / 0.45); }
+.mlab-tok.sel { outline: 1.5px solid var(--acc); outline-offset: 1px; }
+.mlab-tok.forced { box-shadow: inset 0 -2px 0 var(--acc); background: var(--acc-glow); outline: 1px dashed color-mix(in oklch, var(--acc) 70%, transparent); outline-offset: -1px; }
+.mlab-tok.forced.sel { outline: 1.5px solid var(--acc); outline-offset: 1px; }
+.mlab-tok.unk { background: var(--raised); box-shadow: inset 0 -2px 0 var(--ink-ghost); }
+.mlab-tok.nan { background: repeating-linear-gradient(-45deg, oklch(0.6 0.2 28 / 0.4) 0 4px, oklch(0.6 0.2 28 / 0.15) 4px 8px); box-shadow: inset 0 -2px 0 oklch(0.65 0.2 28); }
+.mlab-caret { display: inline-block; width: 8px; height: 1.05em; vertical-align: -0.15em; margin-left: 2px; border-radius: 2px; background: var(--acc); animation: mlabBlink 1s steps(2) infinite; }
+.mlab-caret.pending { background: transparent; border: 1.5px dashed var(--acc); animation: none; }
+@keyframes mlabBlink { 50% { opacity: 0; } }
+.mlab-empty-hint { font: 13px/1.6 var(--sans); margin-top: 6px; }
+.mlab-keys { display: block; font-size: 10.5px; color: var(--ink-ghost); margin-top: 6px; }
+.mlab-dirty { margin-top: 12px; font-size: 11.5px; color: var(--acc); display: flex; gap: 6px; align-items: center; }
+
+/* chat bubbles */
+.mlab-bub { max-width: min(760px, 100%); margin: 0 0 12px; padding: 9px 12px; border-radius: 12px; background: var(--raised); border: 1px solid var(--line-soft); font-size: 13.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mlab-bub.user { margin-left: auto; background: var(--card); }
+.mlab-bub.system { border-style: dashed; color: var(--ink-dim); }
+.mlab-bub.assistant.live { background: transparent; border-color: color-mix(in oklch, var(--acc) 35%, var(--line-soft)); white-space: normal; }
+.mlab-bub-r { display: block; font-size: 10px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+
+/* next-token tray */
+.mlab-tray { flex: none; max-height: min(42%, 340px); overflow-y: auto; border-top: 1px solid var(--line-soft); background: var(--bg); padding: 10px 14px; animation: mlabUp 0.14s var(--ease); }
+@keyframes mlabUp { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+.mlab-tray-h { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 8px; flex-wrap: wrap; min-width: 0; }
+.mlab-tray-h b { font-weight: 600; }
+.mlab-tray-f { font-size: 11px; margin-top: 6px; }
+.mlab-pill { display: inline-block; padding: 0 6px; border-radius: 4px; background: var(--card-hi); color: var(--ink); white-space: pre; max-width: 180px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; font-family: var(--mono); font-size: 12px; }
+.mlab-dist { display: flex; flex-direction: column; gap: 2px; }
+.mlab-cand { display: grid; grid-template-columns: 14px minmax(60px, 160px) 1fr 52px; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; text-align: left; width: 100%; color: var(--ink); }
+.mlab-cand:not(:disabled):hover { background: var(--raised); }
+.mlab-cand:disabled { cursor: default; }
+.mlab-cand-k { font-size: 10px; color: var(--ink-ghost); text-align: center; }
+.mlab-cand-t { font-size: 12.5px; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.mlab-cand-bar { height: 8px; border-radius: 4px; background: var(--raised); overflow: hidden; }
+.mlab-cand-bar i { display: block; height: 100%; border-radius: 4px; background: color-mix(in oklch, var(--acc) 55%, var(--ink-ghost)); }
+.mlab-cand-p { font-size: 11.5px; color: var(--ink-dim); text-align: right; }
+.mlab-cand.chosen .mlab-cand-bar i { background: var(--acc); }
+.mlab-cand.chosen .mlab-cand-t { color: var(--acc); }
+.mlab-cand.sampled .mlab-cand-k::after { content: '●'; color: var(--acc); font-size: 8px; }
+.mlab-cand.sampled .mlab-cand-k { font-size: 0; }
+.mlab-cand.bad .mlab-cand-bar i { background: repeating-linear-gradient(-45deg, oklch(0.6 0.2 28) 0 4px, transparent 4px 8px); }
+.mlab-cand.bad .mlab-cand-p { color: oklch(0.7 0.18 28); }
+
+/* controls */
+.mlab-controls { flex: none; display: flex; align-items: center; gap: 6px; padding: 9px 12px; border-top: 1px solid var(--line-soft); background: var(--bg); flex-wrap: wrap; }
+.mlab-controls .mb.danger { background: transparent; border: 1px solid oklch(0.55 0.17 28 / 0.5); color: oklch(0.72 0.16 28); }
+.mlab-ctl-sep { width: 1px; height: 20px; background: var(--line-soft); margin: 0 2px; }
+.mlab-stage { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-dim); }
+.mlab-stage .spin { width: 12px; height: 12px; }
+.mlab-cnote { font-size: 10.5px; }
+.mlab-composer { flex: none; display: flex; gap: 8px; align-items: flex-end; padding: 0 12px 12px; background: var(--bg); }
+.mlab-composer .mlab-ta { font-family: var(--sans); font-size: 13.5px; resize: none; max-height: 160px; }
+.mlab-composer .mb { height: 38px; flex: none; }
+
+/* ---- right: analytics ---- */
+.mlab-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-bottom: 12px; }
+.mlab-tile { background: var(--raised); border: 1px solid var(--line-soft); border-radius: 9px; padding: 8px; min-width: 0; }
+.mlab-tile span { display: block; font-size: 10px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.05em; }
+.mlab-tile b { display: block; font-size: 16px; font-weight: 500; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mlab-tile em { display: block; font-style: normal; font-size: 9.5px; color: var(--ink-ghost); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mlab-tile.bad b { color: oklch(0.72 0.16 28); }
+.mlab-chart-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11.5px; margin: 14px 0 6px; min-width: 0; }
+.mlab-chart-h:first-child { margin-top: 0; }
+.mlab-chart-h b { font-weight: 600; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.05em; font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mlab-leg { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--ink-faint); }
+.mlab-leg i { width: 10px; height: 2px; display: inline-block; margin-left: 6px; }
+.mlab-leg .c-p { background: var(--acc); }
+.mlab-leg .c-h { background: oklch(0.72 0.1 235); }
+.mlab-chart { position: relative; background: var(--raised); border: 1px solid var(--line-soft); border-radius: 9px; padding: 6px 6px 16px; }
+.mlab-chart svg { display: block; width: 100%; height: 120px; cursor: crosshair; }
+.mlab-chart .g { stroke: var(--line-soft); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.mlab-chart .p { fill: none; stroke: var(--acc); stroke-width: 1.6; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.mlab-chart .h { fill: none; stroke: oklch(0.72 0.1 235); stroke-width: 1.1; stroke-dasharray: 3 2; vector-effect: non-scaling-stroke; opacity: 0.85; }
+.mlab-chart .area { fill: var(--acc-glow); stroke: none; }
+.mlab-chart .nanm { stroke: oklch(0.65 0.2 28); stroke-width: 1.5; vector-effect: non-scaling-stroke; opacity: 0.8; }
+.mlab-chart .selm { stroke: var(--ink); stroke-width: 1; vector-effect: non-scaling-stroke; stroke-dasharray: 2 2; }
+.mlab-chart-ax { position: absolute; left: 8px; right: 8px; bottom: 2px; display: flex; justify-content: space-between; font-size: 9.5px; color: var(--ink-ghost); }
+.mlab-chart-empty { height: 120px; display: flex; align-items: center; justify-content: center; font-size: 11px; }
+.mlab-seldet { margin-top: 4px; }
+.mlab-warns { display: flex; flex-direction: column; gap: 4px; }
+.mlab-warn-row { display: flex; align-items: flex-start; gap: 7px; padding: 7px 8px; border-radius: 7px; font-size: 12px; line-height: 1.4; text-align: left; width: 100%; color: var(--ink-dim); background: var(--raised); border: 1px solid var(--line-soft); }
+.mlab-warn-row svg { flex: none; margin-top: 2px; }
+.mlab-warn-row span { flex: 1; min-width: 0; }
+.mlab-warn-row em { font-style: normal; font-size: 10.5px; color: var(--ink-faint); flex: none; }
+.mlab-warn-row.lvl-error { border-color: oklch(0.6 0.19 28 / 0.5); background: oklch(0.6 0.19 28 / 0.1); color: var(--ink); }
+.mlab-warn-row.lvl-error svg { color: oklch(0.7 0.18 28); }
+.mlab-warn-row.lvl-warn { border-color: oklch(0.75 0.14 80 / 0.4); background: oklch(0.75 0.14 80 / 0.08); }
+.mlab-warn-row.lvl-warn svg { color: oklch(0.8 0.14 80); }
+button.mlab-warn-row:hover { filter: brightness(1.12); }
+.mlab-ok { font-size: 12px; color: oklch(0.75 0.13 155); display: flex; align-items: center; gap: 6px; padding: 6px 2px; }
+.mlab-bad { color: oklch(0.72 0.17 28); }
+.mlab-good { color: oklch(0.75 0.13 155); }
+.mlab-right > .mb { margin-top: 10px; }
+
+/* ---- compare ---- */
+.mlab-banner { flex: none; display: flex; gap: 7px; align-items: flex-start; font-size: 11.5px; color: var(--ink-dim); padding: 8px 14px; background: var(--raised); border-bottom: 1px solid var(--line-soft); line-height: 1.45; }
+.mlab-banner svg { flex: none; margin-top: 2px; color: var(--acc); }
+.mlab-cols { flex: 1 1 auto; min-height: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(190px, 1fr); gap: 10px; padding: 12px; overflow-x: auto; overscroll-behavior: contain; }
+.mlab-col { min-height: 0; display: flex; flex-direction: column; background: var(--bg); border: 1px solid var(--line-soft); border-top: 2px solid var(--c); border-radius: var(--radius); overflow: hidden; }
+.mlab-col-h { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border-bottom: 1px solid var(--line-soft); min-width: 0; }
+.mlab-col-t { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.mlab-col-t b { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mlab-col-t span { font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mlab-col-status { font-size: 10.5px; color: var(--ink-faint); display: inline-flex; align-items: center; gap: 5px; flex: none; }
+.mlab-col-status .spin { width: 11px; height: 11px; }
+.mlab-col-stats { display: flex; flex-wrap: wrap; gap: 3px 12px; padding: 7px 10px; font-size: 10.5px; color: var(--ink-faint); border-bottom: 1px solid var(--line-soft); }
+.mlab-col-stats span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mlab-col-stats b { color: var(--ink); font-weight: 500; }
+.mlab-col-warns { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 10px; border-bottom: 1px solid var(--line-soft); }
+.mlab-wchip { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; padding: 2px 7px; border-radius: 999px; font-family: var(--mono); }
+.mlab-wchip.lvl-error { background: oklch(0.6 0.19 28 / 0.16); color: oklch(0.75 0.16 28); }
+.mlab-wchip.lvl-warn { background: oklch(0.75 0.14 80 / 0.14); color: oklch(0.82 0.13 80); }
+.mlab-col-out { flex: 1 1 auto; min-height: 120px; overflow-y: auto; padding: 10px; }
+.mlab-col-out .mlab-gen { font-size: 13px; line-height: 1.95; }
+.mlab-col-next { margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px dashed var(--line-soft); }
+.mlab-col-next .mlab-cand { grid-template-columns: 0 minmax(40px, 110px) 1fr 46px; gap: 6px; padding: 2px 0; }
+.mlab-col-empty { font-size: 12px; font-family: var(--sans); }
+.mlab-col-add { display: flex; min-height: 160px; flex-direction: column; align-items: center; justify-content: center; gap: 8px; border: 1px dashed var(--line); border-radius: var(--radius); color: var(--ink-faint); font-size: 12.5px; min-width: 130px; }
+.mlab-col-add:hover { color: var(--ink); border-color: var(--ink-ghost); background: var(--bg); }
+.mlab-leg2 { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: var(--ink-dim); margin-top: 6px; }
+.mlab-leg2 span, .mlab-nexttab div, .mlab-tbl td:first-child, .mlab-wgroup > span { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.mlab-leg2 i, .mlab-nexttab i, .mlab-tbl i, .mlab-wgroup i { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
+.mlab-tbl { width: 100%; border-collapse: collapse; font-size: 11.5px; table-layout: fixed; }
+.mlab-tbl th { text-align: right; font-weight: 500; color: var(--ink-faint); font-size: 10px; padding: 4px 3px; border-bottom: 1px solid var(--line-soft); }
+.mlab-tbl th:first-child { width: 34%; }
+.mlab-tbl td { text-align: right; padding: 5px 3px; border-bottom: 1px dashed var(--line-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mlab-tbl td:first-child { text-align: left; display: flex; }
+.mlab-tbl td:first-child span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--sans); }
+.mlab-tbl td.best { color: oklch(0.78 0.13 155); }
+.mlab-div { font-size: 12px; color: var(--ink-dim); line-height: 1.5; overflow-wrap: anywhere; }
+.mlab-div code { font-family: var(--mono); background: var(--raised); padding: 1px 5px; border-radius: 4px; white-space: pre-wrap; }
+.mlab-nexttab { display: flex; flex-direction: column; gap: 3px; }
+.mlab-nexttab div { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto 46px; gap: 8px; font-size: 12px; align-items: center; }
+.mlab-nexttab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-dim); }
+.mlab-nexttab b { font-weight: 500; white-space: pre; max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
+.mlab-nexttab em { font-style: normal; font-size: 11px; color: var(--ink-faint); text-align: right; }
+.mlab-wgroup { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+.mlab-wgroup > span { font-size: 11px; color: var(--ink-dim); }
+
+/* ---- empty / modal ---- */
+.mlab-empty { grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; text-align: center; padding: 40px 20px; height: 100%; }
+.mlab-empty h3 { font-size: 16px; font-weight: 600; }
+.mlab-empty p { font-size: 13px; max-width: 360px; line-height: 1.5; }
+.mlab-empty-ico { width: 60px; height: 60px; border-radius: 16px; display: flex; align-items: center; justify-content: center; background: var(--raised); color: var(--ink-faint); margin-bottom: 4px; }
+.mlab-modal-bg { position: fixed; inset: 0; z-index: 215; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgb(0 0 0 / 0.55); animation: mlabIn 0.14s var(--ease); }
+.mlab-modal { background: var(--glass-hi); border: 1px solid var(--edge-hi); border-radius: var(--r-l); box-shadow: var(--sh-3); padding: 18px; max-height: calc(100% - 20px); overflow: auto; }
+.mlab-modal h3 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+.mlab-modal p { font-size: 12.5px; color: var(--t2); line-height: 1.5; margin: 6px 0 12px; }
+.mlab-modal .acts { display: flex; gap: 8px; margin-top: 12px; }
+.mlab-modal { width: min(720px, 100%); }
+.mlab-modal h3 { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.mlab-modal h3 span { font-size: 12px; font-weight: 400; }
+.mlab-pre { margin: 12px 0; max-height: 55vh; overflow: auto; background: var(--bg-deep); border: 1px solid var(--line-soft); border-radius: 8px; padding: 10px; font: 12px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink-dim); }
+.mlab-force-in { width: 100%; font: 14px var(--mono); background: var(--l1); color: var(--t1); border: 1px solid var(--edge-hi); border-radius: var(--r-s); padding: 9px 10px; outline: none; }
+.mlab-force-in:focus { border-color: var(--acc); }
+
+/* ---- responsive ---- */
+@media (max-width: 1180px) {
+  .mlab-body, .mlab-body.mode-compare { grid-template-columns: 260px minmax(0, 1fr) 290px; }
+  .mlab-sub { display: none; }
+}
+@media (max-width: 900px) {
+  .mlab-bar { flex-wrap: wrap; row-gap: 8px; padding: 8px 10px; }
+  .mlab-title b { font-size: 13px; }
+  .mlab-chips { order: 5; flex-basis: 100%; }
+  .mlab-tabs { display: flex; gap: 2px; padding: 4px 10px; border-bottom: 1px solid var(--line-soft); background: var(--bg); }
+  .mlab-tabs button { flex: 1; padding: 7px 4px; border-radius: 6px; font-size: 12px; color: var(--ink-faint); }
+  .mlab-tabs button.on { background: var(--card); color: var(--ink); }
+  .mlab-body, .mlab-body.mode-compare { grid-template-columns: minmax(0, 1fr); }
+  .mlab-left, .mlab-right, .mlab-center { display: none; border: 0; }
+  .tab-prompt .mlab-left { display: flex; }
+  .tab-main .mlab-center { display: flex; }
+  .tab-stats .mlab-right { display: block; }
+  .mlab-stream { padding: 12px; }
+  .mlab-cols { grid-auto-columns: minmax(82%, 1fr); scroll-snap-type: x mandatory; padding: 10px; }
+  .mlab-col { scroll-snap-align: start; }
+  .mlab-controls { padding: 8px 10px; gap: 5px; }
+  .mlab-controls .mb { padding: 6px 9px; }
+  .mlab-cnote { display: none; }
+  .mlab-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 480px) {
+  .mlab-title b { display: none; }
+  .mlab-bar { gap: 6px; }
+  .mlab-controls .mb span { display: none; }
+  .mlab-controls #mlRun span, .mlab-controls #mlCRun span, .mlab-controls #mlStep span { display: inline; }
+  .mlab-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mlab-cand { grid-template-columns: 12px minmax(50px, 110px) 1fr 46px; gap: 6px; }
+  .mlab-mode button { padding: 6px 7px; }
+}
+/* Respect OS reduced motion (the app's own pref, :root[data-motion="reduce"], is handled globally) */
+@media (prefers-reduced-motion: reduce) {
+  .mlab, .mlab-tray { animation: none; }
+  .mlab-caret { animation: none; }
+}

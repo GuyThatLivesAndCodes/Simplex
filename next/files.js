@@ -290,6 +290,8 @@ export function open(id) {
   const f = store.byId(id); if (!f) return;
   if (f.trashed) return itemMenu(id, document.querySelector(`[data-id="${CSS.escape(id)}"] [data-more]`) || { x: innerWidth / 2, y: innerHeight / 2 });
   if (f.type === 'folder') return go(hrefFolder(f.id));
+  // a .gguf language model opens in the Model Lab instead of a (binary) text viewer
+  if (isLabModel(f)) return openLab([id], { kind: 'chat' });
   const list = ctx ? ctx.items.filter(x => x.type !== 'folder') : [f];
   openViewer(f, list);
 }
@@ -308,6 +310,7 @@ export function itemMenuItems(id) {
     canAiEdit(f) && { label: 'AI Edit…', ic: 'spark', run: () => aiEditDialog(id) },
     canConvert(f) && { label: 'Convert…', ic: 'swap', run: () => convertDialog(id) },
     f.type === 'video' && { label: 'Add to a series…', ic: 'video', run: () => import('./series.js').then(m => m.addToSeriesDialog([id])) },
+    ...labItems(f),
     ...vmItems(f),
     '-',
     { label: 'Rename', ic: 'pencil', key: 'F2', run: () => renameItem(id) },
@@ -318,6 +321,22 @@ export function itemMenuItems(id) {
     '-',
     { label: 'Move to Trash', ic: 'trash', danger: true, key: 'Del', run: () => doTrash([id]) },
   ].filter(x => x !== false && x != null);
+}
+/* Model Lab: raw GGUF inference with no system prompt (separate from the AI app) */
+function isLabModel(f) {
+  const a = store.S.account;
+  return !!(f && f.type !== 'folder' && !f.trashed && !f.locked && /\.(gguf|guff)$/i.test(f.name || '') && a && (a.is_admin || a.can_ai));
+}
+function openLab(ids, opts) {
+  import('./modellab.js').then(m => m.openModelLab({ ...opts, ids: ids.map(i => String(i).startsWith('local:') ? i : 'local:user:' + i) }))
+    .catch(() => toast('Model Lab failed to load', { bad: true }));
+}
+function labItems(f) {
+  if (!isLabModel(f)) return [];
+  return ['-', { header: 'Model Lab · no system prompt' },
+    { label: 'Chat with model', ic: 'chat', run: () => openLab([f.id], { kind: 'chat' }) },
+    { label: 'Raw inference & token stepper', ic: 'chart', run: () => openLab([f.id], { kind: 'raw' }) },
+    { label: 'Compare with other models', ic: 'apps', run: () => openLab([f.id], { mode: 'compare' }) }, '-'];
 }
 /* Virtual machines: programs can run in one, anything can be sent into one */
 function vmItems(f) {
@@ -352,6 +371,7 @@ function selectionMenu(at) {
     { label: 'Star all', ic: 'star', run: () => Promise.all(ids.map(i => store.setStar(i, true))) },
     { label: 'Download', ic: 'download', run: () => ids.forEach(i => queueDownload(i)) },
     ids.some(i => (store.byId(i) || {}).type === 'video') && { label: 'Add videos to a series…', ic: 'video', run: () => import('./series.js').then(m => m.addToSeriesDialog(ids)) },
+    ids.filter(i => isLabModel(store.byId(i))).length >= 2 && { label: `Compare ${Math.min(4, ids.filter(i => isLabModel(store.byId(i))).length)} models in Model Lab`, ic: 'apps', run: () => openLab(ids.filter(i => isLabModel(store.byId(i))).slice(0, 4), { mode: 'compare' }) },
     '-', { label: 'Move to Trash', ic: 'trash', danger: true, run: () => doTrash(ids) }], at);
 }
 export async function newFolder(parent) {

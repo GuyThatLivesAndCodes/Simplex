@@ -191,6 +191,7 @@ function paintMain() {
   main.innerHTML = html`<header class="ai-bar">
       <button class="ib ai-sidebtn" data-sidebtn aria-label="Chats">${icon('chat', 18)}</button>
       <button class="ai-pickbtn" data-pick>${icon(A.scope === 'local' ? 'database' : 'spark', 15)}<span>${modelName(cur)}</span><small>${cur ? (A.scope === 'local' ? 'local' : cur.provider || '') : ''}</small>${icon('arrowdown', 13)}</button>
+      ${A.scope === 'local' && cur ? html`<button class="ib" data-lab title="Open in Model Lab — raw inference, token stepper & compare (no system prompt)">${icon('brain', 17)}</button>` : ''}
       <span class="sp"></span>
       ${A.temporary ? html`<span class="ai-pill temp">${icon('clock', 13)} Temporary</span>` : ''}
       ${!A.messages.length || A.temporary ? html`<button class="ib${A.temporary ? ' on' : ''}" data-temp title="${A.temporary ? 'Turn off temporary chat' : 'Temporary chat — not saved, no memory'}">${icon('clock', 17)}</button>` : ''}
@@ -222,6 +223,8 @@ function wireMain(main) {
   main.querySelector('[data-send]').onclick = send;
   main.querySelector('[data-stop]').onclick = () => stopStream(S);
   main.querySelector('[data-pick]').onclick = e => modelPicker(e.currentTarget);
+  const lab = main.querySelector('[data-lab]');
+  if (lab) lab.onclick = () => import('./modellab.js').then(m => m.openModelLab({ ids: A.model ? [A.model] : [], kind: 'chat' })).catch(() => toast('Model Lab failed to load', { bad: true }));
   main.querySelector('[data-sidebtn]').onclick = () => R.classList.toggle('side-open');
   main.querySelector('[data-ctx]').onclick = e => contextPopover(e.currentTarget);
   main.querySelector('[data-tune]').onclick = () => { A.tuneOpen = !A.tuneOpen; paintTune(); main.querySelector('[data-tune]').classList.toggle('on', A.tuneOpen); };
