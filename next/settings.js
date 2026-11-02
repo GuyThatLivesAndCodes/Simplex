@@ -27,6 +27,7 @@ const sw = key => html`<label class="sw"><input type="checkbox" data-pref-sw="${
 const range = (key, min, max, step, unit) => html`<div class="rng"><input type="range" data-pref-range="${key}" min="${min}" max="${max}" step="${step}" value="${prefs.get(key)}"><span data-out="${key}">${prefs.get(key)}${unit}</span></div>`;
 const section = (id, title, body) => html`<section class="set-sec" id="set-${id}"><h2>${title}</h2><div class="group">${body}</div></section>`;
 
+let setIO = null;
 /* what Performance is doing on this device, in words */
 function perfLine() {
   const p = prefs.get('perf');
@@ -148,7 +149,8 @@ export function renderSettings(stage) {
   dn.addEventListener('blur', saveName);
   // highlight the section in view
   const navBtns = $$('[data-jump]', page);
-  const io = new IntersectionObserver(es => es.forEach(en => { if (en.isIntersecting) navBtns.forEach(b => b.classList.toggle('on', 'set-' + b.dataset.jump === en.target.id)); }), { root: stage, rootMargin: '-20% 0px -70% 0px' });
+  if (setIO) setIO.disconnect();   // re-renders (reset, re-check) replace the page
+  const io = setIO = new IntersectionObserver(es => es.forEach(en => { if (en.isIntersecting) navBtns.forEach(b => b.classList.toggle('on', 'set-' + b.dataset.jump === en.target.id)); }), { root: stage, rootMargin: '-20% 0px -70% 0px' });
   $$('.set-sec', page).forEach(s => io.observe(s));
   // the "Saved" chip pulses whenever a setting changes
   const sync = page.querySelector('[data-sync]');
