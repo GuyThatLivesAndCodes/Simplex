@@ -434,6 +434,246 @@ function twofaLoginPrompt(tk, password) {
   inp.onkeydown = e => { if (e.key === 'Enter') go(); };
 }
 
+/* ============================================================
+   PASSKEYS (WebAuthn) — sign-in + Settings → Safety management.
+   Server side: passkeys.js. The PRF output (a per-passkey secret released
+   only after biometric/PIN) travels separately from the assertion and lets
+   the server unwrap the vault key without the password.
+   ============================================================ */
+const PK = {
+  supported() { return !!(window.PublicKeyCredential && navigator.credentials && navigator.credentials.get && window.isSecureContext); },
+  b2u(buf) {
+    const b = new Uint8Array(buf instanceof ArrayBuffer ? buf : buf.buffer ? buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) : buf);
+    let s = ''; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  },
+  u2b(str) {
+    const s = String(str).replace(/-/g, '+').replace(/_/g, '/');
+    const bin = atob(s + '==='.slice((s.length + 3) % 4));
+    const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out.buffer;
+  },
+  prfExt(salt) { return { prf: { eval: { first: PK.u2b(salt) } } }; },
+  creationOpts(o, salt) {
+    return { ...o, challenge: PK.u2b(o.challenge), user: { ...o.user, id: PK.u2b(o.user.id) },
+      excludeCredentials: (o.excludeCredentials || []).map(c => ({ ...c, id: PK.u2b(c.id) })),
+      extensions: { ...(o.extensions || {}), credProps: true, ...PK.prfExt(salt) } };
+  },
+  requestOpts(o, salt) {
+    return { ...o, challenge: PK.u2b(o.challenge),
+      allowCredentials: (o.allowCredentials || []).map(c => ({ ...c, id: PK.u2b(c.id) })),
+      extensions: { ...(o.extensions || {}), ...PK.prfExt(salt) } };
+  },
+  // serialize a credential for the server. Extension results are sent EMPTY on
+  // purpose — the PRF secret goes in its own field (prfOut) and nowhere else.
+  toJSON(cred) {
+    const r = cred.response;
+    const out = { id: cred.id, rawId: PK.b2u(cred.rawId), type: cred.type, clientExtensionResults: {},
+      authenticatorAttachment: cred.authenticatorAttachment || undefined, response: { clientDataJSON: PK.b2u(r.clientDataJSON) } };
+    if (r.attestationObject) {
+      out.response.attestationObject = PK.b2u(r.attestationObject);
+      out.response.transports = typeof r.getTransports === 'function' ? r.getTransports() : [];
+    } else {
+      out.response.authenticatorData = PK.b2u(r.authenticatorData);
+      out.response.signature = PK.b2u(r.signature);
+      if (r.userHandle) out.response.userHandle = PK.b2u(r.userHandle);
+    }
+    return out;
+  },
+  prfOut(cred) {
+    const x = typeof cred.getClientExtensionResults === 'function' ? cred.getClientExtensionResults() : null;
+    const f = x && x.prf && x.prf.results && x.prf.results.first;
+    return f ? PK.b2u(f) : null;
+  },
+  prfEnabled(cred) {
+    const x = typeof cred.getClientExtensionResults === 'function' ? cred.getClientExtensionResults() : null;
+    return !!(x && x.prf && (x.prf.enabled || x.prf.results));
+  },
+  // a friendly default name: "Passkey · iPhone", "Passkey · Windows", …
+  defaultLabel() {
+    const ua = navigator.userAgent || '';
+    const dev = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android'
+      : /Mac OS X/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : /CrOS/.test(ua) ? 'Chromebook' : /Linux/.test(ua) ? 'Linux' : 'this device';
+    return 'Passkey · ' + dev;
+  },
+  // WebAuthn rejections → plain words (NotAllowedError = user cancelled / timed out)
+  errText(e) {
+    if (!e) return 'passkey failed';
+    if (e.name === 'NotAllowedError') return 'cancelled or timed out';
+    if (e.name === 'InvalidStateError') return 'this device already has a passkey for your account';
+    if (e.name === 'SecurityError') return 'passkeys need the site to be opened over https';
+    if (e.name === 'NotSupportedError') return 'this device can\'t make a supported passkey';
+    return e.message || 'passkey failed';
+  },
+};
+
+/* ---- sign-in: explicit button + browser autofill (conditional mediation) ---- */
+let pkCond = null;            // { ctrl, timer } for the running autofill request
+let pkBusy = false;
+function pkLockVisible() { const l = document.getElementById('lock'); return l && !l.classList.contains('hidden'); }
+function pkStopConditional() {
+  if (!pkCond) return;
+  clearTimeout(pkCond.timer);
+  try { pkCond.ctrl.abort(); } catch (e) {}
+  pkCond = null;
+}
+async function pkStartConditional() {
+  pkStopConditional();
+  if (!PK.supported() || !pkLockVisible() || pkBusy) return;
+  try {
+    if (!PublicKeyCredential.isConditionalMediationAvailable || !(await PublicKeyCredential.isConditionalMediationAvailable())) return;
+    const opt = await fetch('/api/login/passkey/options', { method: 'POST' }).then(r => r.ok ? r.json() : null);
+    if (!opt || !pkLockVisible() || pkBusy) return;
+    const ctrl = new AbortController();
+    // the server's challenge lives 5 minutes — quietly renew before it lapses
+    pkCond = { ctrl, timer: setTimeout(pkStartConditional, 4 * 60_000) };
+    const cred = await navigator.credentials.get({ mediation: 'conditional', signal: ctrl.signal, publicKey: PK.requestOpts(opt.options, opt.prfSalt) });
+    if (pkCond && pkCond.ctrl === ctrl) { clearTimeout(pkCond.timer); pkCond = null; }
+    if (cred) await pkFinishLogin(opt.tk, cred);
+  } catch (e) { /* aborted / dismissed autofill — nothing to show */ }
+}
+async function pkLoginExplicit() {
+  if (pkBusy || checking) return;
+  pkStopConditional();
+  const hint = document.getElementById('lockHint');
+  const btn = document.getElementById('passkeyBtn');
+  hint.classList.remove('err'); hint.textContent = '';
+  pkBusy = true; btn.disabled = true; btn.querySelector('span').textContent = 'Waiting for your passkey…';
+  try {
+    const res = await fetch('/api/login/passkey/options', { method: 'POST' });
+    const opt = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(opt.error || 'could not start passkey sign-in');
+    const cred = await navigator.credentials.get({ publicKey: PK.requestOpts(opt.options, opt.prfSalt) });
+    if (cred) await pkFinishLogin(opt.tk, cred);
+  } catch (e) {
+    hint.classList.add('err'); hint.textContent = 'passkey: ' + PK.errText(e);
+  } finally {
+    pkBusy = false; btn.disabled = false; btn.querySelector('span').textContent = 'Sign in with a passkey';
+    if (pkLockVisible() && !ACCOUNT) pkStartConditional();
+  }
+}
+async function pkFinishLogin(tk, cred) {
+  const hint = document.getElementById('lockHint');
+  const res = await fetch('/api/login/passkey', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tk, response: PK.toJSON(cred), prf: PK.prfOut(cred) }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.ok) { pkStopConditional(); postLogin(data, null); return; }
+  if (res.status === 403 && data.banned) { location.reload(); return; }
+  hint.classList.add('err');
+  hint.textContent = res.status === 409 ? (data.error || 'sign in with your password once')
+    : res.status === 429 ? 'too many attempts — wait a moment'
+    : data.restart ? 'that took too long — try again'
+    : (data.error || 'passkey sign-in failed');
+  if (res.status === 401) { const card = document.querySelector('.login-card'); card.classList.add('shake'); setTimeout(() => card.classList.remove('shake'), 450); }
+}
+(function wirePasskeyLogin() {
+  if (!PK.supported()) return;
+  const wrap = document.getElementById('passkeyWrap'); if (wrap) wrap.hidden = false;
+  const btn = document.getElementById('passkeyBtn'); if (btn) btn.onclick = pkLoginExplicit;
+  // autofill: start once the login screen is actually showing (boot may skip it
+  // when a session cookie is still valid), and again whenever it comes back.
+  const lock = document.getElementById('lock');
+  if (lock && window.MutationObserver) new MutationObserver(() => {
+    if (pkLockVisible() && !ACCOUNT) { if (!pkCond) pkStartConditional(); } else pkStopConditional();
+  }).observe(lock, { attributes: true, attributeFilter: ['class'] });
+  setTimeout(() => { if (pkLockVisible() && !ACCOUNT) pkStartConditional(); }, 600);
+})();
+
+/* ---- Settings → Safety: passkey list + add / rename / remove / enable unlock ---- */
+function passkeySettingsRow() {
+  if (!PK.supported()) return `<div class="set-row">
+      <div class="sr-main"><div class="sr-title">Passkeys</div><div class="sr-sub mono">${window.isSecureContext ? 'this browser doesn\'t support passkeys' : 'open Simplex over https to use passkeys'}</div></div>
+    </div>`;
+  return `<div class="set-row pk-row">
+      <div class="sr-main"><div class="sr-title">Passkeys</div><div class="sr-sub mono">sign in with Face ID, Touch ID, Windows Hello or a security key — no password, no code</div></div>
+      <button class="btn primary" id="safPkAdd">${svg('passkey', 14)} Add passkey</button>
+    </div>
+    <div class="pk-list" id="safPkList"></div>`;
+}
+async function loadPasskeyList() {
+  const box = document.getElementById('safPkList'); if (!box) return;
+  let list;
+  try { list = (await passkeyList()).passkeys || []; }
+  catch (e) { box.innerHTML = `<div class="pk-empty mono">${esc(e.message || 'could not load passkeys')}</div>`; return; }
+  if (!document.body.contains(box)) return;
+  if (!list.length) { box.innerHTML = ''; return; }
+  box.innerHTML = list.map(p => `
+    <div class="pk-item" data-id="${esc(p.id)}">
+      <div class="pk-ic">${svg('passkey', 16)}</div>
+      <div class="pk-main">
+        <div class="pk-name"><span class="pk-label">${esc(p.label)}</span>
+          ${ACCOUNT.keys_enrolled ? (p.unlocks ? '<span class="pk-chip ok">unlocks vault</span>' : '<span class="pk-chip warn" title="After a server restart this passkey can\'t open your vault until you sign in with your password once">sign-in only</span>') : ''}
+          ${p.synced ? '<span class="pk-chip">synced</span>' : ''}</div>
+        <div class="pk-sub mono">added ${esc(fmtDate(p.created))} · ${p.last_used ? 'last used ' + esc(fmtDate(p.last_used)) : 'never used'}</div>
+      </div>
+      <div class="pk-acts">
+        ${ACCOUNT.keys_enrolled && !p.unlocks ? `<button class="btn ghost sm" data-pk-bind title="Let this passkey unlock your vault keys">${svg('key', 13)} Enable unlock</button>` : ''}
+        <button class="btn ghost sm icon-only" data-pk-rename title="Rename" aria-label="Rename passkey">${svg('rename', 14)}</button>
+        <button class="btn ghost sm icon-only danger" data-pk-del title="Remove" aria-label="Remove passkey">${svg('trash', 14)}</button>
+      </div>
+    </div>`).join('');
+  box.querySelectorAll('.pk-item').forEach(row => {
+    const p = list.find(x => x.id === row.dataset.id);
+    row.querySelector('[data-pk-rename]').onclick = () => formModal({
+      title: 'Rename passkey', fields: [{ key: 'label', label: 'Name', value: p.label, attrs: 'maxlength="48"' }], okLabel: 'Save',
+      onSubmit: async (v, close) => { await passkeyRename(p.id, (v.label || '').trim()); close(); loadPasskeyList(); },
+    });
+    row.querySelector('[data-pk-del]').onclick = () => confirmModal('Remove passkey',
+      `“${p.label}” will stop working for sign-in. Your password${ACCOUNT.totp_enabled ? ' and two-auth' : ''} still work. You may also want to delete it from the device's password manager.`,
+      async () => {
+        try { await passkeyDelete(p.id); toast('Passkey removed', 'check'); ACCOUNT.passkeys = Math.max(0, (ACCOUNT.passkeys || 1) - 1); loadPasskeyList(); }
+        catch (e) { toast(e.message || 'Could not remove passkey', 'close'); }
+      }, 'Remove');
+    const bind = row.querySelector('[data-pk-bind]');
+    if (bind) bind.onclick = async () => {
+      bind.disabled = true;
+      try { await passkeyBindFlow(p.id); toast('This passkey can now unlock your vault', 'check'); loadPasskeyList(); }
+      catch (e) { toast(e.code === 'NO_PRF' ? 'This passkey/browser can\'t unlock the vault — it still works for sign-in' : ('Passkey: ' + PK.errText(e)), 'close'); bind.disabled = false; }
+    };
+  });
+}
+async function passkeyBindFlow(id) {
+  const opt = await passkeyBindOptions(id);
+  const cred = await navigator.credentials.get({ publicKey: PK.requestOpts(opt.options, opt.prfSalt) });
+  return passkeyBindVerify({ tk: opt.tk, response: PK.toJSON(cred), prf: PK.prfOut(cred) });
+}
+function passkeyAddFlow() {
+  const fields = [
+    { key: 'label', label: 'Name', value: PK.defaultLabel(), attrs: 'maxlength="48"' },
+    { key: 'password', label: 'Current password', type: 'password', placeholder: 'confirm it\'s you', attrs: 'autocomplete="current-password"' },
+  ];
+  if (ACCOUNT.totp_enabled) fields.push({ key: 'totp', label: 'Two-auth code', placeholder: '000000', attrs: 'inputmode="numeric" maxlength="6" autocomplete="one-time-code"' });
+  formModal({
+    title: 'Add a passkey',
+    desc: 'Your device will ask for your fingerprint, face or PIN. That never leaves the device — Simplex only gets a public key it can check sign-ins against.',
+    fields, okLabel: 'Continue',
+    onSubmit: async (v, close) => {
+      if (!v.password) throw new Error('enter your current password');
+      const opt = await passkeyRegOptions(v.password, v.totp);
+      let cred;
+      try { cred = await navigator.credentials.create({ publicKey: PK.creationOpts(opt.options, opt.prfSalt) }); }
+      catch (e) { throw new Error(PK.errText(e)); }
+      const r = await passkeyRegVerify({ tk: opt.tk, response: PK.toJSON(cred), prf: PK.prfOut(cred), label: (v.label || '').trim() });
+      close();
+      ACCOUNT.passkeys = (ACCOUNT.passkeys || 0) + 1;
+      // some authenticators only release the PRF secret on a sign-in, not at
+      // creation — one more tap binds it so the passkey can unlock the vault
+      if (r.needsBind && PK.prfEnabled(cred)) {
+        toast('Passkey added — one more tap lets it unlock your vault', 'passkey');
+        try { await passkeyBindFlow(r.passkey.id); toast('Passkey ready — it can unlock your vault', 'check'); }
+        catch (e) { toast('Passkey added for sign-in (vault unlock skipped)', 'info'); }
+      } else toast(r.needsBind ? 'Passkey added — sign-in only on this device' : 'Passkey added', 'check');
+      loadPasskeyList();
+    },
+  });
+}
+function wirePasskeySettings() {
+  const add = document.getElementById('safPkAdd'); if (add) add.onclick = passkeyAddFlow;
+  loadPasskeyList();
+}
+
 /* ---------- forced password change (weak/default password wall) ----------
    No cancel, no backdrop-close: the only ways forward are a strong password
    or signing out. Mirrors the server's isWeakPassword policy client-side for
@@ -1825,6 +2065,7 @@ function settingsHTML() {
         </div>
       </div>
     </div>
+    ${perfSettingsHTML()}
     <div class="set-section" id="setOrgSection">
       <span class="eyebrow">AI Organization</span>
       <div class="set-row">
@@ -1871,6 +2112,7 @@ function settingsHTML() {
             : `<button class="btn primary" id="saf2faOn">${svg('lock', 14)} Set up two-auth</button>`}
         </div>
       </div>
+      ${passkeySettingsRow()}
       <div class="set-row">
         <div class="sr-main">
           <div class="sr-title">Encryption keys${ACCOUNT.key_stale ? ' <span class="key-stale-chip">riding your old password</span>' : ''}</div>
@@ -1920,7 +2162,9 @@ function wireSettings() {
     toast('Default view updated', 'check');
   });
   wireAppearanceSettings();
+  wirePerfSettings();
   wireSafetySettings();
+  wirePasskeySettings();
   wireKeySettings();
   const aiBtn = document.getElementById('setAi'); if (aiBtn) aiBtn.onclick = openAiConfig;
   const localAiBtn = document.getElementById('setLocalAi'); if (localAiBtn) localAiBtn.onclick = openLocalAiConfig;
@@ -1969,6 +2213,78 @@ function apprRevert() {
   if (typeof reflectPlayState === 'function') reflectPlayState();
   // re-render the panel so every control snaps back to the saved values
   openAppScreen({ id: 'settings', name: 'Settings', icon: 'gear' }, settingsHTML()); wireSettings();
+}
+
+/* ---------- Settings → Performance (per device; see perf.js) ----------
+   Not part of the Appearance draft/apply flow: it's a device setting, stored
+   locally and applied instantly so the user can feel the difference. */
+const PERF_MODES = [
+  ['auto', 'Auto', 'picks the right level for this device and adapts if video stutters'],
+  ['quality', 'Quality', 'every effect on — best for fast computers'],
+  ['balanced', 'Balanced', 'freezes background motion and full-screen blurs'],
+  ['saver', 'Saver', 'no blur or ambience, lighter UI refresh — smoothest on older phones & laptops'],
+];
+const PERF_TIER_LABEL = { high: 'Quality', mid: 'Balanced', low: 'Saver' };
+function _perfMetaHTML() {
+  if (!window.SxPerf) return '';
+  const i = SxPerf.info(), hw = i.hw, chips = [];
+  if (hw.mem != null) chips.push(`<span class="perf-chip"><b>${hw.mem >= 8 ? '8+' : hw.mem} GB</b> RAM</span>`);
+  if (hw.cores) chips.push(`<span class="perf-chip"><b>${hw.cores}</b> CPU threads</span>`);
+  if (hw.fps) chips.push(`<span class="perf-chip"><b>${hw.fps}</b> fps idle</span>`);
+  if (hw.softGpu) chips.push(`<span class="perf-chip warn">no GPU acceleration</span>`);
+  if (hw.saveData) chips.push(`<span class="perf-chip">Data Saver on</span>`);
+  if (i.mode === 'auto' && i.learned) chips.push(`<span class="perf-chip warn">lowered after ${i.learnedWhy === 'dropped-frames' ? 'video stutter' : 'slow frames'}</span>`);
+  return chips.join('');
+}
+function _perfSubText() {
+  if (!window.SxPerf) return '';
+  const m = SxPerf.mode(), t = SxPerf.tier();
+  const desc = (PERF_MODES.find(x => x[0] === m) || PERF_MODES[0])[2];
+  return esc(desc) + (m === 'auto' ? `<span class="perf-tier">using ${PERF_TIER_LABEL[t]}</span>` : '');
+}
+function perfSettingsHTML() {
+  if (!window.SxPerf) return '';
+  const m = SxPerf.mode();
+  return `<div class="set-section" id="setPerfSection">
+      <span class="eyebrow">Performance · this device</span>
+      <div class="set-row">
+        <div class="sr-main"><div class="sr-title">Performance mode</div>
+          <div class="sr-sub mono" id="setPerfSub">${_perfSubText()}</div>
+          <div class="perf-meta" id="setPerfMeta">${_perfMetaHTML()}</div></div>
+        <div class="seg set-seg perf-seg" id="setPerfMode">
+          ${PERF_MODES.map(([v, l]) => `<button data-perf-mode="${v}" class="${m === v ? 'on' : ''}">${l}</button>`).join('')}
+        </div>
+      </div>
+      <div class="set-row">
+        <div class="sr-main"><div class="sr-title">Re-check this device</div><div class="sr-sub mono">measure frame rate again &amp; clear any automatic downgrade</div></div>
+        <button class="btn ghost" id="setPerfRecheck">${svg('refresh', 14)} Re-check</button>
+      </div>
+    </div>`;
+}
+function _perfRefreshSettings() {
+  const sub = document.getElementById('setPerfSub'); if (!sub || !window.SxPerf) return;
+  sub.innerHTML = _perfSubText();
+  const meta = document.getElementById('setPerfMeta'); if (meta) meta.innerHTML = _perfMetaHTML();
+  const seg = document.getElementById('setPerfMode');
+  if (seg) seg.querySelectorAll('[data-perf-mode]').forEach(b => b.classList.toggle('on', b.dataset.perfMode === SxPerf.mode()));
+}
+function wirePerfSettings() {
+  if (!window.SxPerf) return;
+  const seg = document.getElementById('setPerfMode');
+  if (seg) seg.querySelectorAll('[data-perf-mode]').forEach(b => b.onclick = () => {
+    SxPerf.setMode(b.dataset.perfMode);
+    _perfRefreshSettings();
+    toast('Performance: ' + b.textContent.trim(), 'check');
+  });
+  const re = document.getElementById('setPerfRecheck');
+  if (re) re.onclick = () => {
+    re.disabled = true; re.innerHTML = `${svg('refresh', 14)} Measuring…`;
+    SxPerf.recheck(r => {
+      re.disabled = false; re.innerHTML = `${svg('refresh', 14)} Re-check`;
+      _perfRefreshSettings();
+      toast(r ? `Measured ${r.fps} fps · using ${PERF_TIER_LABEL[SxPerf.tier()]}` : 'Keep this tab visible to measure', 'info');
+    });
+  };
 }
 
 function wireAppearanceSettings() {
@@ -2637,7 +2953,11 @@ const FireFX = (() => {
     clearTimeout(rsT);
     rsT = setTimeout(() => { if (cv) { size(); if (still) render(performance.now() - t0); } }, 200);
   }
-  function onVis() { if (!active || still) return; if (document.hidden) stop(); else start(); }
+  function onVis() { if (!active || still) return; if (document.hidden || held) stop(); else start(); }
+  // held = a video is playing (perf.js → sx-vplay): stop simulating smoke nobody
+  // can see behind the opaque viewer, so the CPU/GPU is free for decoding.
+  let held = false;
+  function hold(on) { held = !!on; onVis(); }
 
   function render(tms) {
     const t = tms / 1000;
@@ -2680,9 +3000,9 @@ const FireFX = (() => {
     if (!active) { unmount(); return; }
     mount();
     if (still) { stop(); render(performance.now() - t0); }
-    else if (!document.hidden) start();
+    else if (!document.hidden && !held) start();
   }
-  return { sync };
+  return { sync, hold };
 })();
 
 function applyPrefs(p) {
@@ -2698,7 +3018,9 @@ function applyPrefs(p) {
   // background ambience layer (body::before variants in simplex.css)
   const fx = ['aurora', 'fire', 'glow', 'grain', 'none'].includes(prefs.bgFx) ? prefs.bgFx : 'aurora';
   if (fx !== 'none') root.setAttribute('data-bgfx', fx); else root.removeAttribute('data-bgfx');
-  FireFX.sync(fx === 'fire', !!prefs.reduceMotion);
+  // perf tier (perf.js): 'mid' freezes the fire to a still frame, 'low' drops it
+  const perfTier = (window.SxPerf && SxPerf.tier()) || 'high';
+  FireFX.sync(fx === 'fire' && perfTier !== 'low', !!prefs.reduceMotion || perfTier === 'mid');
   const acc = normalizeHex(prefs.accent);
   if (acc) {
     root.style.setProperty('--acc', acc);
@@ -2740,6 +3062,14 @@ function setPrefs(patch) {
   _savePrefsTimer = setTimeout(() => { updateMe({ prefs: PREFS }).then(r => { if (r && r.account) ACCOUNT = r.account; }).catch(() => {}); }, 500);
 }
 applyPrefs(PREFS);   // theme the page immediately, before login
+// perf tier changed (auto-detect, dropped frames, or Settings → Performance):
+// re-apply so tier-dependent effects (Fire ambience) follow. Uses the live
+// appearance draft if one is being previewed, else the saved prefs.
+window.addEventListener('sx-perf', () => {
+  try { applyPrefs((typeof _apprDraft === 'object' && _apprDraft && Object.keys(_apprDraft).length) ? { ...PREFS, ..._apprDraft } : PREFS); } catch (e) {}
+  try { if (typeof _perfRefreshSettings === 'function') _perfRefreshSettings(); } catch (e) {}
+});
+window.addEventListener('sx-vplay', (e) => { try { FireFX.hold(e.detail && e.detail.on); } catch (er) {} });
 
 /* NOTES + CODE apps extracted to apps-editors.js (lazy via openLazyApp). */
 

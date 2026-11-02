@@ -126,7 +126,29 @@ function mediaClock({ media, duration, frame, fill, knob, timeEl, onEnd, autopla
   }
   function endPreview() { previewT = null; }
   const api = {
-    play() { playing = true; last = 0; if (media) media.play().catch(() => {}); if (!media) raf = requestAnimationFrame(loop); else { raf = requestAnimationFrame(function m(){ if(!playing) return; paint(); raf = requestAnimationFrame(m); }); } api.onstate && api.onstate(true); },
+    play() {
+      playing = true; last = 0;
+      if (media) media.play().catch(() => {});
+      cancelAnimationFrame(raf);
+      if (!media) raf = requestAnimationFrame(loop);
+      else {
+        // Real playback: the scrubber only needs to track currentTime. Repainting
+        // it every display frame forces a style/layout pass 60–120×/s on top of
+        // video decode; low-end devices refresh it at the perf tier's rate instead
+        // (SxPerf.hz(): 60 / 24 / 8) and skip frames where the time didn't move.
+        let lastPaint = 0, lastT = -1;
+        raf = requestAnimationFrame(function m(ts) {
+          if (!playing) return;
+          const hz = (window.SxPerf && SxPerf.hz()) || 60;
+          if (hz >= 60 || ts - lastPaint >= 1000 / hz) {
+            const t = media.currentTime;
+            if (t !== lastT || previewT != null) { lastT = t; lastPaint = ts; paint(); }
+          }
+          raf = requestAnimationFrame(m);
+        });
+      }
+      api.onstate && api.onstate(true);
+    },
     pause() { playing = false; if (media) media.pause(); cancelAnimationFrame(raf); api.onstate && api.onstate(false); },
     toggle() { playing ? api.pause() : api.play(); },
     seekFrac(fr) { fr = Math.max(0, Math.min(1, fr)); endPreview(); seekTo(fr * dur()); },
@@ -180,11 +202,32 @@ function showSpeedMenu(anchor, clock, labelEl, onPick) {
 }
 
 /* ---------------- VIDEO ---------------- */
+/* A LOCKED video is decrypted entirely in memory (≈3× its size at peak). If that
+   exceeds what this device can safely hold, ask before doing it — on a low-RAM
+   phone the alternative is the browser killing the tab mid-decrypt. Resolves
+   true to proceed. Unlocked videos stream by range and never hit this. */
+function _confirmHeavyDecrypt(f) {
+  if (!f || !f.locked || !window.SxPerf || typeof confirmModal !== 'function') return Promise.resolve(true);
+  const need = (f.size || 0) * 3, budget = SxPerf.memBudget();
+  if (!need || need <= budget) return Promise.resolve(true);
+  return new Promise(resolve => {
+    let decided = false;
+    confirmModal('Large locked video',
+      `${f.name} is ${fmtSize(f.size)}. Locked files are decrypted fully in memory (about ${fmtSize(need)} at peak), which is more than this device can comfortably hold — the browser may freeze or close the tab. Downloading it instead is safer.`,
+      () => { decided = true; resolve(true); }, 'Open anyway');
+    // Cancel / backdrop click just removes the modal; watch for that.
+    const bg = document.body.lastElementChild;
+    const mo = new MutationObserver(() => { if (!bg.isConnected) { mo.disconnect(); if (!decided) resolve(false); } });
+    mo.observe(document.body, { childList: true });
+  });
+}
+
 async function openVideo(id) {
   const f = byId(id);
+  if (!(await _confirmHeavyDecrypt(f))) return;
   const vurl = await _resolveMediaSrc(f);
   const frameInner = vurl
-    ? `<video src="${vurl}" playsinline></video>`
+    ? `<video src="${vurl}" playsinline preload="metadata"></video>`
     : `<div class="ph"><span class="lbl">video · ${fmtDur(f.dur || 0)} · drop a real file to play</span></div>`;
   const el = mountViewer(`${viewerHead(f)}
     <div class="vbody"><div class="stage">
@@ -209,6 +252,8 @@ async function openVideo(id) {
     </div></div>`);
   wireHead(el, f);
   const media = el.querySelector('video');
+  // perf watchdog: dropped-frame tracking + pauses ambience while playing
+  const stopPerfWatch = (media && window.SxPerf) ? SxPerf.watchVideo(media) : () => {};
   const playBtn = el.querySelector('#vplay');
   let handedOff = false;   // true once the <video> is handed to the persistent mini-player
   const clock = mediaClock({
@@ -294,7 +339,7 @@ async function openVideo(id) {
   window.addEventListener('keydown', onSeekKey);
 
   activeViewer.cleanup = () => {
-    if (!handedOff) clock.destroy();   // when minimized, keep the <video> alive in the mini-player
+    if (!handedOff) { clock.destroy(); stopPerfWatch(); }   // when minimized, keep the <video> (and its watchdog) alive in the mini-player
     document.removeEventListener('fullscreenchange', onFsChange);
     window.removeEventListener('keydown', onFsKey);
     window.removeEventListener('keydown', onSeekKey);

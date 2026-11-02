@@ -61,6 +61,7 @@ const ICON = {
   link:   '<path d="M9 17H7A5 5 0 0 1 7 7h2M15 7h2a5 5 0 0 1 0 10h-2M8 12h8"/>',
   database:'<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/>',
   plug:   '<path d="M9 2v6M15 2v6"/><path d="M6 8h12v2a6 6 0 0 1-12 0z"/><path d="M12 16v6"/>',
+  passkey: '<circle cx="9" cy="7.5" r="3.5"/><path d="M3 20v-.5A5.5 5.5 0 0 1 11.6 15"/><circle cx="17.5" cy="13.5" r="2.5"/><path d="M17.5 16v5.5M17.5 19.5h2"/>',
   key:    '<circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3 21 2"/><path d="m16 7 3 3M14 9l3 3"/>',
   user:   '<circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"/>',
   globe:  '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',

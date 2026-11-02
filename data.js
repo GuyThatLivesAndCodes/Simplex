@@ -200,6 +200,14 @@ function twofaBegin() { return apiJSON('/api/me/2fa/begin', { method: 'POST' });
 function twofaVerify(code) { return apiJSON('/api/me/2fa/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) }); }
 function twofaEnable(code, captcha) { return apiJSON('/api/me/2fa/enable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code, captcha }) }); }
 function twofaDisable(code) { return apiJSON('/api/me/2fa/disable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) }); }
+const _pkPost = (url, body) => apiJSON(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+function passkeyList() { return apiJSON('/api/passkeys'); }
+function passkeyRegOptions(password, totp) { return _pkPost('/api/passkeys/register/options', { password, totp }); }
+function passkeyRegVerify(body) { return _pkPost('/api/passkeys/register/verify', body); }
+function passkeyBindOptions(id) { return _pkPost('/api/passkeys/bind/options', { id }); }
+function passkeyBindVerify(body) { return _pkPost('/api/passkeys/bind/verify', body); }
+function passkeyRename(id, label) { return apiJSON('/api/passkeys/' + encodeURIComponent(id), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label }) }); }
+function passkeyDelete(id) { return apiJSON('/api/passkeys/' + encodeURIComponent(id), { method: 'DELETE' }); }
 function captchaNew() { return apiJSON('/api/captcha'); }
 function captchaCheck(id, answer) { return apiJSON('/api/captcha/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, answer }) }); }
 function resetRequest(username) { return apiJSON('/api/reset/request', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username }) }); }
