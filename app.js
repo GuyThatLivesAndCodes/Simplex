@@ -1073,6 +1073,34 @@ function openWhatsNew() {
    object here; the banner, footer, numbering, dates and paging all follow. */
 const WHATS_NEW = [
   {
+    date: '2026-11-02',
+    title: 'The Model Lab — raw, hands-on GGUF inference',
+    dek: `Any <strong>.gguf</strong> model in your Database can now be opened in the <strong>Model Lab</strong>: chat with it or run raw inference with <strong>no system prompt</strong> and nothing from the built-in assistant mixed in. Step through generation one token at a time, see exactly which tokens the model was choosing between, force the one you want, and compare up to four models side by side.`,
+    items: [
+      {
+        icon: 'pulse', tint: 'audio',
+        head: 'Right-click a model → Model Lab',
+        badge: { text: 'New', cls: 'new' },
+        body: `<strong>Chat with model</strong> sends your conversation through the model's own chat template, and nothing else. <strong>Raw inference</strong> sends your prompt word for word. Double-clicking a <code>.gguf</code> opens the Lab too, and the AI app's Local tab has a Lab button.`,
+      },
+      {
+        icon: 'next', tint: 'document',
+        head: 'Token-by-token stepping',
+        body: `<strong>Step</strong> shows the top candidates for the next token with their probabilities. Click one to force it, press <strong>Enter</strong> to accept the sampled token, or click any earlier token to branch from it. Undo covers every step.`,
+      },
+      {
+        icon: 'chart', tint: 'image',
+        head: 'Analytics & warnings',
+        body: `Per-token probability and entropy curves, perplexity, confidence, how often the sampled token was the top pick, and speed. Warnings flag <strong>NaN/Inf</strong> logits, flat distributions, broken probability sums, repetition loops and a nearly full context. You can open the engine log when a model fails.`,
+      },
+      {
+        icon: 'layers', tint: 'model3d',
+        head: 'Compare models side by side',
+        body: `Select up to four <code>.gguf</code> files → <strong>Compare in Model Lab</strong>. Every model gets the same prompt and sampling settings. You get a column for each output, an overlaid confidence chart, a scoreboard, a next-token comparison, and the exact point where the outputs diverge. Export everything as JSON.`,
+      },
+    ],
+  },
+  {
     date: '2026-07-18',
     title: 'The High-Quality Image update — EXR & TIFF support',
     dek: `Simplex now handles <strong>.exr</strong> and <strong>.tif</strong>/<strong>.tiff</strong> — the ultra-high-quality formats used for height, colour and displacement maps. Browsers can't show them, so the server renders a preview; you also get a <strong>3D heightmap viewer</strong> and full <strong>conversion in both directions</strong>.`,
@@ -2910,6 +2938,7 @@ function renderAiView() {
         <button data-scope="local" class="${_aiScope === 'local' ? 'on' : ''}">${svg('cpu', 13)} Local</button>
       </div>
       ${modelSel}
+      ${_aiScope === 'local' && scoped.length ? `<button class="ic-btn" id="aiLabBtn" title="Open in Model Lab — raw inference, token stepper & compare (no system prompt)">${svg('pulse', 15)}</button>` : ''}
       <span class="spacer"></span>
       ${memOn ? `<span class="ai-mem-pill mono" title="${_aiMemory.length} memories in use">${svg('brain', 13)} ${_aiMemory.length}</span>` : ''}
       <button class="ic-btn ${_aiToolsOn ? 'on' : ''}" id="aiToolsBtn" title="Tools ${_aiToolsOn ? 'on — the AI can search, read/write files & make artifacts' : 'off'}">${svg('wrench', 15)}</button>
@@ -2924,6 +2953,7 @@ function renderAiView() {
       <button class="btn ghost ai-stop hidden" id="aiStop" title="Stop">${svg('stop', 16)}</button>
     </div>`;
   const sel = document.getElementById('aiModelSel'); if (sel) sel.onchange = e => { _aiModel = e.target.value; };
+  const labBtn = document.getElementById('aiLabBtn'); if (labBtn) labBtn.onclick = () => openModelLabFor(_aiModel && String(_aiModel).startsWith('local:') ? [_aiModel] : [], { kind: 'chat' });
   document.querySelectorAll('#aiScopeSeg [data-scope]').forEach(b => b.onclick = () => setAiScope(b.dataset.scope));
   const del = document.getElementById('aiDelete'); if (del) del.onclick = () => aiDeleteChat(_aiActive);
   document.getElementById('aiPersonaBtn').onclick = () => { _aiView = 'settings'; renderAiView(); };
@@ -5651,6 +5681,8 @@ function thumbHTML(f) {
   if (f.iconUrl) {
     return `<div class="exe-thumb"><img class="exe-icon lazy-thumb" data-thumb="${esc(f.iconUrl)}" data-fallback="exe" alt=""></div>`;
   }
+  // GGUF language model: a model card instead of a binary "text" snippet
+  if (/\.(gguf|guff)$/i.test(f.name || '')) return `<div class="gguf-thumb"><span class="t-model3d">${svg('brain', 40, 1.3)}</span><span class="mono">GGUF model</span></div>`;
   // document: a text snippet card. Content-backed docs render their first lines
   // inline (no network); blob-backed (uploaded) docs fetch a tiny range lazily.
   if (f.type === 'document') {
@@ -6556,6 +6588,8 @@ function openItem(id) {
     if (_looksLocked(f)) return void unlockItemForUse(f).then(pass => { if (pass != null) go('browse', { folder: id }); });
     return go('browse', { folder: id });
   }
+  // .gguf language model: open it in the Model Lab (chat) instead of dumping binary as text
+  if (isLabModelFile(f)) return void openModelLabFor([id], { kind: 'chat' });
   // give the open viewer a real URL (deep-linkable / refresh-safe / Back closes it).
   // Only when opened while browsing the Database — viewers opened from other apps
   // (e.g. an AI file preview) keep their own context. Mark that we pushed a history
@@ -6642,6 +6676,19 @@ function setSearchScope(scope) {
   render();
 }
 
+/* ---------- MODEL LAB entry (lazy) ---------- */
+// A vault file the Model Lab can run: an unlocked, non-trashed .gguf, for accounts with AI.
+function isLabModelFile(f) {
+  return !!(f && f.type !== 'folder' && !f.trashed && /\.(gguf|guff)$/i.test(f.name || '') && !f.locked && !_looksLocked(f)
+    && !SHARE.active && typeof ACCOUNT !== 'undefined' && ACCOUNT && (ACCOUNT.is_admin || ACCOUNT.can_ai));
+}
+// ids are vault file ids (→ "local:user:<id>") or full local model ids.
+async function openModelLabFor(ids, opts = {}) {
+  try { await loadFeature('model-lab'); } catch (e) { toast('Model Lab failed to load', 'close'); return; }
+  const modelIds = (ids || []).map(i => String(i).startsWith('local:') ? i : 'local:user:' + i);
+  window.openModelLab({ ...opts, ids: modelIds });
+}
+
 /* ---------- CONTEXT MENU ---------- */
 let ctxEl = null;
 let ctxSubs = [];   // open fly-out submenu panels (e.g. "Convert to…"), torn down by hideCtx
@@ -6711,6 +6758,20 @@ function showCtx(x, y, id, fromBtn) {
       if (f.type === 'image' && !_looksLocked(f) && !f.locked && typeof openHeightmap === 'function') {
         items.push({ ic: 'model3d', label: 'View as heightmap...', fn: () => void openHeightmap(id) });
       }
+    }
+    // GGUF language models: raw inference / chat / side-by-side compare in the Model Lab
+    // (no system prompt, separate from the AI assistant). Needs the AI permission.
+    if (!multi && isLabModelFile(f)) {
+      items.push({ ic: 'brain', label: 'Model Lab', sub: [
+        { head: 'Raw — no system prompt' },
+        { ic: 'send', label: 'Chat with model', fn: () => openModelLabFor([id], { kind: 'chat' }) },
+        { ic: 'pulse', label: 'Raw inference & token stepper', fn: () => openModelLabFor([id], { kind: 'raw' }) },
+        { ic: 'layers', label: 'Compare with other models', fn: () => openModelLabFor([id], { mode: 'compare' }) },
+      ] });
+    }
+    if (multi) {
+      const labIds = ids.filter(i => isLabModelFile(byId(i)));
+      if (labIds.length >= 2) items.push({ ic: 'layers', label: `Compare ${Math.min(labIds.length, 4)} models in Model Lab`, fn: () => openModelLabFor(labIds.slice(0, 4), { mode: 'compare' }) });
     }
     // UE4 save files (.sav/.save): open the GVAS property editor
     if (!multi && f.type !== 'folder' && /\.(sav|save)$/i.test(f.name) && !_looksLocked(f) && !f.locked) {

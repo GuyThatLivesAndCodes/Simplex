@@ -515,6 +515,159 @@ async function chatStream({ id, store, messages, system, maxTokens, temperature,
   touch(inst);
 }
 
+/* ============================================================
+   MODEL LAB — raw, template-free access for the inference lab
+   ------------------------------------------------------------
+   Everything here bypasses the assistant entirely: no persona / memory / system
+   prompt is ever added. The lab talks to llama-server's native endpoints
+   (/tokenize, /detokenize, /apply-template, /completion with n_probs) so the UI
+   can step token-by-token, force a chosen token, and inspect the probability
+   distribution at every position.
+   ============================================================ */
+const ggufMeta = require('./gguf-meta');
+const META_CAP = intEnv('SX_LAB_META_BYTES', 48 * 1024 * 1024);   // header bytes read for metadata
+const LAB_ENDPOINTS = new Set(['tokenize', 'detokenize', 'apply-template', 'completion']);
+const metaCache = new Map();   // id -> { sig, meta }   (small; ids are per-file)
+
+/* Read the first `cap` plaintext bytes of a model without loading it. */
+async function readModelHead(id, store, cap) {
+  const p = parseId(id);
+  if (!p) throw new Error('not a local model id');
+  if (p.source === 'server') {
+    const { path: full } = await resolvePath(id, store);
+    const st = fs.statSync(full);
+    const n = Math.min(cap, st.size);
+    const fh = await fs.promises.open(full, 'r');
+    try { const b = Buffer.alloc(n); await fh.read(b, 0, n, 0); return { buf: b, sig: `${st.size}:${st.mtimeMs}`, size: st.size }; }
+    finally { await fh.close(); }
+  }
+  if (p.source === 'user') {
+    if (!store) throw new Error('no vault for user model');
+    const row = store.getById(p.key);
+    if (!row) throw new Error('model not found in your files');
+    const name = store.decName(row) || '';
+    if (!GGUF_RE.test(name)) throw new Error('that file is not a .gguf model');
+    const sig = `${row.size || 0}:${row.date || row.updated || ''}`;
+    // already decrypted for a running engine? read the plaintext cache directly
+    const cached = path.join(CACHE_DIR, `u_${store.id}_${p.key}.gguf`);
+    if (fs.existsSync(cached) && fs.statSync(cached).size > 0) {
+      const size = fs.statSync(cached).size, n = Math.min(cap, size);
+      const fh = await fs.promises.open(cached, 'r');
+      try { const b = Buffer.alloc(n); await fh.read(b, 0, n, 0); return { buf: b, sig, size }; }
+      finally { await fh.close(); }
+    }
+    const enc = store.blobPath(row);
+    if (!fs.existsSync(enc)) throw new Error('model blob missing');
+    const head = vault.readBlobHeader(enc);
+    if (!head) throw new Error('bad model blob header');
+    const end = Math.min(cap, head.size) - 1;
+    const r = vault.decryptBlobRange(enc, store.keys, 0, end, head);
+    if (!r || !r.stream) throw new Error('cannot read model blob');
+    const parts = [];
+    await new Promise((resolve, reject) => {
+      r.stream.on('data', (c) => parts.push(c));
+      r.stream.on('end', resolve);
+      r.stream.on('error', reject);
+    });
+    return { buf: Buffer.concat(parts), sig, size: head.size };
+  }
+  throw new Error('unknown local model source');
+}
+
+/* GGUF header summary (architecture, params, quant mix, ctx, vocab). Cached. */
+async function modelMeta(id, store) {
+  const { buf, sig, size } = await readModelHead(id, store, META_CAP);
+  const hit = metaCache.get(id);
+  if (hit && hit.sig === sig) return hit.meta;
+  const meta = { ...ggufMeta.summarize(ggufMeta.parseGgufHeader(buf)), fileSize: size };
+  metaCache.set(id, { sig, meta });
+  if (metaCache.size > 64) metaCache.delete(metaCache.keys().next().value);
+  return meta;
+}
+
+/* POST a JSON body to one of the whitelisted native llama-server endpoints. */
+async function labJSON(id, store, endpoint, body, { signal, onStage } = {}) {
+  if (!LAB_ENDPOINTS.has(endpoint)) throw new Error('endpoint not allowed');
+  const inst = await ensureRunning(id, store, { onStage });
+  touch(inst);
+  let r;
+  try {
+    r = await fetch(`http://127.0.0.1:${inst.port}/${endpoint}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}), signal,
+    });
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw e;
+    throw new Error('model server unreachable' + (inst.proc && inst.proc.exitCode != null ? ' (it exited)' : ''));
+  }
+  const text = await r.text();
+  touch(inst);
+  if (!r.ok) throw new Error(`model ${r.status}: ${labErrText(text)}`);
+  try { return JSON.parse(text); } catch (e) { throw new Error('model returned invalid JSON'); }
+}
+
+function labErrText(t) {
+  try { const j = JSON.parse(t); return String((j.error && (j.error.message || j.error)) || t).slice(0, 300); }
+  catch (e) { return String(t || '').slice(0, 300); }
+}
+
+/* Model server properties (n_ctx, special tokens, template) — best effort. */
+async function labProps(id, store, { onStage } = {}) {
+  const inst = await ensureRunning(id, store, { onStage });
+  touch(inst);
+  try {
+    const r = await fetch(`http://127.0.0.1:${inst.port}/props`, { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) return { templateFallback: !!inst.templateFallback };
+    const j = await r.json();
+    const g = j.default_generation_settings || {};
+    return {
+      n_ctx: g.n_ctx ?? j.n_ctx ?? null,
+      bos_token: j.bos_token ?? null,
+      eos_token: j.eos_token ?? null,
+      total_slots: j.total_slots ?? null,
+      build: j.build_info || null,
+      hasTemplate: !!j.chat_template,
+      templateFallback: !!inst.templateFallback,
+    };
+  } catch (e) { return { templateFallback: !!inst.templateFallback }; }
+}
+
+/* Streamed raw completion with per-token probabilities. Calls onChunk(obj) for
+   every SSE JSON object llama-server emits (token chunks + the final stop chunk). */
+async function labStream(id, store, body, { signal, onStage, onChunk } = {}) {
+  const inst = await ensureRunning(id, store, { onStage });
+  touch(inst);
+  const r = await fetch(`http://127.0.0.1:${inst.port}/completion`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, stream: true }), signal,
+  });
+  if (!r.ok) throw new Error(`model ${r.status}: ${labErrText(await r.text().catch(() => ''))}`);
+  let buf = '';
+  for await (const chunk of r.body) {
+    if (signal && signal.aborted) break;
+    buf += Buffer.from(chunk).toString('utf8');
+    const lines = buf.split('\n'); buf = lines.pop() ?? '';
+    for (const line of lines) {
+      const data = line.replace(/^data: ?/, '').trim();
+      if (!data || data === '[DONE]') continue;
+      let obj; try { obj = JSON.parse(data); } catch (e) { continue; }
+      if (obj && obj.error) throw new Error(labErrText(JSON.stringify(obj)));
+      onChunk(obj);
+    }
+    touch(inst);
+  }
+  touch(inst);
+}
+
+/* Last lines of a model server's log, with absolute paths reduced to basenames
+   (so the lab can show WHY a model failed without leaking server layout). */
+function labLogTail(id, lines = 40) {
+  const inst = loaded.get(id);
+  if (!inst) return null;
+  return (inst.log || []).join('').split('\n').filter(Boolean).slice(-lines)
+    .map(l => l.replace(/(?:[A-Za-z]:)?[\\/][^\s'"]*[\\/]([^\\/\s'"]+)/g, '…/$1'));
+}
+
 /* User-facing message while the thermal guard is cooling the box down. */
 function thermalMessage() {
   const mins = Math.max(1, Math.ceil(thermal.cooldownRemainingMs() / 60000));
@@ -551,6 +704,8 @@ module.exports = {
   isLocalModel, parseId,
   ensureRunning, chatStream,
   unload, unloadAll, isLoaded,
+  // Model Lab (raw inference, no system prompt)
+  modelMeta, labJSON, labProps, labStream, labLogTail,
   status,
   // thermal safety net (admin reset + state + threshold config pass-through)
   thermalState: () => thermal.state(),
