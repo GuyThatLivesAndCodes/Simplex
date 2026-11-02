@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Simplex Visual — Play</title>
+<style>
+  :root { --bg:#0e0f12; --panel:#16181d; --line:#2a2d34; --ink:#e9eaed; --dim:#9aa0aa; --acc:#4ea1ff; --play:#3ec98a; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; overflow: hidden; }
+  #bar { position: fixed; top: 0; left: 0; right: 0; height: 40px; display: flex; align-items: center; gap: 12px;
+    padding: 0 12px; background: var(--panel); border-bottom: 1px solid var(--line); z-index: 10; }
+  #bar .title { font-size: 13px; font-weight: 600; }
+  #bar .spacer { flex: 1; }
+  #bar button { height: 26px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--line);
+    background: transparent; color: var(--dim); font-size: 12px; cursor: pointer; }
+  #bar button:hover { color: var(--ink); border-color: #3a3e46; }
+  #bar .badge { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--play);
+    border: 1px solid color-mix(in srgb, var(--play) 40%, transparent); border-radius: 5px; padding: 2px 7px; }
+  #stage { position: fixed; inset: 40px 0 0 0; overflow: hidden; }
+  #world { position: absolute; inset: 0; }
+  #msg { position: fixed; inset: 40px 0 0 0; display: none; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; text-align: center; padding: 24px; }
+  #msg h2 { margin: 0; font-size: 18px; }
+  #msg p { margin: 0; color: var(--dim); font-size: 13px; max-width: 380px; line-height: 1.5; }
+  .vr-inst { will-change: transform; }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <span class="badge">Playing</span>
+    <span class="title" id="title">Simplex Visual</span>
+    <span class="spacer"></span>
+    <button id="restart">Restart</button>
+    <button id="stop">Stop</button>
+  </div>
+  <div id="stage"><div id="world"></div></div>
+  <div id="msg"><h2 id="msgH"></h2><p id="msgP"></p></div>
+
+  <script src="/visual-runtime.js"></script>
+  <script nonce="__CSP_NONCE__">
+  (function () {
+    var PROJECT_ID = "__PROJECT_ID__";
+    var world = document.getElementById('world');
+    var titleEl = document.getElementById('title');
+    var msg = document.getElementById('msg'), msgH = document.getElementById('msgH'), msgP = document.getElementById('msgP');
+    var runtime = null, doc = null;
+
+    function showMsg(h, p) { msg.style.display = 'flex'; msgH.textContent = h; msgP.textContent = p; }
+
+    function boot() {
+      fetch('/api/visual/projects/' + encodeURIComponent(PROJECT_ID), { headers: { 'Accept': 'application/json' } })
+        .then(function (r) {
+          if (r.status === 401) throw { code: 'auth' };
+          if (r.status === 404) throw { code: 'missing' };
+          if (!r.ok) throw { code: 'err' };
+          return r.json();
+        })
+        .then(function (rec) {
+          doc = rec && rec.data;
+          if (!doc || !doc.scene) throw { code: 'empty' };
+          titleEl.textContent = (rec.name || 'Simplex Visual') + ' — Playing';
+          document.title = (rec.name || 'Simplex Visual') + ' — Play';
+          start();
+        })
+        .catch(function (e) {
+          if (e && e.code === 'auth') showMsg('Sign in required', 'Open this project from the Simplex Visual editor, or sign in to your account first, then press Play again.');
+          else if (e && e.code === 'missing') showMsg('Project not found', 'This project no longer exists or you do not have access to it.');
+          else if (e && e.code === 'empty') showMsg('Nothing to play', 'This project has no scene yet. Place some actors in the editor first.');
+          else showMsg('Could not load', 'Something went wrong loading the project. Try again from the editor.');
+        });
+    }
+
+    function start() {
+      if (!window.VisualRuntime) { showMsg('Runtime failed to load', 'Reload the page and try again.'); return; }
+      if (runtime) { runtime.stop(); runtime = null; }
+      msg.style.display = 'none';
+      // deep-copy the doc so runtime mutation never touches the fetched original on restart
+      var fresh = JSON.parse(JSON.stringify(doc));
+      runtime = window.VisualRuntime.createRuntime(fresh, world, {});
+    }
+
+    document.getElementById('restart').onclick = function () { start(); };
+    document.getElementById('stop').onclick = function () { if (runtime) { runtime.stop(); runtime = null; } window.close(); showMsg('Stopped', 'You can close this tab.'); };
+    window.addEventListener('keydown', function (e) { if (e.key === 'Escape') { if (runtime) { runtime.stop(); runtime = null; } showMsg('Stopped', 'Press Restart to play again.'); } });
+
+    boot();
+  })();
+  </script>
+</body>
+</html>
