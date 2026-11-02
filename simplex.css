@@ -4395,3 +4395,7 @@ img.mu-cover.lazy { background: var(--card); }
   .pk-acts:has(.btn:not(.icon-only)) { width: 100%; }
   .pk-acts .btn:not(.icon-only) { flex: 1 1 auto; }
 }
+
+/* GGUF model tile (file grid) — opens in the Model Lab */
+.gguf-thumb { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; opacity: 0.75; }
+.gguf-thumb .mono { font-size: 10.5px; color: var(--ink-faint); letter-spacing: 0.06em; text-transform: uppercase; }

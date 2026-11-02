@@ -56,6 +56,7 @@ const LAZY_MODULES = {
   'apps-discord': ['/apps-discord.js'],          // Discord Bot admin panel
   'apps-trading': ['/apps-trading.js'],          // Trading app UI screen
   'apps-music': ['/apps-music.js'],              // Music library/playlist screen + Jam (Player/EQ stay core)
+  'model-lab': ['/model-lab.js'],                // Model Lab — raw GGUF inference / token stepper / compare (window.openModelLab)
 };
 function loadFeature(name) {
   const urls = LAZY_MODULES[name];

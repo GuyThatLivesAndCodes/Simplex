@@ -6105,6 +6105,149 @@ app.post('/api/ai/local/thermal/reset', requireAdmin, (req, res) => {
   res.json({ ok: true, thermal: localAI.thermalState() });
 });
 
+/* ============================================================
+   MODEL LAB — raw GGUF inference for researchers
+   ------------------------------------------------------------
+   Separate from /api/ai/chat on purpose: NO persona, memory, tools or system
+   prompt is ever injected. The client sends either a verbatim prompt string or
+   explicit token ids, and gets back every generated token with its top-K
+   probability distribution so it can step, force tokens and spot NaNs.
+   ============================================================ */
+function labModelId(req, res, raw) {
+  if (!requireAi(req, res)) return null;
+  const id = String(raw || '').trim();
+  if (!localAI.isLocalModel(id)) { res.status(400).json({ error: 'not a local model' }); return null; }
+  if (!localAI.engineAvailable()) { res.status(503).json({ error: 'Local AI engine is not available on this server' }); return null; }
+  // must be one of the models THIS account can see (server folder or own vault)
+  let ok = false;
+  try { ok = localAI.listModels(req.store).some(m => m.id === id); } catch (e) {}
+  if (!ok) { res.status(404).json({ error: 'model not found' }); return null; }
+  return id;
+}
+const labNum = (v, lo, hi, d) => { const n = +v; return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
+const labErr = (res, e) => res.status(e && /not found/i.test(e.message) ? 404 : 500).json({ error: (e && e.message) || 'model error' });
+
+app.get('/api/ai/lab/meta', async (req, res) => {
+  const id = labModelId(req, res, req.query.id); if (!id) return;
+  try { res.json({ meta: await localAI.modelMeta(id, req.store), loaded: localAI.isLoaded(id) }); }
+  catch (e) { labErr(res, e); }
+});
+
+/* Load (or confirm loaded) — can take a while on a cold start; client disables its timeout. */
+app.post('/api/ai/lab/load', async (req, res) => {
+  const id = labModelId(req, res, req.body && req.body.id); if (!id) return;
+  try { res.json({ ok: true, props: await localAI.labProps(id, req.store) }); }
+  catch (e) { labErr(res, e); }
+});
+
+app.post('/api/ai/lab/tokenize', async (req, res) => {
+  const b = req.body || {};
+  const id = labModelId(req, res, b.id); if (!id) return;
+  const text = String(b.text ?? '');
+  if (text.length > 400_000) return res.status(413).json({ error: 'prompt too long' });
+  try {
+    const j = await localAI.labJSON(id, req.store, 'tokenize', {
+      content: text, add_special: b.add_special !== false, parse_special: b.parse_special !== false, with_pieces: true,
+    });
+    res.json({ tokens: Array.isArray(j.tokens) ? j.tokens : [] });
+  } catch (e) { labErr(res, e); }
+});
+
+app.post('/api/ai/lab/template', async (req, res) => {
+  const b = req.body || {};
+  const id = labModelId(req, res, b.id); if (!id) return;
+  const messages = (Array.isArray(b.messages) ? b.messages : []).slice(0, 200)
+    .filter(m => m && ['system', 'user', 'assistant'].includes(m.role))
+    .map(m => ({ role: m.role, content: String(m.content ?? '').slice(0, 200_000) }));
+  if (!messages.length) return res.status(400).json({ error: 'add at least one message' });
+  try {
+    const j = await localAI.labJSON(id, req.store, 'apply-template', { messages, add_generation_prompt: b.add_generation_prompt !== false });
+    res.json({ prompt: String(j.prompt ?? '') });
+  } catch (e) { labErr(res, e); }
+});
+
+app.get('/api/ai/lab/log', (req, res) => {
+  const id = labModelId(req, res, req.query.id); if (!id) return;
+  res.json({ lines: localAI.labLogTail(id) || [] });
+});
+
+/* Streamed raw generation. SSE events:
+     {type:'stage',stage}                                  model loading progress
+     {type:'token', id, text, bytes, logprob|prob, top:[{id,text,bytes,logprob|prob}], ms}
+     {type:'done', stop_type, truncated, timings, tokens_evaluated, tokens_cached}
+     {type:'error', error}                                                       */
+app.post('/api/ai/lab/generate', async (req, res) => {
+  const b = req.body || {};
+  const id = labModelId(req, res, b.id); if (!id) return;
+  let prompt;
+  if (Array.isArray(b.prompt)) {
+    if (b.prompt.length > 131072 || !b.prompt.every(t => Number.isInteger(t) && t >= 0 && t < 4_000_000)) return res.status(400).json({ error: 'bad token ids' });
+    prompt = b.prompt;
+  } else {
+    prompt = String(b.prompt ?? '');
+    if (prompt.length > 400_000) return res.status(413).json({ error: 'prompt too long' });
+  }
+  const post = !!b.post_sampling_probs;
+  const body = {
+    prompt,
+    n_predict: Math.round(labNum(b.n_predict, 1, 4096, 1)),
+    n_probs: Math.round(labNum(b.n_probs, 1, 50, 10)),
+    temperature: labNum(b.temperature, 0, 5, 0.7),
+    top_k: Math.round(labNum(b.top_k, 0, 1000, 40)),
+    top_p: labNum(b.top_p, 0, 1, 0.95),
+    min_p: labNum(b.min_p, 0, 1, 0.05),
+    repeat_penalty: labNum(b.repeat_penalty, 0.5, 3, 1),
+    seed: Number.isInteger(+b.seed) && +b.seed >= 0 ? +b.seed : -1,
+    ignore_eos: !!b.ignore_eos,
+    post_sampling_probs: post,
+    return_tokens: true,
+    cache_prompt: true,
+  };
+  try { logAnalytics(req.store, 'ai_message', { provider: 'local' }); } catch (e) {}
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders && res.flushHeaders();
+  const send = (obj) => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) {} };
+  const ac = new AbortController();
+  let closed = false;
+  res.on('close', () => { if (!res.writableEnded) { closed = true; try { ac.abort(); } catch (e) {} } });
+  const beat = setInterval(() => { try { if (!res.writableEnded) res.write(': ping\n\n'); } catch (e) {} }, 15_000);
+  const pick = (p) => p == null ? null : ({ id: p.id, text: p.token, bytes: p.bytes, logprob: p.logprob, prob: p.prob });
+  let last = Date.now(), sent = 0;
+  try {
+    await localAI.labStream(id, req.store, body, {
+      signal: ac.signal,
+      onStage: (stage) => { if (!closed) { send({ type: 'stage', stage }); last = Date.now(); } },
+      onChunk: (c) => {
+        if (closed) return;
+        const probs = Array.isArray(c.completion_probabilities) ? c.completion_probabilities : [];
+        for (const p of probs) {
+          const now = Date.now();
+          const top = (post ? p.top_probs : p.top_logprobs) || p.probs || [];
+          send({ type: 'token', ...pick(p), top: top.map(pick), ms: now - last });
+          last = now; sent++;
+        }
+        // a token chunk without probabilities (shouldn't happen with n_probs) — still surface the id
+        if (!probs.length && Array.isArray(c.tokens) && c.tokens.length && !c.stop) {
+          for (const t of c.tokens) { send({ type: 'token', id: t, text: c.content || '', top: [], ms: Date.now() - last, noProbs: true }); last = Date.now(); sent++; }
+        }
+        if (c.stop) send({
+          type: 'done', stop_type: c.stop_type || null, truncated: !!c.truncated, timings: c.timings || null,
+          tokens_evaluated: c.tokens_evaluated ?? null, tokens_cached: c.tokens_cached ?? null, sent,
+        });
+      },
+    });
+  } catch (e) {
+    if (!closed) send({ type: 'error', error: (e && e.name === 'AbortError') ? 'stopped' : ((e && e.message) || 'generation failed') });
+  } finally {
+    clearInterval(beat);
+    if (!closed) { try { res.end(); } catch (e) {} }
+  }
+});
+
 /* per-account saved conversations (encrypted) */
 app.get('/api/ai/chats', (req, res) => res.json(req.store.chatsList()));
 app.get('/api/ai/chats/:id', (req, res) => { const ch = req.store.chatGet(req.params.id); if (!ch) return res.status(404).json({ error: 'not found' }); res.json(ch); });
